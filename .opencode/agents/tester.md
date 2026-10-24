@@ -1,6 +1,6 @@
 ---
 description: Ejecuta build, tests y análisis estático REALES y devuelve evidencia objetiva (comandos exactos, códigos de salida, tests fallidos, errores de compilación). Úsalo para verificar un cambio antes de darlo por terminado o para diagnosticar un fallo.
-mode: subagent
+mode: all
 permissions:
   - action: edit
     resource: "*"

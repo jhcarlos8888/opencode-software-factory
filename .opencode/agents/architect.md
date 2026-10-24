@@ -1,6 +1,6 @@
 ---
 description: Inspecciona un proyecto existente (estructura, dependencias, pruebas, puntos de entrada) y devuelve un plan de implementación concreto con archivos afectados y criterios de aceptación. Úsalo ANTES de programar cuando la tarea toque varios archivos o el alcance no esté claro.
-mode: subagent
+mode: all
 permissions:
   - action: edit
     resource: "*"

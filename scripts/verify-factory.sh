@@ -104,10 +104,10 @@ jq -e '
     any(.[]; .id == $id and .mode == $mode);
 
   has_agent("build"; "primary")
-  and has_agent("architect"; "subagent")
-  and has_agent("implementer"; "subagent")
-  and has_agent("reviewer"; "subagent")
-  and has_agent("tester"; "subagent")
+  and has_agent("architect"; "all")
+  and has_agent("implementer"; "all")
+  and has_agent("reviewer"; "all")
+  and has_agent("tester"; "all")
   and has_agent("cloud-arbiter"; "subagent")
 ' "$agents_tmp" >/dev/null
 
