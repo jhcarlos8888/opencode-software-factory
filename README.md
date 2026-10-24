@@ -1,3 +1,4 @@
+
 # OpenCode Software Factory
 
 Repositorio fuente de la fábrica de software multiagente.
@@ -44,3 +45,4 @@ La disponibilidad y los límites dependen de OpenRouter.
 - Revisar los cambios mediante Git.
 - Proteger operaciones destructivas y despliegues mediante aprobación.
 - Separar hallazgos comprobados de hipótesis.
+
