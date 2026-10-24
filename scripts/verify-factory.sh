@@ -6,7 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 echo "== 1. Validar configuración JSON =="
 jq -e '
   .default_agent == "build"
-  and .model == "openrouter/cohere/north-mini-code:free"
+  and .model == "openrouter/thinkingmachines/inkling:free"
 ' opencode.json >/dev/null
 echo "PASS: configuración del repositorio válida"
 
@@ -87,7 +87,7 @@ jq -e --arg cfg "$PWD/opencode.json" '
     and .path == $cfg
     and .info.default_agent == "build"
     and .info.model.providerID == "openrouter"
-    and .info.model.model == "cohere/north-mini-code:free"
+    and .info.model.model == "thinkingmachines/inkling:free"
   )
 ' "$config_tmp" >/dev/null
 echo "PASS: OpenCode carga la configuración del repositorio"

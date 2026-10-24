@@ -34,7 +34,7 @@ modifican mediante esta captura.
 
 ## Modelo inicial
 
-`openrouter/cohere/north-mini-code:free`
+`openrouter/thinkingmachines/inkling:free`
 
 La disponibilidad y los límites dependen de OpenRouter.
 
