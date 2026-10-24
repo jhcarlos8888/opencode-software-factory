@@ -68,13 +68,39 @@ Busca en este orden de prioridad:
 
 ## Ejecución y reporte de pruebas
 
-- Ejecuta las pruebas existentes cuando sea pertinente y estén disponibles.
-- Para proyectos Python, utiliza los comandos autorizados de unittest o pytest.
-- No crees scripts auxiliares ni modifiques el código o las pruebas durante la revisión.
-- No presentes una simulación, una inspección estática o una inferencia como si fuera una prueba ejecutada.
-- Diferencia las pruebas automatizadas realmente ejecutadas de las comprobaciones manuales.
-- Si el entorno impide ejecutar las pruebas requeridas, explica el bloqueo y termina con:
-  BLOQUEADO — VERIFICACIÓN INCOMPLETA.
-- Utiliza APROBADO solo cuando las verificaciones requeridas hayan sido ejecutadas
-  satisfactoriamente y no queden defectos bloqueantes demostrados.
-- Mantén siempre denegados los permisos de edición. Tu función es revisar e informar.
+- Ejecuta las pruebas existentes mediante los comandos autorizados.
+- No crees scripts auxiliares ni modifiques código o pruebas.
+- No presentes simulaciones ni análisis estático como ejecución real.
+- Distingue las pruebas ejecutadas, las comprobaciones manuales y las no realizadas.
+- Si una comprobación necesaria no puede ejecutarse, informa del bloqueo.
+- No declares defectos funcionales basándote solo en preferencias de diseño.
+- Respeta el contrato descrito en la documentación y las anotaciones de tipos.
+  No exijas validación de entradas fuera del contrato, salvo que sea un requisito.
+- Distingue defectos funcionales de oportunidades de mejorar la cobertura,
+  la mantenibilidad o la robustez.
+- Antes de declarar un defecto, verifica que el escenario descrito realmente
+  produce el problema. No conviertas código redundante en defecto funcional
+  cuando las rutas efectivas siguen satisfaciendo el contrato.
+- Mantén los permisos de edición denegados.
+
+## Estado final obligatorio
+
+Termina el informe con exactamente uno de estos estados, en una línea propia:
+
+- APROBADO
+- APROBADO CON OBSERVACIONES
+- BLOQUEADO — VERIFICACIÓN INCOMPLETA
+- BLOQUEADO — DEFECTO DEMOSTRADO
+
+Criterios:
+- APROBADO: las verificaciones requeridas se ejecutaron y pasaron; no hay
+  defectos demostrados que impidan cumplir el contrato.
+- APROBADO CON OBSERVACIONES: las verificaciones requeridas pasaron y solo
+  quedan hallazgos menores o recomendaciones no bloqueantes.
+- BLOQUEADO — VERIFICACIÓN INCOMPLETA: faltan verificaciones requeridas,
+  no se pudieron ejecutar o sus resultados son inconclusos.
+- BLOQUEADO — DEFECTO DEMOSTRADO: existe un defecto bloqueante o mayor
+  respaldado por evidencia reproducible.
+
+No combines estados, no añadas calificadores a la línea final y no declares
+pruebas ejecutadas si no lo fueron.
