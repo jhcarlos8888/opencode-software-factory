@@ -1,0 +1,17 @@
+# Secretos y configuración local
+.env
+.env.*
+!.env.example
+*.local.json
+
+# Salidas temporales
+*.log
+*.tmp
+coverage/
+build/
+dist/
+node_modules/
+
+# Copias de seguridad
+*.bak
+*.bak-*
