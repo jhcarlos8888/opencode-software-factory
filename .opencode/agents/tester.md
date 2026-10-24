@@ -5,6 +5,9 @@ permissions:
   - action: edit
     resource: "*"
     effect: deny
+  - action: shell
+    resource: "./gradlew test *"
+    effect: allow
 ---
 
 Actúas como ingeniero de calidad de software. Tu trabajo es producir EVIDENCIA, no opiniones.

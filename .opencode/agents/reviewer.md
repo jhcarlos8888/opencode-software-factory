@@ -30,6 +30,9 @@ permissions:
     resource: "pytest *"
     effect: allow
   - action: shell
+    resource: "./gradlew test *"
+    effect: allow
+  - action: shell
     resource: "python3 -c *"
     effect: deny
   - action: shell
@@ -77,15 +80,15 @@ Busca en este orden de prioridad:
 
 ## Ejecución y reporte de pruebas
 
-- Para proyectos Python, ejecuta únicamente `python3 -m unittest -v`.
-- No uses `python3 -c`, `python -c`, `subprocess`, código inline ni herramientas
-  `execute` para realizar comprobaciones adicionales.
-- Después de ejecutar unittest, no realices más llamadas de ejecución.
-- Si necesitas validar casos que no están cubiertos por los tests, informa de esa
-  limitación; no simules resultados ni afirmes que fueron comprobados.
+- Lee README y los archivos de construcción para identificar el comando real.
+- Para Python, usa únicamente los comandos de unittest o pytest autorizados.
+- Para proyectos Gradle, ejecuta `./gradlew test --rerun-tasks`.
+- No ejecutes comandos que no estén autorizados expresamente en tus permisos.
+- No uses herramientas execute, subprocess ni código inline para eludir permisos.
+- Ejecuta las pruebas pertinentes una vez y registra el resultado real.
+- Distingue pruebas ejecutadas, inspección estática y cobertura pendiente.
 - No crees scripts auxiliares ni modifiques archivos.
-- Distingue las pruebas ejecutadas, las comprobaciones manuales y las pendientes.
-- No reportes una preferencia de diseño como defecto funcional.
+- No conviertas recomendaciones de mantenimiento o cobertura en defectos funcionales.
 - Respeta el contrato documentado y las anotaciones de tipos.
 - Mantén los permisos de edición denegados.
 
