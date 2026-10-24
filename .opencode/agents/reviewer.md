@@ -29,6 +29,15 @@ permissions:
   - action: shell
     resource: "pytest *"
     effect: allow
+  - action: shell
+    resource: "python3 -c *"
+    effect: deny
+  - action: shell
+    resource: "python -c *"
+    effect: deny
+  - action: execute
+    resource: "*"
+    effect: deny
   - action: playwright_*
     resource: "*"
     effect: deny
@@ -68,19 +77,16 @@ Busca en este orden de prioridad:
 
 ## Ejecución y reporte de pruebas
 
-- Ejecuta las pruebas existentes mediante los comandos autorizados.
-- No crees scripts auxiliares ni modifiques código o pruebas.
-- No presentes simulaciones ni análisis estático como ejecución real.
-- Distingue las pruebas ejecutadas, las comprobaciones manuales y las no realizadas.
-- Si una comprobación necesaria no puede ejecutarse, informa del bloqueo.
-- No declares defectos funcionales basándote solo en preferencias de diseño.
-- Respeta el contrato descrito en la documentación y las anotaciones de tipos.
-  No exijas validación de entradas fuera del contrato, salvo que sea un requisito.
-- Distingue defectos funcionales de oportunidades de mejorar la cobertura,
-  la mantenibilidad o la robustez.
-- Antes de declarar un defecto, verifica que el escenario descrito realmente
-  produce el problema. No conviertas código redundante en defecto funcional
-  cuando las rutas efectivas siguen satisfaciendo el contrato.
+- Para proyectos Python, ejecuta únicamente `python3 -m unittest -v`.
+- No uses `python3 -c`, `python -c`, `subprocess`, código inline ni herramientas
+  `execute` para realizar comprobaciones adicionales.
+- Después de ejecutar unittest, no realices más llamadas de ejecución.
+- Si necesitas validar casos que no están cubiertos por los tests, informa de esa
+  limitación; no simules resultados ni afirmes que fueron comprobados.
+- No crees scripts auxiliares ni modifiques archivos.
+- Distingue las pruebas ejecutadas, las comprobaciones manuales y las pendientes.
+- No reportes una preferencia de diseño como defecto funcional.
+- Respeta el contrato documentado y las anotaciones de tipos.
 - Mantén los permisos de edición denegados.
 
 ## Estado final obligatorio
