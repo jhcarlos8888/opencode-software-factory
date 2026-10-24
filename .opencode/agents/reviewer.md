@@ -80,15 +80,14 @@ Busca en este orden de prioridad:
 
 ## Ejecución y reporte de pruebas
 
-- Lee README y los archivos de construcción para identificar el comando real.
-- Para Python, usa únicamente los comandos de unittest o pytest autorizados.
-- Para proyectos Gradle, ejecuta `./gradlew test --rerun-tasks`.
-- No ejecutes comandos que no estén autorizados expresamente en tus permisos.
-- No uses herramientas execute, subprocess ni código inline para eludir permisos.
-- Ejecuta las pruebas pertinentes una vez y registra el resultado real.
+- Identifica los comandos de verificación leyendo README y los archivos de build.
+- Para Python, utiliza únicamente las pruebas autorizadas de unittest o pytest.
+- Para Gradle, ejecuta `./gradlew test --rerun-tasks`.
+- No ejecutes comandos fuera de tus permisos ni utilices execute para eludirlos.
+- Registra el resultado real del comando y distingue tareas de build de tests individuales.
 - Distingue pruebas ejecutadas, inspección estática y cobertura pendiente.
 - No crees scripts auxiliares ni modifiques archivos.
-- No conviertas recomendaciones de mantenimiento o cobertura en defectos funcionales.
+- No conviertas recomendaciones de mantenimiento en defectos funcionales.
 - Respeta el contrato documentado y las anotaciones de tipos.
 - Mantén los permisos de edición denegados.
 
