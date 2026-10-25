@@ -14,10 +14,22 @@ ALLOWED = (
     ".opencode/commands",
     ".opencode/skills",
     ".agents/skills",
+    "opencode.json",
 )
+OPTIONAL_TARGETS = ("AGENTS.md",)
+OPTIONAL_SOURCES = {"AGENTS.md": "templates/AGENTS.md"}
 EXPECTED_AGENTS = {
     "build", "architect", "implementer",
     "reviewer", "tester", "cloud-arbiter",
+}
+EXPECTED_MODEL = ("nvidia", "gpt-oss-20b")
+EXPECTED_AGENT_MODES = {
+    "build": "primary",
+    "architect": "all",
+    "implementer": "all",
+    "reviewer": "all",
+    "tester": "all",
+    "cloud-arbiter": "subagent",
 }
 
 
@@ -55,6 +67,12 @@ def source_files():
     result = {}
     for prefix in ALLOWED:
         base = ROOT / prefix
+        if base.is_symlink():
+            raise ValueError(f"No se admiten enlaces simbólicos: {base}")
+        if base.is_file():
+            # Las entradas de ALLOWED que son archivos (p. ej. opencode.json).
+            result[prefix] = base.read_bytes()
+            continue
         if not base.is_dir():
             continue
         for src in sorted(base.rglob("*")):
@@ -77,12 +95,29 @@ def source_files():
     return result
 
 
+def optional_sources():
+    """Fuentes opcionales: solo se instalan si el destino todavía no existe."""
+    result = {}
+    for rel, src_name in OPTIONAL_SOURCES.items():
+        src = ROOT / src_name
+        if src.is_symlink():
+            raise ValueError(f"No se admiten enlaces simbólicos: {src}")
+        if not src.is_file():
+            raise ValueError(f"Fuente opcional no encontrada: {src}")
+        data = src.read_bytes()
+        if not data:
+            raise ValueError(f"Fuente opcional vacía: {src}")
+        result[rel] = data
+    return result
+
+
 def safe_relative(value):
     p = PurePosixPath(value)
     if p.is_absolute() or ".." in p.parts:
         raise ValueError(f"Ruta insegura en manifiesto: {value}")
     if not any(
-        value.startswith(prefix + "/") for prefix in ALLOWED
+        value == prefix or value.startswith(prefix + "/")
+        for prefix in ALLOWED + OPTIONAL_TARGETS
     ):
         raise ValueError(f"Ruta fuera de los directorios permitidos: {value}")
     return p
@@ -151,9 +186,21 @@ def install(raw_target, dry_run=False):
             else:
                 copies.append((name, dest, data))
 
+        # Opcionales (AGENTS.md): nunca son conflicto. Si el destino ya existe
+        # (archivo, enlace o lo que sea) se conserva y no se registra en el
+        # manifiesto; solo se crea cuando falta.
+        for name, data in optional_sources().items():
+            rel = safe_relative(name)
+            check_ancestors(target, rel)
+            dest = target.joinpath(*rel.parts)
+            if dest.exists() or dest.is_symlink():
+                skipped.append(name)
+            else:
+                copies.append((name, dest, data))
+
         print(f"Destino: {target}")
         print(f"Archivos nuevos: {len(copies)}")
-        print(f"Archivos idénticos que se conservarán: {len(skipped)}")
+        print(f"Archivos idénticos o preexistentes que se conservarán: {len(skipped)}")
 
         if conflicts:
             print("\nCONFLICTOS: no se instaló ningún archivo.")
@@ -221,7 +268,11 @@ def install(raw_target, dry_run=False):
 
         print("\nInstalación completada.")
         print(f"Manifiesto de control: {manifest}")
-        print("No se modificaron opencode.json ni AGENTS.md.")
+        print(
+            "opencode.json solo se crea si falta o si coincide con el de la "
+            "fábrica; nunca se sobrescribe. AGENTS.md solo se crea si falta "
+            "y nunca se sobrescribe."
+        )
         return 0
 
     except Exception as exc:
@@ -333,6 +384,162 @@ def uninstall(raw_target):
         return 1
 
 
+def doctor(raw_target):
+    """Comprueba que la fábrica funciona en el proyecto consumidor."""
+    import subprocess
+
+    try:
+        target = resolve_target(raw_target)
+    except Exception as exc:
+        print(f"ERROR: {exc}")
+        return 1
+
+    config_path = target / "opencode.json"
+    if not config_path.is_file():
+        print(f"ERROR: no existe {config_path}")
+        print("Instala la fábrica en el proyecto antes de ejecutar 'doctor'.")
+        return 1
+
+    findings = 0
+
+    def check(ok, message):
+        nonlocal findings
+        if ok:
+            print(f"PASS: {message}")
+        else:
+            findings += 1
+            print(f"ERROR: {message}")
+
+    def run_debug(subcommand):
+        try:
+            proc = subprocess.run(
+                ["opencode", "debug", subcommand],
+                cwd=str(target),
+                capture_output=True,
+                text=True,
+                timeout=180,
+            )
+        except FileNotFoundError:
+            print("ERROR: no existe el comando 'opencode' en este entorno.")
+            return None
+        except subprocess.TimeoutExpired:
+            print(f"ERROR: 'opencode debug {subcommand}' superó los 180 s.")
+            return None
+        if proc.returncode != 0:
+            if proc.stderr:
+                print(proc.stderr, end="")
+            print(
+                f"ERROR: 'opencode debug {subcommand}' terminó con el "
+                f"código {proc.returncode}."
+            )
+            return None
+        return proc.stdout
+
+    agents_stdout = run_debug("agents")
+    if agents_stdout is None:
+        return 1
+    try:
+        agents = json.loads(agents_stdout)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: 'opencode debug agents' no devolvió JSON: {exc}")
+        return 1
+
+    # En un directorio recién creado, la primera invocación de `opencode
+    # debug agents` devuelve una lista vacía con código 0 (comportamiento
+    # observado del CLI). Se reintenta una vez antes de darlo por vacío.
+    if isinstance(agents, list) and not agents:
+        print(
+            "NOTA: 'opencode debug agents' devolvió [] (primera invocación "
+            "en este directorio); se reintenta una vez."
+        )
+        agents_stdout = run_debug("agents")
+        if agents_stdout is None:
+            return 1
+        try:
+            agents = json.loads(agents_stdout)
+        except json.JSONDecodeError as exc:
+            print(f"ERROR: 'opencode debug agents' no devolvió JSON: {exc}")
+            return 1
+
+    by_id = {}
+    if isinstance(agents, list):
+        by_id = {
+            item.get("id"): item
+            for item in agents
+            if isinstance(item, dict)
+        }
+
+    for agent_id in sorted(EXPECTED_AGENTS):
+        expected_mode = EXPECTED_AGENT_MODES[agent_id]
+        agent = by_id.get(agent_id)
+        check(agent is not None, f"agente '{agent_id}' reconocido")
+        if agent is None:
+            continue
+        mode = agent.get("mode")
+        check(
+            mode == expected_mode,
+            f"agente '{agent_id}' en modo {expected_mode} "
+            f"(obtenido: {mode})",
+        )
+        model = agent.get("model") or {}
+        provider = model.get("providerID")
+        # El CLI usa model.id dentro del objeto model de cada agente.
+        name = model.get("model", model.get("id"))
+        check(
+            provider == EXPECTED_MODEL[0],
+            f"agente '{agent_id}' con proveedor {EXPECTED_MODEL[0]} "
+            f"(obtenido: {provider})",
+        )
+        check(
+            name == EXPECTED_MODEL[1],
+            f"agente '{agent_id}' con modelo {EXPECTED_MODEL[1]} "
+            f"(obtenido: {name})",
+        )
+
+    config_stdout = run_debug("config")
+    if config_stdout is None:
+        return 1
+    try:
+        documents = json.loads(config_stdout)
+    except json.JSONDecodeError as exc:
+        print(f"ERROR: 'opencode debug config' no devolvió JSON: {exc}")
+        return 1
+
+    document = None
+    if isinstance(documents, list):
+        for entry in documents:
+            if (
+                isinstance(entry, dict)
+                and entry.get("path") == str(config_path)
+            ):
+                document = entry
+                break
+    check(
+        document is not None,
+        f"OpenCode carga {config_path}",
+    )
+    info = (document or {}).get("info") or {}
+    default_agent = info.get("default_agent")
+    check(
+        default_agent == "build",
+        f"default_agent == 'build' en {config_path} "
+        f"(obtenido: {default_agent})",
+    )
+    model_info = info.get("model") or {}
+    model_name = model_info.get("model")
+    check(
+        model_name == EXPECTED_MODEL[1],
+        f"modelo {EXPECTED_MODEL[1]} en {config_path} "
+        f"(obtenido: {model_name})",
+    )
+
+    if findings:
+        print(f"\nDoctor: {findings} hallazgo(s).")
+        return 2
+    print("\nDoctor: la fábrica funciona en este proyecto.")
+    return 0
+
+
 def self_test():
     # Pruebas aisladas: no tocan tus proyectos ni el estado habitual del usuario.
     import tempfile
@@ -346,35 +553,77 @@ def self_test():
         project = base / "project"
         project.mkdir()
         (project / "README.md").write_text("README del usuario\n")
-        (project / "opencode.json").write_text('{"model":"propio"}\n')
+        factory_config = (ROOT / "opencode.json").read_bytes()
+        agents_template = (ROOT / "templates/AGENTS.md").read_bytes()
 
         try:
+            # Caso: proyecto SIN opencode.json → se crea con el de la fábrica.
             assert install(project, dry_run=True) == 0
             assert not (project / ".opencode/agents/build.md").exists()
+            assert not (project / "opencode.json").exists()
+            assert not (project / "AGENTS.md").exists()
 
             assert install(project) == 0
             assert (project / ".opencode/agents/build.md").is_file()
-            assert (project / "opencode.json").read_text() == '{"model":"propio"}\n'
+            assert (project / "opencode.json").read_bytes() == factory_config
             assert (project / "README.md").read_text() == "README del usuario\n"
-            assert not (project / "AGENTS.md").exists()
+            # AGENTS.md ausente → se crea con la plantilla de la fábrica.
+            assert (project / "AGENTS.md").read_bytes() == agents_template
 
             installed = project / ".opencode/agents/build.md"
             installed.write_text(installed.read_text() + "\n# Modificación del usuario\n")
             assert uninstall(project) == 2
             assert installed.exists()
+            # opencode.json era copia intacta creada por la fábrica: se retira.
+            assert not (project / "opencode.json").exists()
 
             installed.unlink()
             assert uninstall(project) == 0
             assert not (project / ".opencode/agents/architect.md").exists()
-            print("PASS: instalación, preservación, reversión y archivos modificados")
+            # AGENTS.md lo creó la fábrica y nadie lo modificó: se retira.
+            assert not (project / "AGENTS.md").exists()
+            print(
+                "PASS: instalación, preservación, reversión y archivos "
+                "modificados (AGENTS.md ausente se crea y se revierte)"
+            )
 
+            # Caso: AGENTS.md PREEXISTENTE → no es conflicto, se conserva
+            # intacto y la desinstalación no lo retira.
+            own_project = base / "own-agents"
+            own_project.mkdir()
+            own_md = own_project / "AGENTS.md"
+            own_content = "Instrucciones propias del equipo\n"
+            own_md.write_text(own_content)
+
+            assert install(own_project) == 0
+            assert own_md.read_text() == own_content
+            assert uninstall(own_project) == 0
+            assert own_md.read_text() == own_content
+            print("PASS: AGENTS.md preexistente se conserva sin cambios")
+
+            # Caso: opencode.json IDÉNTICO al de la fábrica → skipped/ok,
+            # se conserva y la desinstalación no lo toca (no lo creó la fábrica).
+            same_project = base / "same"
+            same_project.mkdir()
+            (same_project / "opencode.json").write_bytes(factory_config)
+
+            assert install(same_project) == 0
+            assert (same_project / "opencode.json").read_bytes() == factory_config
+            assert uninstall(same_project) == 0
+            assert (same_project / "opencode.json").read_bytes() == factory_config
+            print("PASS: opencode.json idéntico se conserva sin cambios")
+
+            # Caso: opencode.json DISTINTO → CONFLICTO (código 2),
+            # el archivo del proyecto queda intacto y nada se instala.
             conflict_project = base / "conflict"
             conflict_project.mkdir()
+            (conflict_project / "opencode.json").write_text('{"model":"propio"}\n')
             custom = conflict_project / ".opencode/agents/build.md"
             custom.parent.mkdir(parents=True)
             custom.write_text("Agente personalizado preexistente\n")
 
             assert install(conflict_project) == 2
+            assert (conflict_project / "opencode.json").read_text() == '{"model":"propio"}\n'
             assert custom.read_text() == "Agente personalizado preexistente\n"
             assert not (conflict_project / ".opencode/commands/implementar.md").exists()
             print("PASS: los conflictos abortan sin sobrescribir el proyecto")
@@ -402,6 +651,12 @@ def main():
     p_uninstall = sub.add_parser("uninstall", help="Retirar archivos sin cambios")
     p_uninstall.add_argument("target")
 
+    p_doctor = sub.add_parser(
+        "doctor",
+        help="Comprobar que la fábrica funciona en el proyecto consumidor",
+    )
+    p_doctor.add_argument("target")
+
     sub.add_parser("self-test", help="Probar el instalador en directorios temporales")
 
     args = parser.parse_args()
@@ -411,6 +666,8 @@ def main():
         return status(args.target)
     if args.command == "uninstall":
         return uninstall(args.target)
+    if args.command == "doctor":
+        return doctor(args.target)
     return self_test()
 
 

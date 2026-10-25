@@ -20,10 +20,61 @@ Repositorio fuente de la fábrica de software multiagente.
 - `config/global-inline-agents.snapshot.json`: instantánea de los agentes
   `build` y `reverse` definidos actualmente en la configuración global.
 - `opencode.json`: configuración predeterminada de este repositorio.
+- `templates/AGENTS.md`: plantilla de instrucciones que la fábrica instala en
+  los proyectos consumidores.
 
 ## Estado de migración
 
-Esta es una captura inicial, no un instalador.
+El flujo real es un instalador reversible controlado por Git:
+
+- `python3 scripts/factory.py install <proyecto>`: instala agentes, skills,
+  comandos, `opencode.json` y (solo si falta) `AGENTS.md` en el proyecto
+  consumidor.
+- `python3 scripts/factory.py status <proyecto>`: revisa los archivos instalados.
+- `python3 scripts/factory.py uninstall <proyecto>`: retira únicamente los
+  archivos sin modificar.
+- `python3 scripts/factory.py doctor <proyecto>`: comprueba que la fábrica
+  funciona realmente en el proyecto consumidor usando el CLI de OpenCode
+  (`opencode debug agents` y `opencode debug config`): los 6 agentes
+  reconocidos con su modo, proveedor y modelo correctos, y la carga del
+  `opencode.json` del proyecto con `default_agent: build` y el modelo esperado.
+  Devuelve 0 si todo PASS, 2 si hay hallazgos y 1 si hay un error técnico.
+- `python3 scripts/factory.py self-test`: prueba el instalador en directorios
+  temporales aislados.
+
+### Modelo fijado
+
+La fábrica fija `opencode/mimo-v2.6-flash-free` en `opencode.json` y en el
+frontmatter de los seis agentes de `.opencode/agents/`.
+
+### Migración de la configuración
+
+- `provider` → `providers` (la clave `provider` está deprecada según el
+  esquema oficial de OpenCode).
+- `compaction.prune` → `compaction.keep.tokens: 15000` (`prune` está deprecado).
+- La configuración actual **no** usa `providers`: el modelo es el integrado de
+  OpenCode. El bloque `providers` solo hace falta al volver a OpenRouter
+  (ver más abajo).
+
+### Instalación de `opencode.json` con protección `CONFLICTO`
+
+- Si el proyecto no tiene `opencode.json`, se crea con el contenido de la
+  fábrica y se registra en el manifiesto.
+- Si el `opencode.json` del proyecto es idéntico al de la fábrica, se omite
+  (`skipped`) y se conserva.
+- Si el `opencode.json` del proyecto es distinto, el instalador entra en
+  estado `CONFLICTO` y devuelve el código 2 sin instalar nada: el archivo del
+  proyecto jamás se sobrescribe.
+
+### Instalación de `AGENTS.md` (plantilla opcional)
+
+- Si el proyecto **no** tiene `AGENTS.md`, se crea con la plantilla
+  `templates/AGENTS.md` y se registra en el manifiesto.
+- Si el proyecto **ya** tiene `AGENTS.md` (archivo, enlace o lo que sea), se
+  conserva intacto: no es un conflicto, no aborta la instalación y no se
+  registra en el manifiesto. Nunca se sobrescribe.
+- `uninstall` retira el `AGENTS.md` creado por la fábrica solo si nadie lo
+  modificó; si el usuario lo editó, se conserva.
 
 Los agentes `build` y `reverse` siguen activos en la configuración global.
 La instantánea se conserva para migrarlos de forma controlada más adelante.
@@ -32,11 +83,39 @@ No modificar ni instalar automáticamente esa instantánea.
 La configuración global, los MCP y las credenciales existentes no se
 modifican mediante esta captura.
 
-## Modelo inicial
+## Modelo de referencia
 
-`mistral/codestral-2508`
+`nvidia/gpt-oss-20b` (GPT-OSS 20B de NVIDIA, modelo abierto hospedado por OpenCode). Es el modelo fijado en `opencode.json` y en los seis agentes.
 
-La disponibilidad y los límites dependen del proveedor Mistral y del plan asociado.
+El cambio desde `opencode/mimo-v2.6-flash-free` se realizó porque el modelo GPT-OSS 20B ofrece mejor calidad para tareas de ingeniería y está disponible sin necesidad de créditos externos.
+
+## Cómo volver a OpenRouter (cuando haya crédito)
+
+Cuando el workspace vuelva a tener crédito, se puede restaurar el modelo
+anterior con este bloque en `opencode.json`:
+
+```json
+{
+  "model": "openrouter/xiaomi/mimo-v2.6-flash",
+  "default_agent": "build",
+  "providers": {
+    "openrouter": {
+      "models": {
+        "xiaomi/mimo-v2.6-flash": {
+          "limit": { "context": 87378, "output": 3500 }
+        }
+      },
+      "options": { "max_tokens": 3500 }
+    }
+  }
+}
+```
+
+Advertencia: sin `limit.output` ni `options.max_tokens`, OpenCode solicita el
+valor por defecto de **131072** tokens de salida, que es exactamente lo que
+provoca el error de créditos anterior. Además hay que volver a fijar
+`openrouter/xiaomi/mimo-v2.6-flash` en el frontmatter `model:` de los seis
+agentes de `.opencode/agents/` (hoy fijan `opencode/mimo-v2.6-flash-free`).
 
 ## Principios de calidad
 
@@ -72,33 +151,58 @@ Archivo: `.opencode/skills/project-discovery/SKILL.md`.
 El agente `tester` debe informar los comandos ejecutados, sus códigos de
 salida, los resultados observados y las pruebas que no se ejecutaron.
 Debe diferenciar la verificación estructural de la ejecución real de las
-pruebas del proyecto. La edición de archivos permanece denegada y la ejecución
-de comandos de shell requiere autorización por defecto, salvo las reglas
-explícitas configuradas.
+pruebas del proyecto. La edición de archivos permanece denegada.
+
+Permisos de shell actuales del `tester`:
+
+- **Sin aprobación** (`effect: allow`): lectura de Git (`git status`, `git
+  diff`, `git log`, `git show`), `bash scripts/verify-factory.sh`,
+  `python3 scripts/factory.py self-test|status|doctor`, y los builds y tests
+  habituales: Gradle (`./gradlew test|build|clean test`, `gradle test`),
+  Maven (`mvn test|verify`, `mvn -B test|verify`), Python
+  (`python3 -m pytest`, `pytest`, `python3 -m unittest`,
+  `python3 -m compileall`, `ruff check`), Node/TS (`npm test`,
+  `npm run test`, `npm ci`, `npm install`, `npx tsc`, `tsc`, `eslint`,
+  `node --test`) y `make test|build`.
+- **Denegados explícitamente** (`effect: deny`, y por tanto prevalecen):
+  `sudo`, `rm`, `rm -rf`, `git push`, `git commit`, `git checkout`,
+  `git reset`, `git restore`, `curl`, `wget`, y toda edición de archivos.
+- **Todo lo demás** sigue pidiendo aprobación (`shell * -> ask`).
 
 Archivo: `.opencode/agents/tester.md`.
 
 ### Modelo y verificación de la fábrica
 
 La configuración del repositorio y el script `scripts/verify-factory.sh`
-usan `mistral/codestral-2508` como modelo configurado en lugar de
-`openrouter/thinkingmachines/inkling:free`.
+usan `opencode/mimo-v2.6-flash-free` como modelo configurado.
 
-El script `bash scripts/verify-factory.sh` valida la configuración JSON,
-la estructura de agentes y skills, la carga de la configuración de OpenCode
-y el reconocimiento de los agentes. Esta comprobación es estructural:
-no sustituye las pruebas del proyecto consumidor ni demuestra por sí sola
-que las respuestas de los agentes sean correctas.
+El script `bash scripts/verify-factory.sh` valida la configuración JSON, el
+modelo fijado en los seis agentes, el newline final de los archivos
+instalables, la plantilla `templates/AGENTS.md`, la estructura de agentes y
+skills, la carga de la configuración de OpenCode, el reconocimiento de los
+agentes y, al final, el self-test del instalador. Esta comprobación es
+estructural: no sustituye las pruebas del proyecto consumidor ni demuestra
+por sí sola que las respuestas de los agentes sean correctas.
 
 ### Validaciones registradas
 
-Según la salida observada en la sesión del 24 de octubre de 2026:
+Ejecutadas el 24 de octubre de 2026 en este repositorio, con sus códigos de
+salida reales:
 
-- `bash scripts/verify-factory.sh`: finalizó correctamente; todas las
-  comprobaciones mostradas terminaron en `PASS`.
-- `python3 scripts/factory.py self-test`: finalizó con `SELF-TEST COMPLETADO`.
-  La salida confirma pruebas de instalación, preservación, reversión y
-  detección de conflictos sin sobrescribir archivos diferentes.
+- `jq -e . opencode.json` → código 0 (JSON válido).
+- `python3 -m py_compile scripts/factory.py` → código 0 (sin errores).
+- `python3 scripts/factory.py self-test` → código 0, salida
+  `SELF-TEST COMPLETADO`. Incluye los cuatro casos: instalación con
+  `AGENTS.md` ausente (se crea y la desinstalación lo retira),
+  `AGENTS.md` preexistente (se conserva intacto, no es conflicto),
+  `opencode.json` idéntico y conflictos que abortan sin sobrescribir.
+- `python3 scripts/factory.py doctor <proyecto recién instalado>` → código 0
+  con 27 líneas `PASS` y 0 `ERROR`. Se observó que la primera invocación de
+  `opencode debug agents` en un directorio nuevo devuelve `[]`; `doctor`
+  lo detecta, lo informa y reintenta una vez.
+- `python3 scripts/factory.py doctor <directorio sin opencode.json>` →
+  código 1 con mensaje explicativo.
+- `bash scripts/verify-factory.sh` → código 0, todos los pasos en `PASS`.
 - Estas validaciones no equivalen a ejecutar las pruebas de un proyecto Java
   ni a verificar la calidad de todas las respuestas generadas por los agentes.
 
@@ -113,6 +217,27 @@ Antes de instalar o sincronizar cambios en un consumidor, se debe revisar
 el estado del destino y preservar sus archivos propios, su configuración
 `opencode.json` y cualquier modificación ajena. No se deben eliminar archivos
 sin verificar su procedencia y obtener autorización cuando exista duda.
+
+### Nueva skill: metric-collector
+
+Se ha añadido la skill `metric-collector` en `.opencode/skills/metric-collector/SKILL.md`
+para que los agentes recopilen métricas de ejecución (tiempo de build, cobertura,
+número de archivos, etc.). La skill está incluida en la validación de
+`scripts/verify-factory.sh`.
+
+### Proyectos de prueba incluidos
+
+Este repositorio ahora contiene proyectos de ejemplo para validar la instalación
+de la fábrica en distintos stacks:
+
+- `springboot-gradle/` – proyecto Java mínimo con Gradle (`build.gradle`).
+- `springboot-maven/` – proyecto Java mínimo con Maven (`pom.xml`).
+- `typescript/` – proyecto TypeScript con `package.json` y `tsconfig.json`.
+- `python/` – proyecto Python con `pyproject.toml` y tests con `pytest`.
+
+Estos proyectos pueden usarse como destino del instalador:
+`python3 scripts/factory.py install <ruta-proyecto>` y luego
+`python3 scripts/factory.py doctor <ruta-proyecto>`.
 
 ### Pendientes
 

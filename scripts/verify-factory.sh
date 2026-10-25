@@ -6,9 +6,73 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 echo "== 1. Validar configuración JSON =="
 jq -e '
   .default_agent == "build"
-  and .model == "mistral/codestral-2508"
+  and .model == "nvidia/gpt-oss-20b"
+  and (has("provider") | not)
+  and .compaction.auto == true
+  and .compaction.keep.tokens == 15000
+  and ((.compaction | has("prune")) | not)
 ' opencode.json >/dev/null
 echo "PASS: configuración del repositorio válida"
+
+echo
+echo "== 1b. Validar modelo fijado en los agentes =="
+agent_models=0
+for agent_file in .opencode/agents/*.md; do
+    if grep -q '^model: nvidia/gpt-oss-20b' "$agent_file"; then
+        agent_models=$((agent_models + 1))
+    fi
+done
+if [ "$agent_models" -ne 6 ]; then
+    echo "ERROR: se esperaban 6 agentes con el modelo fijado; encontrados: $agent_models"
+    exit 1
+fi
+echo "PASS: los 6 agentes fijan opencode/mimo-v2.6-flash-free"
+
+echo
+echo "== 1c. Validar newline final =="
+newline_targets=()
+while IFS= read -r -d '' target_file; do
+    newline_targets+=("$target_file")
+done < <(
+    printf '%s\0' opencode.json .gitignore templates/AGENTS.md
+    find .opencode/agents .opencode/commands .opencode/skills .agents/skills \
+        -type f -name '*.md' -print0
+)
+if [ "${#newline_targets[@]}" -eq 0 ]; then
+    echo "ERROR: no se encontraron archivos que comprobar"
+    exit 1
+fi
+for target_file in "${newline_targets[@]}"; do
+    if [ "$(tail -c1 "$target_file" | xxd -p)" != "0a" ]; then
+        echo "ERROR: falta el newline final en $target_file"
+        exit 1
+    fi
+done
+echo "PASS: newline final correcto en ${#newline_targets[@]} archivos"
+
+echo
+echo "== 1d. Validar plantilla AGENTS.md =="
+if [ ! -f templates/AGENTS.md ]; then
+    echo "ERROR: falta la plantilla templates/AGENTS.md"
+    exit 1
+fi
+if [ ! -s templates/AGENTS.md ]; then
+    echo "ERROR: templates/AGENTS.md está vacío"
+    exit 1
+fi
+if [ "$(tail -c1 templates/AGENTS.md | xxd -p)" != "0a" ]; then
+    echo "ERROR: falta el newline final en templates/AGENTS.md"
+    exit 1
+fi
+if ! grep -q "Instrucciones del proyecto" templates/AGENTS.md; then
+    echo "ERROR: templates/AGENTS.md no contiene 'Instrucciones del proyecto'"
+    exit 1
+fi
+if cmp -s templates/AGENTS.md AGENTS.md; then
+    echo "ERROR: templates/AGENTS.md es idéntica al AGENTS.md de la raíz"
+    exit 1
+fi
+echo "PASS: plantilla AGENTS.md válida y distinta del AGENTS.md de la fábrica"
 
 echo
 echo "== 2. Validar estructura de agentes y skills =="
@@ -45,7 +109,7 @@ for path in sorted(agent_dir.glob("*.md")):
 required_skills = {
     "implementation-plan", "independent-review",
     "project-discovery", "systematic-debugging",
-    "test-and-repair"
+    "test-and-repair", "metric-collector"
 }
 skills_dir = root / ".opencode" / "skills"
 actual_skills = {
@@ -86,8 +150,8 @@ jq -e --arg cfg "$PWD/opencode.json" '
     .type == "document"
     and .path == $cfg
     and .info.default_agent == "build"
-    and .info.model.providerID == "mistral"
-    and .info.model.model == "codestral-2508"
+    and .info.model.providerID == "nvidia"
+    and .info.model.model == "gpt-oss-20b"
   )
 ' "$config_tmp" >/dev/null
 echo "PASS: OpenCode carga la configuración del repositorio"
@@ -114,5 +178,21 @@ jq -e '
 echo "PASS: coordinador y cinco agentes especializados reconocidos"
 
 echo
-echo "== 5. Verificación completada =="
+echo "== 5. Ejecutar self-test del instalador =="
+selftest_out="$(mktemp)"
+trap 'rm -f "$config_tmp" "$agents_tmp" "$errors_tmp" "$selftest_out"' EXIT
+if ! python3 scripts/factory.py self-test >"$selftest_out" 2>&1; then
+    echo "ERROR: 'python3 scripts/factory.py self-test' devolvió un código distinto de 0"
+    tail -20 "$selftest_out"
+    exit 1
+fi
+if ! grep -q "SELF-TEST COMPLETADO" "$selftest_out"; then
+    echo "ERROR: la salida del self-test no contiene 'SELF-TEST COMPLETADO'"
+    tail -20 "$selftest_out"
+    exit 1
+fi
+echo "PASS: self-test del instalador completado (SELF-TEST COMPLETADO)"
+
+echo
+echo "== 6. Verificación completada =="
 echo "Este script no ejecuta pruebas del proyecto ni consume llamadas al modelo."

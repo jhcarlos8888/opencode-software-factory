@@ -15,3 +15,7 @@ node_modules/
 # Copias de seguridad
 *.bak
 *.bak-*
+
+# Python
+__pycache__/
+*.pyc
