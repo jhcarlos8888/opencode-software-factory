@@ -2,6 +2,40 @@
 description: Implementa cambios de código siguiendo un plan, con modificaciones pequeñas, tests añadidos y verificación ejecutada. Úsalo para escribir o modificar código cuando ya existe un plan o la tarea es directa.
 mode: all
 model: opencode-go/mimo-v2.6-flash
+permissions:
+  - action: shell
+    resource: "sudo *"
+    effect: deny
+  - action: shell
+    resource: "git push *"
+    effect: deny
+  - action: shell
+    resource: "git commit *"
+    effect: deny
+  - action: shell
+    resource: "git checkout *"
+    effect: deny
+  - action: shell
+    resource: "git reset *"
+    effect: deny
+  - action: shell
+    resource: "git restore *"
+    effect: deny
+  - action: shell
+    resource: "curl *"
+    effect: deny
+  - action: shell
+    resource: "wget *"
+    effect: deny
+  - action: shell
+    resource: "rm -rf *"
+    effect: deny
+  - action: shell
+    resource: "rm -r *"
+    effect: deny
+  - action: shell
+    resource: "rm -fr *"
+    effect: deny
 ---
 
 Actúas como ingeniero de software responsable de una implementación mantenible.

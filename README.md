@@ -49,9 +49,13 @@ aparece marcado explícitamente como *no ejecutado*.
 - **Stacks soportados**: el instalador es agnóstico del stack (copia agentes,
   comandos y skills sin interpretar el proyecto). Los permisos de verificación
   sin aprobación cubren Java (Maven/Gradle), Python (pytest, unittest, ruff),
-  Node/TypeScript (npm, tsc, eslint) y `make`. El repositorio incluye proyectos
-  de prueba de cuatro stacks: `springboot-gradle/`, `springboot-maven/`,
-  `typescript/` y `python/`.
+  Node/TypeScript (npm, tsc, eslint) y `make`. Los cuatro stacks soportados
+  por la fábrica —Java/Gradle, Java/Maven, TypeScript y Python— se validan
+  instalando la fábrica en cualquier proyecto consumidor de ese stack. Los
+  antiguos proyectos de prueba que este repositorio incluía
+  (`springboot-gradle/`, `springboot-maven/`, `typescript/` y `python/`) fueron
+  **eliminados**: ningún script depende de ellos y el `self-test` trabaja con
+  directorios temporales aislados, por lo que no aportaban nada.
 - Sin plan de modelo conectado la instalación funciona, pero los agentes no
   podrán responder: conecta con `/connect` → **OpenCode Go** antes de delegar.
 - Docker ausente implica que Testcontainers y cualquier prueba que necesite
@@ -555,7 +559,8 @@ Gradle 8.14.5 + JDK 17.0.20 del PATH):
 | `./gradlew dependencyCheckAnalyze` | `1` | `Task 'dependencyCheckAnalyze' not found...` (idem) |
 
 Ejecutado sobre una **copia** de `springboot-maven/` en `/tmp` (Maven 3.9.16,
-proyecto de prueba que solo declara el plugin compilador):
+proyecto de prueba que solo declara el plugin compilador; el directorio de
+origen se eliminó posteriormente del repo —la copia se hizo cuando existía—):
 
 | Comando | Código | Resultado observado |
 | --- | --- | --- |
@@ -836,17 +841,21 @@ skills disponibles; se les añadió `---`/`name`/`description` y ahora cargan.
 
 ### Proyectos de prueba incluidos
 
-Este repositorio ahora contiene proyectos de ejemplo para validar la instalación
-de la fábrica en distintos stacks:
+Este repositorio **ya no incluye** proyectos de ejemplo: los directorios que
+existieron (`springboot-gradle/`, `springboot-maven/`, `typescript/` y
+`python/`) se eliminaron porque ningún script de la fábrica depende de ellos.
 
-- `springboot-gradle/` – proyecto Java mínimo con Gradle (`build.gradle`).
-- `springboot-maven/` – proyecto Java mínimo con Maven (`pom.xml`).
-- `typescript/` – proyecto TypeScript con `package.json` y `tsconfig.json`.
-- `python/` – proyecto Python con `pyproject.toml` y tests con `pytest`.
+Cómo se valida hoy la instalación en distintos stacks:
 
-Estos proyectos pueden usarse como destino del instalador:
-`python3 scripts/factory.py install <ruta-proyecto>` y luego
-`python3 scripts/factory.py doctor <ruta-proyecto>`.
+- **Aislado y reproducible**: `python3 scripts/factory.py self-test` crea
+  directorios temporales propios (no usa ningún directorio del repo), instala,
+  comprueba la preservación de ficheros del consumidor y revierte, con salida
+  `SELF-TEST COMPLETADO` y código `0`.
+- **Sobre un proyecto consumidor real**: `python3 scripts/factory.py install
+  <ruta-proyecto>` y luego `python3 scripts/factory.py doctor <ruta-proyecto>`
+  sobre cualquier proyecto del stack que se quiera comprobar. La guía de
+  validación documenta ya el ejemplo del demo Gradle
+  (`/tmp/opencode/factory-demo/factory-demo`) con sus comandos y resultados.
 
 ### Pendientes
 
@@ -861,7 +870,9 @@ Estos proyectos pueden usarse como destino del instalador:
   sus informes y códigos de salida reales. Hoy solo se ejecutó lo que el
   demo Gradle soporta (`build`, `check`, `jacocoTestReport` → 0; los cuatro
   tasks de análisis → 1 por no estar declarados) y, en Maven, plugins
-  resueltos por prefijo sobre una copia de `springboot-maven/`.
+  resueltos por prefijo sobre una copia de `springboot-maven/` (el directorio
+  de pruebas se eliminó posteriormente del repo; la copia se hizo cuando
+  existía).
 - Instalar y ejecutar una herramienta SAST/secretos (p. ej. `semgrep`) para
   validar `security-scan` de extremo a extremo: ninguna está instalada en
   esta máquina (`command -v` → no encontrado).
