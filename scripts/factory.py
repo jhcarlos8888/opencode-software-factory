@@ -387,6 +387,7 @@ def uninstall(raw_target):
 def doctor(raw_target):
     """Comprueba que la fábrica funciona en el proyecto consumidor."""
     import subprocess
+    import time
 
     try:
         target = resolve_target(raw_target)
@@ -444,14 +445,35 @@ def doctor(raw_target):
         print(f"ERROR: 'opencode debug agents' no devolvió JSON: {exc}")
         return 1
 
-    # En un directorio recién creado, la primera invocación de `opencode
-    # debug agents` devuelve una lista vacía con código 0 (comportamiento
-    # observado del CLI). Se reintenta una vez antes de darlo por vacío.
-    if isinstance(agents, list) and not agents:
+    # En un directorio recién instalado el servicio de OpenCode tarda en
+    # cargar la configuración de esa ubicación: la primera invocación puede
+    # devolver [] o solo los agentes globales (sin los del proyecto y sin
+    # modelo). Se reintenta con espera hasta que aparezcan todos los agentes
+    # esperados, porque informar hallazgos con una carga a medias sería un
+    # falso negativo.
+    max_agent_attempts = 5
+    expected_ids = set(EXPECTED_AGENTS)
+    for attempt in range(1, max_agent_attempts + 1):
+        found_ids = {
+            item.get("id")
+            for item in agents
+            if isinstance(item, dict)
+        } if isinstance(agents, list) else set()
+        if expected_ids <= found_ids:
+            break
+        if attempt == max_agent_attempts:
+            print(
+                "NOTA: 'opencode debug agents' no muestra todos los agentes "
+                f"del proyecto tras {max_agent_attempts} intentos; se "
+                "informan los hallazgos con la respuesta disponible."
+            )
+            break
         print(
-            "NOTA: 'opencode debug agents' devolvió [] (primera invocación "
-            "en este directorio); se reintenta una vez."
+            "NOTA: 'opencode debug agents' aún no muestra los agentes del "
+            f"proyecto (intento {attempt}/{max_agent_attempts}); se "
+            "reintenta en 2 s."
         )
+        time.sleep(2)
         agents_stdout = run_debug("agents")
         if agents_stdout is None:
             return 1

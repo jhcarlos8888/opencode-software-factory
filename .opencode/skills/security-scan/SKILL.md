@@ -1,3 +1,8 @@
+---
+name: security-scan
+description: Ejecuta escaneo de seguridad estático (SAST) y detección de secretos en el código con las herramientas disponibles en el proyecto. CÁRGALA cuando se pida revisar vulnerabilidades de código, secretos expuestos o aplicar hardening de seguridad.
+---
+
 # Security Scan
 
 Skill para escaneo de seguridad estático (SAST) y análisis de secretos en el código.

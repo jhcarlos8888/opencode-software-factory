@@ -9,6 +9,18 @@ description: Ejecuta build, tests y análisis estático, interpreta los fallos r
 
 Cerrar el ciclo **ejecutar → leer fallo → corregir → volver a ejecutar** con evidencia, sin declarar victoria prematura.
 
+## Cuándo usar esta skill
+
+- **Frente a `systematic-debugging`**: es su **complemento**. Esta skill
+  repara el **build/test global** del proyecto (itera sobre la batería
+  completa hasta el verde o hasta agotar intentos);
+  `systematic-debugging` diagnostica **un fallo concreto y reproducible**
+  hasta la causa raíz con hipótesis y una prueba que falle.
+- Regla práctica: si el proyecto **no compila o la batería está roja**, usa
+  esta; si al aislar queda **un fallo concreto** que resiste un par de
+  iteraciones, delega ese caso en `systematic-debugging` y vuelve aquí para
+  re-ejecutar la batería.
+
 ## Ciclo
 
 1. **Detecta las herramientas reales** del proyecto (no inventes comandos): lee `package.json`, `pom.xml`, `pyproject.toml`, `Makefile`, etc.

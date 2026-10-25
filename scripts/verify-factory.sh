@@ -110,7 +110,8 @@ required_skills = {
     "implementation-plan", "independent-review",
     "project-discovery", "systematic-debugging",
     "test-and-repair", "metric-collector",
-    "dependency-audit", "security-scan"
+    "dependency-audit", "security-scan",
+    "spring-boot-architecture", "java-build-quality",
 }
 skills_dir = root / ".opencode" / "skills"
 actual_skills = {
@@ -122,6 +123,83 @@ missing_skills = required_skills - actual_skills
 if missing_skills:
     raise SystemExit(f"Faltan skills: {sorted(missing_skills)}")
 
+# A2: frontmatter de TODAS las skills que OpenCode carga: las locales de
+# .opencode/skills y las de terceros de .agents/skills. OpenCode solo carga
+# una skill cuyo SKILL.md empieza por '---' y declara name (igual al
+# directorio) y description no vacía; sin eso la skill existe pero nunca se
+# puede invocar.
+# Si PyYAML está disponible se valida YAML real; si no, se aplica un parser
+# mínimo explícito (y se avisa), porque un YAML mal formado que pase este
+# check sería un falso negativo del propio objetivo.
+try:
+    import yaml as _yaml
+except ImportError:
+    _yaml = None
+    print(
+        "NOTA: PyYAML no disponible; validación de frontmatter con "
+        "parser mínimo (sin chequeo de sintaxis YAML)."
+    )
+
+local_skill_paths = sorted(skills_dir.glob("*/SKILL.md"))
+third_party_skill_paths = sorted(
+    (root / ".agents" / "skills").glob("*/SKILL.md")
+)
+skill_paths = local_skill_paths + third_party_skill_paths
+
+frontmatter_errors = []
+for skill_path in skill_paths:
+    rel = skill_path.relative_to(root).as_posix()
+    dir_name = skill_path.parent.name
+    lines = skill_path.read_text(encoding="utf-8").splitlines()
+
+    if not lines or lines[0] != "---":
+        frontmatter_errors.append(
+            f"{rel}: la primera línea debe ser exactamente '---'"
+        )
+        continue
+    try:
+        closing = lines.index("---", 1)
+    except ValueError:
+        frontmatter_errors.append(
+            f"{rel}: frontmatter YAML sin línea de cierre '---'"
+        )
+        continue
+
+    header = "\n".join(lines[1:closing])
+    name_value = None
+    description_value = None
+    if _yaml is not None:
+        try:
+            parsed = _yaml.safe_load(header) or {}
+        except Exception as exc:  # noqa: BLE001 - informar y seguir
+            frontmatter_errors.append(f"{rel}: YAML inválido ({exc})")
+            continue
+        if not isinstance(parsed, dict):
+            frontmatter_errors.append(f"{rel}: el frontmatter no es un mapa YAML")
+            continue
+        name_value = parsed.get("name")
+        description_value = parsed.get("description")
+    else:
+        for raw in lines[1:closing]:
+            if raw.startswith("name:") and name_value is None:
+                name_value = raw.split(":", 1)[1].strip().strip("\"'")
+            elif raw.startswith("description:") and description_value is None:
+                description_value = raw.split(":", 1)[1].strip().strip("\"'")
+
+    if name_value != dir_name:
+        frontmatter_errors.append(
+            f"{rel}: 'name' debe ser '{dir_name}' "
+            f"(obtenido: {name_value!r})"
+        )
+    if not description_value:
+        frontmatter_errors.append(f"{rel}: falta 'description' o está vacía")
+
+if frontmatter_errors:
+    raise SystemExit(
+        "Frontmatter YAML inválido en skills:\n- "
+        + "\n- ".join(frontmatter_errors)
+    )
+
 snapshot = json.loads(
     (root / "config/global-inline-agents.snapshot.json")
     .read_text(encoding="utf-8")
@@ -130,7 +208,15 @@ if "build" not in snapshot.get("agents", {}):
     raise SystemExit("La instantánea no contiene build")
 
 print(f"PASS: {len(actual_agents)} archivos de agentes")
-print(f"PASS: {len(actual_skills)} skills locales verificadas")
+print(
+    f"PASS: {len(actual_skills)} skills locales de .opencode/skills "
+    "verificadas"
+)
+print(
+    "PASS: frontmatter YAML válido (---, name, description) en "
+    f"{len(skill_paths)} skills ({len(local_skill_paths)} locales + "
+    f"{len(third_party_skill_paths)} de terceros)"
+)
 print("PASS: instantánea de agentes disponible")
 PYTHON
 

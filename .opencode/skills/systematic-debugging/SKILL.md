@@ -9,6 +9,18 @@ description: Diagnostica y corrige errores reproducibles en cualquier lenguaje m
 
 Encontrar y corregir la causa raíz de un fallo sin introducir regresiones.
 
+## Cuándo usar esta skill
+
+- **Frente a `test-and-repair`**: esta skill es para **un fallo concreto y
+  reproducible** (una excepción, un test que falla, un resultado inesperado)
+  que exige diagnóstico e hipótesis; `test-and-repair` es para cuando
+  **build o tests están rotos de forma global** y hay que iterar
+  ejecutar → corregir → volver a ejecutar sobre la batería completa.
+- Regla práctica: ¿puedes describir el fallo con un comando exacto que lo
+  reproduce → esta skill. ¿Necesitas recuperar el verde general del proyecto
+  → `test-and-repair`. Si el build global falla, usa `test-and-repair` y, al
+  aislar un fallo específico, profundiza con esta.
+
 ## Procedimiento
 
 1. **Reproduce el fallo** antes de modificar el código. Si no se puede reproducir, no lo toques todavía.

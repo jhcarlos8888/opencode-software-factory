@@ -52,6 +52,26 @@ permissions:
     effect: allow
 
   - action: shell
+    resource: "./gradlew check *"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew jacocoTestReport *"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew spotbugsMain *"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew checkstyleMain *"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew pmdMain *"
+    effect: allow
+
+  - action: shell
     resource: "gradle test *"
     effect: allow
 
@@ -69,6 +89,26 @@ permissions:
 
   - action: shell
     resource: "mvn -B verify *"
+    effect: allow
+
+  - action: shell
+    resource: "mvn -B clean test *"
+    effect: allow
+
+  - action: shell
+    resource: "mvn checkstyle:*"
+    effect: allow
+
+  - action: shell
+    resource: "mvn pmd:*"
+    effect: allow
+
+  - action: shell
+    resource: "mvn jacoco:*"
+    effect: allow
+
+  - action: shell
+    resource: "mvn org.owasp:dependency-check-maven:*"
     effect: allow
 
   - action: shell
@@ -220,6 +260,248 @@ permissions:
     effect: allow
 
   - action: shell
+    resource: "echo *"
+    effect: allow
+
+  - action: shell
+    resource: "pwd"
+    effect: allow
+
+  - action: shell
+    resource: "ls *"
+    effect: allow
+
+  - action: shell
+    resource: "grep *"
+    effect: allow
+  - action: shell
+    resource: "head *"
+    effect: allow
+  - action: shell
+    resource: "tail *"
+    effect: allow
+
+  - action: shell
+    resource: "wc *"
+    effect: allow
+
+  - action: shell
+    resource: "which *"
+    effect: allow
+
+  - action: shell
+    resource: "date *"
+    effect: allow
+
+  - action: shell
+    resource: "cat *"
+    effect: allow
+
+  - action: shell
+    resource: "file *"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew --version *"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew tasks *"
+    effect: allow
+
+  - action: shell
+    resource: "gradle --version *"
+    effect: allow
+
+  - action: shell
+    resource: "mvn -version *"
+    effect: allow
+
+  - action: shell
+    resource: "mvn -B -v *"
+    effect: allow
+
+  - action: shell
+    resource: "mvn -v *"
+    effect: allow
+
+  - action: shell
+    resource: "gradle -v *"
+    effect: allow
+
+  - action: shell
+    resource: "java -version *"
+    effect: allow
+
+  - action: shell
+    resource: "javac -version *"
+    effect: allow
+
+  - action: shell
+    resource: "python3 --version *"
+    effect: allow
+
+  - action: shell
+    resource: "node --version *"
+    effect: allow
+
+  - action: shell
+    resource: "sort *"
+    effect: allow
+
+  - action: shell
+    resource: "uniq *"
+    effect: allow
+
+  - action: shell
+    resource: "cut *"
+    effect: allow
+
+  - action: shell
+    resource: "stat *"
+    effect: allow
+
+  - action: shell
+    resource: "diff *"
+    effect: allow
+
+  - action: shell
+    resource: "du *"
+    effect: allow
+
+  - action: shell
+    resource: "sed -n *"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew assemble *"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew bootJar *"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw test *"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw -B test *"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw verify *"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw -B verify *"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw clean test *"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw -B clean test *"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw checkstyle:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw pmd:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw spotbugs:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw jacoco:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw org.owasp:dependency-check-maven:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw -B -v"
+    effect: allow
+
+  - action: shell
+    resource: "gradle check *"
+    effect: allow
+
+  - action: shell
+    resource: "gradle clean test *"
+    effect: allow
+
+  - action: shell
+    resource: "gradle build *"
+    effect: allow
+
+  - action: shell
+    resource: "gradle jacocoTestReport *"
+    effect: allow
+
+  - action: shell
+    resource: "mvn -B checkstyle:*"
+    effect: allow
+
+  - action: shell
+    resource: "mvn -B pmd:*"
+    effect: allow
+
+  - action: shell
+    resource: "mvn -B spotbugs:*"
+    effect: allow
+
+  - action: shell
+    resource: "mvn -B jacoco:*"
+    effect: allow
+
+  - action: shell
+    resource: "mvn -B org.owasp:dependency-check-maven:*"
+    effect: allow
+
+  - action: shell
+    resource: "mvn -B dependency:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw -B checkstyle:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw -B pmd:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw -B spotbugs:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw -B jacoco:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw -B org.owasp:dependency-check-maven:*"
+    effect: allow
+
+  - action: shell
+    resource: "./mvnw dependency:*"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew dependencies *"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew spotbugsTest *"
+    effect: allow
+
+  - action: shell
     resource: "sudo *"
     effect: deny
 
@@ -259,6 +541,38 @@ permissions:
     resource: "wget *"
     effect: deny
 
+  - action: shell
+    resource: "bash -c *"
+    effect: deny
+
+  - action: shell
+    resource: "sh -c *"
+    effect: deny
+
+  - action: shell
+    resource: "*>"
+    effect: deny
+
+  - action: shell
+    resource: "*>*"
+    effect: deny
+
+  - action: shell
+    resource: "cat *.env*"
+    effect: deny
+
+  - action: shell
+    resource: "head *.env*"
+    effect: deny
+
+  - action: shell
+    resource: "tail *.env*"
+    effect: deny
+
+  - action: shell
+    resource: "*.env*"
+    effect: deny
+
   - action: edit
     resource: "*"
     effect: deny
@@ -293,18 +607,31 @@ Actúas como ingeniero de calidad de software. Tu trabajo es producir EVIDENCIA,
 
 ## Herramientas instaladas en este entorno (verificadas)
 
-Cuando el proyecto **no** declare su propio comando, puedes recurrir a estas. Están instaladas y comprobadas en esta máquina:
+Cuando el proyecto **no** declare su propio comando, puedes recurrir a estas.
+Valores observados el **2026-10-25** en esta máquina con los comandos de la
+columna "Verificación" (código de salida 0 salvo donde se indica). Lo que no
+está en el PATH aparece como **no instalado**; nada de esta tabla es una
+suposición.
 
 | Lenguaje | Herramienta | Verificación |
 | --- | --- | --- |
-| Java | `java`/`javac` openjdk 17.0.20 · Maven 3.9.16 | `java -version`, `mvn -version` |
-| Node.js/TypeScript | Node v24.21.0 · npm 11.19.0 · `tsc` 7.0.2 · `eslint` 10.12.0 | `node -v`, `npm -v`, `tsc -v`, `eslint -v` |
-| Python | Python 3.14.4 · `pytest` 9.0.2 · `ruff` 0.17.0 | `python3 -V`, `python3 -m pytest --version`, `ruff --version` |
-| Build/VCS | GNU Make 4.4.1 · git 2.53.0 | `make --version`, `git --version` |
-| Web | servidor MCP `playwright` (25 herramientas vía MCP) | conectado; browsers chromium instalados |
+| Java | `java`/`javac` OpenJDK 17.0.20 (Temurin 17.0.20+8) · Maven 3.9.16 · Gradle 8.14.5 en el PATH. Este repositorio NO incluye `mvnw` ni `gradlew`: usa el wrapper solo si el proyecto consumidor lo trae | `java -version`, `javac -version`, `mvn -version`, `gradle --version` → 0 |
+| Java (plugins de build) | SpotBugs, Checkstyle, PMD, JaCoCo y OWASP dependency-check: **no instalados como binarios**; se ejecutan como plugins del build del proyecto (`mvn spotbugs:check`, `./gradlew spotbugsMain`, `mvn org.owasp:dependency-check-maven:check`...) | `command -v spotbugs` → no instalado · `command -v checkstyle` → no instalado |
+| Contenedores | Docker: **no instalado** · Podman: **no instalado** → Testcontainers no puede ejecutarse en esta máquina | `docker --version` → 127 (command not found) · `podman --version` → 127 |
+| SAST / secretos | `semgrep`, `bandit`, `truffleHog`, `codeql`, `sonar-scanner`, `detect-secrets`, `pip-audit`, `govulncheck`: **no instalados**. Si el proyecto los necesita, repórtalo como "no disponible" en vez de simularlo | `command -v <herramienta>` → no encontrado |
+| Node.js/TypeScript | Node v24.21.0 · npm 11.19.0 · `npx` 11.19.0 · `tsc` 7.0.2 · `eslint` 10.12.0 | `node --version`, `npm --version`, `npx --version`, `tsc -v`, `eslint -v` → 0 |
+| Python | Python 3.14.4 · `pytest` 9.0.2 · `ruff` 0.17.0 | `python3 --version`, `python3 -m pytest --version`, `ruff --version` → 0 |
+| Build/VCS | GNU Make 4.4.1 · git 2.53.0 · jq 1.8.1 | `make --version`, `git --version`, `jq --version` → 0 |
+| Web / MCP | servidor MCP `playwright` configurado con 25 herramientas en el catálogo de la sesión; navegadores chromium en `~/.cache/ms-playwright` (`chromium-1248`, `chromium_headless_shell-1248`) | `jq -r '.mcp.servers \| keys[]' ~/.config/opencode/opencode.json` → `context7`, `playwright`, `rea` · `ls ~/.cache/ms-playwright` |
+| CLI | OpenCode v2.0.31 | `opencode --version` → 0 |
 
-Ejemplos de uso: `./gradlew clean test`, `mvn -B test`, `python3 -m pytest`,
-`npm test`, `tsc --noEmit`, `eslint .`, `ruff check .`.
+**No verificada en esta ejecución**: la ejecución real de navegador vía MCP y
+la versión concreta de los plugins de build (JaCoCo, SpotBugs, Checkstyle,
+PMD, OWASP), que dependen de la configuración de cada proyecto.
+
+Ejemplos de uso: `./gradlew clean test`, `./gradlew test`, `mvn -B test`,
+`mvn -B verify`, `python3 -m pytest`, `npm test`, `tsc --noEmit`,
+`eslint .`, `ruff check .`.
 
 Orden de preferencia:
 

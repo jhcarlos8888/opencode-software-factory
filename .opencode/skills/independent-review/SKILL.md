@@ -15,6 +15,19 @@ Contrastar el trabajo hecho por un agente con una revisión que no comparte sus 
 - Antes de decir que algo funciona.
 - Cuando haya discrepancia entre lo que el implementador afirma y lo que muestran las pruebas.
 
+## Cuándo usar esta skill
+
+- **Frente al agente `reviewer`**: esta skill es el **método** (quién revisa,
+  con qué evidencia, cómo se clasifican los hallazgos y cuándo se escala);
+  el agente `reviewer` es **quien lo aplica**, en solo lectura y sin editar.
+  Carga la skill para orquestar el ciclo; invoca al `reviewer` para ejecutar
+  la revisión concreta sobre el diff.
+- **Frente a `systematic-debugging`**: esta skill decide **si el trabajo está
+  terminado** (revisión independiente del conjunto del cambio);
+  `systematic-debugging` ataca **un fallo concreto y reproducible** hasta su
+  causa raíz. Primero diagnostica el bug con una, después valida el conjunto
+  con la otra.
+
 ## Procedimiento
 
 1. **Consolidar evidencia primero**: pide al agente `tester` que ejecute build y tests, y conserva la salida real. Una opinión sin ejecución no vale.

@@ -21,8 +21,99 @@ permissions:
   - action: shell
     resource: "git show *"
     effect: allow
+  - action: shell
+    resource: "echo *"
+    effect: allow
+  - action: shell
+    resource: "pwd"
+    effect: allow
+  - action: shell
+    resource: "ls *"
+    effect: allow
+  - action: shell
+    resource: "grep *"
+    effect: allow
+  - action: shell
+    resource: "head *"
+    effect: allow
+  - action: shell
+    resource: "tail *"
+    effect: allow
+  - action: shell
+    resource: "wc *"
+    effect: allow
+  - action: shell
+    resource: "which *"
+    effect: allow
+
+  - action: shell
+    resource: "date *"
+    effect: allow
+  - action: shell
+    resource: "cat *"
+    effect: allow
+  - action: shell
+    resource: "file *"
+    effect: allow
+  - action: shell
+    resource: "sort *"
+    effect: allow
+  - action: shell
+    resource: "uniq *"
+    effect: allow
+  - action: shell
+    resource: "cut *"
+    effect: allow
+  - action: shell
+    resource: "stat *"
+    effect: allow
+  - action: shell
+    resource: "diff *"
+    effect: allow
+  - action: shell
+    resource: "du *"
+    effect: allow
+  - action: shell
+    resource: "java -version *"
+    effect: allow
+  - action: shell
+    resource: "javac -version *"
+    effect: allow
+  - action: shell
+    resource: "mvn -version *"
+    effect: allow
+  - action: shell
+    resource: "gradle --version *"
+    effect: allow
+  - action: shell
+    resource: "./gradlew --version *"
+    effect: allow
+  - action: shell
+    resource: "./gradlew tasks *"
+    effect: allow
+  - action: shell
+    resource: "python3 --version *"
+    effect: allow
+  - action: shell
+    resource: "node --version *"
+    effect: allow
   - action: playwright_*
     resource: "*"
+    effect: deny
+  - action: shell
+    resource: "cat *.env*"
+    effect: deny
+  - action: shell
+    resource: "head *.env*"
+    effect: deny
+  - action: shell
+    resource: "tail *.env*"
+    effect: deny
+  - action: shell
+    resource: "*>*"
+    effect: deny
+  - action: shell
+    resource: "*.env*"
     effect: deny
 ---
 

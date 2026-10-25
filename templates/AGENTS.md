@@ -14,6 +14,51 @@ sobrescribe. Si no existe, la instalación lo crea; si ya existe, no lo toca.
 - `cloud-arbiter`: árbitro, úsalo solo ante discrepancias difíciles.
 - `reverse`: ingeniería inversa sobre artefactos ya compilados o empaquetados.
 
+## Comandos de la fábrica
+
+La instalación añade estos comandos en `.opencode/commands/`:
+
+- `/planificar` — inspecciona el proyecto y produce un plan verificable
+  (agente `architect`, solo lectura).
+- `/implementar` — implementa con cambios pequeños, tests y verificación
+  ejecutada (agente `implementer`).
+- `/verificar` — ejecuta build y tests reales y devuelve evidencia: comandos,
+  códigos de salida y fallos (agente `tester`).
+- `/revisar` — revisa el diff actual sin modificar nada (agente `reviewer`).
+- `/calidad-java` — batería Java completa: build, tests, checkstyle, spotbugs,
+  pmd, jacoco y OWASP, con códigos de salida reales (agente `tester`).
+
+## Skills de la fábrica
+
+Cárgalas con la herramienta `skill` cuando la tarea lo pida (10 instaladas):
+
+- `project-discovery` — descubre un proyecto desconocido con evidencia antes
+  de tocarlo.
+- `implementation-plan` — divide tareas de varios archivos en pasos
+  verificables.
+- `independent-review` — método de revisión independiente antes de declarar
+  terminado un cambio.
+- `systematic-debugging` — diagnostica un fallo concreto y reproducible hasta
+  la causa raíz.
+- `test-and-repair` — repara build/tests globales iterando con evidencia.
+- `metric-collector` — registra comando, duración ms, código de salida y
+  timestamp; quien escribe `metrics.json` es `build` o `implementer`
+  (`tester` solo ejecuta y reporta).
+- `dependency-audit` — vulnerabilidades, licencias y versiones de dependencias.
+- `security-scan` — SAST y detección de secretos.
+- `spring-boot-architecture` — estructura, capas, perfiles, validación,
+  `@RestControllerAdvice` y testing en Spring Boot.
+- `java-build-quality` — comandos exactos de calidad Java (Maven/Gradle),
+  rutas de informes y qué hacer si una herramienta no está configurada.
+
+## Ejemplos Java concretos
+
+- `mvn -B test` — tests unitarios con Maven en modo no interactivo.
+- `./gradlew test` — tests con el wrapper de Gradle (úsalo si el proyecto
+  incluye `./gradlew`; sin wrapper, `gradle test`).
+- `mvn jacoco:report` — informe de cobertura en `target/site/jacoco/index.html`
+  (Gradle: `./gradlew jacocoTestReport` → `build/reports/jacoco`).
+
 ## Cómo trabajar
 
 - Delega con subagentes: planificación a `architect`, código a `implementer`,

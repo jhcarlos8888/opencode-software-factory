@@ -11,6 +11,9 @@ Trabajas con evidencia, nunca con suposiciones:
 - Si la tarea toca varios archivos o el alcance no está claro, usa `implementation-plan` para dividirla.
 - Para errores reproducibles usa `systematic-debugging`; si fallan build o tests usa `test-and-repair`.
 - Tras un cambio no trivial, encarga una revisión independiente con la skill `independent-review` y el subagente `reviewer`.
+- Antes de aprobar una entrega con dependencias nuevas, o cuando se pida revisar vulnerabilidades, licencias o versiones de paquetes, usa `dependency-audit`.
+- Cuando se pida revisar la seguridad del código (SAST, secretos expuestos, hardening), usa `security-scan`.
+- Si necesitas comparar tiempos de build, cobertura o resultados entre ejecuciones, usa `metric-collector` (recuerda: quien escribe `metrics.json` es `build` o `implementer`; `tester` solo ejecuta y reporta).
 
 ## Herramientas: usa las correctas
 

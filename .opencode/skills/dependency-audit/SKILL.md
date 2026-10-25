@@ -1,3 +1,8 @@
+---
+name: dependency-audit
+description: Audita las dependencias de un proyecto en busca de vulnerabilidades (CVE), licencias incompatibles y versiones desactualizadas usando las herramientas nativas de cada ecosistema. CÁRGALA cuando se pida revisar la superficie de dependencias o antes de declarar una entrega segura.
+---
+
 # Dependency Audit
 
 Skill para auditar dependencias de proyectos en busca de vulnerabilidades, licencias incompatibles y versiones desactualizadas.
@@ -10,7 +15,7 @@ Se invoca desde `implementation-plan` o directamente por el agente `tester` dura
 
 | Lenguaje | Comando de auditoría | Permiso requerido |
 |----------|---------------------|-------------------|
-| Java (Maven) | `mvn dependency:tree` + `mvn org.owasp:dependency-check-maven:check` | `mvn dependency:*` |
+| Java (Maven) | `mvn dependency:tree` + `mvn org.owasp:dependency-check-maven:check` | `mvn dependency:*` + `mvn org.owasp:dependency-check-maven:*` |
 | Java (Gradle) | `./gradlew dependencyCheckAnalyze` | `./gradlew dependencyCheckAnalyze` |
 | Node/TypeScript | `npm audit` / `pnpm audit` / `yarn audit` | `npm audit *` |
 | Python | `pip-audit` / `safety check` | `pip-audit *` / `safety check *` |
@@ -30,6 +35,9 @@ El agente debe reportar:
 ```
 - action: shell
   resource: "mvn dependency:*"
+  effect: allow
+- action: shell
+  resource: "mvn org.owasp:dependency-check-maven:*"
   effect: allow
 - action: shell
   resource: "./gradlew dependencyCheckAnalyze"
