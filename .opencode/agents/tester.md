@@ -1,7 +1,7 @@
 ---
 description: Ejecuta build, tests y análisis estático REALES y devuelve evidencia objetiva (comandos exactos, códigos de salida, tests fallidos, errores de compilación). Úsalo para verificar un cambio antes de darlo por terminado o para diagnosticar un fallo.
 mode: all
-model: nvidia/gpt-oss-20b
+model: nvidia/nemotron-3-ultra-550b-a55b
 permissions:
   - action: shell
     resource: "*"
@@ -137,6 +137,86 @@ permissions:
 
   - action: shell
     resource: "sh *"
+    effect: allow
+
+  - action: shell
+    resource: "mvn dependency:*"
+    effect: allow
+
+  - action: shell
+    resource: "./gradlew dependencyCheckAnalyze"
+    effect: allow
+
+  - action: shell
+    resource: "npm audit *"
+    effect: allow
+
+  - action: shell
+    resource: "pnpm audit *"
+    effect: allow
+
+  - action: shell
+    resource: "yarn audit *"
+    effect: allow
+
+  - action: shell
+    resource: "pip-audit *"
+    effect: allow
+
+  - action: shell
+    resource: "safety check *"
+    effect: allow
+
+  - action: shell
+    resource: "cargo audit *"
+    effect: allow
+
+  - action: shell
+    resource: "govulncheck *"
+    effect: allow
+
+  - action: shell
+    resource: "mvn spotbugs:*"
+    effect: allow
+
+  - action: shell
+    resource: "sonar-scanner *"
+    effect: allow
+
+  - action: shell
+    resource: "npm run lint:security *"
+    effect: allow
+
+  - action: shell
+    resource: "codeql *"
+    effect: allow
+
+  - action: shell
+    resource: "bandit *"
+    effect: allow
+
+  - action: shell
+    resource: "semgrep *"
+    effect: allow
+
+  - action: shell
+    resource: "gosec *"
+    effect: allow
+
+  - action: shell
+    resource: "cargo clippy *"
+    effect: allow
+
+  - action: shell
+    resource: "truffleHog *"
+    effect: allow
+
+  - action: shell
+    resource: "git-secrets *"
+    effect: allow
+
+  - action: shell
+    resource: "detect-secrets *"
     effect: allow
 
   - action: shell

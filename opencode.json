@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "nvidia/gpt-oss-20b",
+  "model": "nvidia/nemotron-3-ultra-550b-a55b",
   "default_agent": "build",
   "compaction": {
     "auto": true,

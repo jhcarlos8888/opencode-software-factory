@@ -1,7 +1,7 @@
 ---
 description: Revisa cambios de código buscando defectos demostrables (regresiones, casos límite, seguridad, concurrencia, pruebas ausentes) sin modificar absolutamente nada. Úsalo SIEMPRE después de una implementación no trivial y antes de dar trabajo por terminado.
 mode: all
-model: nvidia/gpt-oss-20b
+model: nvidia/nemotron-3-ultra-550b-a55b
 permissions:
   - action: edit
     resource: "*"

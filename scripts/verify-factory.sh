@@ -6,7 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 echo "== 1. Validar configuración JSON =="
 jq -e '
   .default_agent == "build"
-  and .model == "nvidia/gpt-oss-20b"
+  and .model == "nvidia/nemotron-3-ultra-550b-a55b"
   and (has("provider") | not)
   and .compaction.auto == true
   and .compaction.keep.tokens == 15000
@@ -18,7 +18,7 @@ echo
 echo "== 1b. Validar modelo fijado en los agentes =="
 agent_models=0
 for agent_file in .opencode/agents/*.md; do
-    if grep -q '^model: nvidia/gpt-oss-20b' "$agent_file"; then
+    if grep -q '^model: nvidia/nemotron-3-ultra-550b-a55b' "$agent_file"; then
         agent_models=$((agent_models + 1))
     fi
 done
@@ -26,7 +26,7 @@ if [ "$agent_models" -ne 6 ]; then
     echo "ERROR: se esperaban 6 agentes con el modelo fijado; encontrados: $agent_models"
     exit 1
 fi
-echo "PASS: los 6 agentes fijan opencode/mimo-v2.6-flash-free"
+echo "PASS: los 6 agentes fijan nvidia/nemotron-3-ultra-550b-a55b"
 
 echo
 echo "== 1c. Validar newline final =="
@@ -109,7 +109,8 @@ for path in sorted(agent_dir.glob("*.md")):
 required_skills = {
     "implementation-plan", "independent-review",
     "project-discovery", "systematic-debugging",
-    "test-and-repair", "metric-collector"
+    "test-and-repair", "metric-collector",
+    "dependency-audit", "security-scan"
 }
 skills_dir = root / ".opencode" / "skills"
 actual_skills = {
@@ -151,7 +152,7 @@ jq -e --arg cfg "$PWD/opencode.json" '
     and .path == $cfg
     and .info.default_agent == "build"
     and .info.model.providerID == "nvidia"
-    and .info.model.model == "gpt-oss-20b"
+    and .info.model.model == "nemotron-3-ultra-550b-a55b"
   )
 ' "$config_tmp" >/dev/null
 echo "PASS: OpenCode carga la configuración del repositorio"

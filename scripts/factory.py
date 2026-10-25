@@ -22,7 +22,7 @@ EXPECTED_AGENTS = {
     "build", "architect", "implementer",
     "reviewer", "tester", "cloud-arbiter",
 }
-EXPECTED_MODEL = ("nvidia", "gpt-oss-20b")
+EXPECTED_MODEL = ("nvidia", "nemotron-3-ultra-550b-a55b")
 EXPECTED_AGENT_MODES = {
     "build": "primary",
     "architect": "all",

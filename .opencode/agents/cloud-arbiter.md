@@ -1,7 +1,7 @@
 ---
 description: Árbitro en la nube para discrepancias difíciles. Resuelve el conflicto cuando el implementador y el revisor no coinciden, o cuando un fallo persiste tras varios intentos. Úsalo SOLO en esos casos; nunca de forma rutinaria.
 mode: subagent
-model: nvidia/gpt-oss-20b
+model: nvidia/nemotron-3-ultra-550b-a55b
 permissions:
   - action: edit
     resource: "*"

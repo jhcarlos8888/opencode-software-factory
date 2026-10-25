@@ -85,9 +85,9 @@ modifican mediante esta captura.
 
 ## Modelo de referencia
 
-`nvidia/gpt-oss-20b` (GPT-OSS 20B de NVIDIA, modelo abierto hospedado por OpenCode). Es el modelo fijado en `opencode.json` y en los seis agentes.
+`nvidia/nemotron-3-ultra-550b-a55b` (Nemotron 3 Ultra 550B A55B de NVIDIA, modelo de alto rendimiento hospedado por OpenCode). Es el modelo fijado en `opencode.json` y en los seis agentes.
 
-El cambio desde `opencode/mimo-v2.6-flash-free` se realizó porque el modelo GPT-OSS 20B ofrece mejor calidad para tareas de ingeniería y está disponible sin necesidad de créditos externos.
+El cambio desde `nvidia/gpt-oss-20b` se realizó porque Nemotron 3 Ultra ofrece capacidades de razonamiento superiores para tareas complejas de ingeniería de software.
 
 ## Cómo volver a OpenRouter (cuando haya crédito)
 
@@ -218,12 +218,15 @@ el estado del destino y preservar sus archivos propios, su configuración
 `opencode.json` y cualquier modificación ajena. No se deben eliminar archivos
 sin verificar su procedencia y obtener autorización cuando exista duda.
 
-### Nueva skill: metric-collector
+### Nuevas skills
 
-Se ha añadido la skill `metric-collector` en `.opencode/skills/metric-collector/SKILL.md`
-para que los agentes recopilen métricas de ejecución (tiempo de build, cobertura,
-número de archivos, etc.). La skill está incluida en la validación de
-`scripts/verify-factory.sh`.
+Se han añadido las siguientes skills en `.opencode/skills/`:
+
+- **metric-collector**: Recopila métricas de ejecución (tiempo de build, cobertura, número de archivos, etc.).
+- **dependency-audit**: Audita dependencias en busca de vulnerabilidades (CVE), licencias incompatibles y versiones desactualizadas. Soporta Maven, Gradle, npm, pnpm, yarn, pip-audit, safety, cargo audit, govulncheck.
+- **security-scan**: Escaneo de seguridad estático (SAST) y detección de secretos. Soporta SpotBugs, SonarQube, ESLint security, CodeQL, Bandit, Semgrep, gosec, cargo clippy, truffleHog, git-secrets, detect-secrets.
+
+Todas las skills están incluidas en la validación de `scripts/verify-factory.sh`.
 
 ### Proyectos de prueba incluidos
 
