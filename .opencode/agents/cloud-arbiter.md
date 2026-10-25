@@ -1,7 +1,7 @@
 ---
 description: Árbitro en la nube para discrepancias difíciles. Resuelve el conflicto cuando el implementador y el revisor no coinciden, o cuando un fallo persiste tras varios intentos. Úsalo SOLO en esos casos; nunca de forma rutinaria.
 mode: subagent
-model: nvidia/nemotron-3-ultra-550b-a55b
+model: zen-proxy/nemotron-3.5-super-vl-free
 permissions:
   - action: edit
     resource: "*"

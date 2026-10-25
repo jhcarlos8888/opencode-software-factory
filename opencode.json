@@ -1,7 +1,19 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "nvidia/nemotron-3-ultra-550b-a55b",
+  "model": "zen-proxy/nemotron-3.5-super-vl-free",
   "default_agent": "build",
+  "providers": {
+    "zen-proxy": {
+      "models": {
+        "nemotron-3.5-super-vl-free": {
+          "limit": { "context": 131072, "output": 8192 }
+        },
+        "nemotron-3.5-lightning-free": {
+          "limit": { "context": 131072, "output": 8192 }
+        }
+      }
+    }
+  },
   "compaction": {
     "auto": true,
     "keep": {

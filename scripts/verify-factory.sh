@@ -6,7 +6,7 @@ cd "$(dirname "${BASH_SOURCE[0]}")/.."
 echo "== 1. Validar configuración JSON =="
 jq -e '
   .default_agent == "build"
-  and .model == "nvidia/nemotron-3-ultra-550b-a55b"
+  and .model == "zen-proxy/nemotron-3.5-super-vl-free"
   and (has("provider") | not)
   and .compaction.auto == true
   and .compaction.keep.tokens == 15000
@@ -18,7 +18,7 @@ echo
 echo "== 1b. Validar modelo fijado en los agentes =="
 agent_models=0
 for agent_file in .opencode/agents/*.md; do
-    if grep -q '^model: nvidia/nemotron-3-ultra-550b-a55b' "$agent_file"; then
+    if grep -q '^model: zen-proxy/nemotron-3.5-super-vl-free' "$agent_file"; then
         agent_models=$((agent_models + 1))
     fi
 done
@@ -26,7 +26,7 @@ if [ "$agent_models" -ne 6 ]; then
     echo "ERROR: se esperaban 6 agentes con el modelo fijado; encontrados: $agent_models"
     exit 1
 fi
-echo "PASS: los 6 agentes fijan nvidia/nemotron-3-ultra-550b-a55b"
+echo "PASS: los 6 agentes fijan zen-proxy/nemotron-3.5-super-vl-free"
 
 echo
 echo "== 1c. Validar newline final =="
@@ -151,8 +151,8 @@ jq -e --arg cfg "$PWD/opencode.json" '
     .type == "document"
     and .path == $cfg
     and .info.default_agent == "build"
-    and .info.model.providerID == "nvidia"
-    and .info.model.model == "nemotron-3-ultra-550b-a55b"
+    and .info.model.providerID == "zen-proxy"
+    and .info.model.model == "nemotron-3.5-super-vl-free"
   )
 ' "$config_tmp" >/dev/null
 echo "PASS: OpenCode carga la configuración del repositorio"

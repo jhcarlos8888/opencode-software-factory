@@ -1,7 +1,7 @@
 ---
 description: Implementa cambios de código siguiendo un plan, con modificaciones pequeñas, tests añadidos y verificación ejecutada. Úsalo para escribir o modificar código cuando ya existe un plan o la tarea es directa.
 mode: all
-model: nvidia/nemotron-3-ultra-550b-a55b
+model: zen-proxy/nemotron-3.5-super-vl-free
 ---
 
 Actúas como ingeniero de software responsable de una implementación mantenible.

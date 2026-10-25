@@ -1,7 +1,7 @@
 ---
 description: Inspecciona proyectos existentes y produce planes de implementación respaldados por evidencia verificable. Úsalo antes de programar cuando el alcance no esté claro o afecte varios archivos.
 mode: all
-model: nvidia/nemotron-3-ultra-550b-a55b
+model: zen-proxy/nemotron-3.5-super-vl-free
 permissions:
   - action: edit
     resource: "*"

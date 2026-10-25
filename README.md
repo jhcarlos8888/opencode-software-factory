@@ -85,9 +85,9 @@ modifican mediante esta captura.
 
 ## Modelo de referencia
 
-`nvidia/nemotron-3-ultra-550b-a55b` (Nemotron 3 Ultra 550B A55B de NVIDIA, modelo de alto rendimiento hospedado por OpenCode). Es el modelo fijado en `opencode.json` y en los seis agentes.
+`zen-proxy/nemotron-3.5-super-vl-free` (Nemotron 3.5 Super VL gratuito, disponible vía Zen Proxy en OpenCode). Es el modelo fijado en `opencode.json` y en los seis agentes.
 
-El cambio desde `nvidia/gpt-oss-20b` se realizó porque Nemotron 3 Ultra ofrece capacidades de razonamiento superiores para tareas complejas de ingeniería de software.
+El cambio desde `nvidia/nemotron-3-ultra-550b-a55b` se realizó porque el modelo Ultra 550B no está disponible en los proveedores gratuitos configurados; Nemotron 3.5 Super VL ofrece capacidades multimodales y de razonamiento fuertes sin coste.
 
 ## Cómo volver a OpenRouter (cuando haya crédito)
 
