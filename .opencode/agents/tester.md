@@ -1,7 +1,7 @@
 ---
 description: Ejecuta build, tests y análisis estático REALES y devuelve evidencia objetiva (comandos exactos, códigos de salida, tests fallidos, errores de compilación). Úsalo para verificar un cambio antes de darlo por terminado o para diagnosticar un fallo.
 mode: all
-model: zen-proxy/nemotron-3.5-super-vl-free
+model: opencode-go/mimo-v2.6-flash
 permissions:
   - action: shell
     resource: "*"

@@ -22,7 +22,7 @@ EXPECTED_AGENTS = {
     "build", "architect", "implementer",
     "reviewer", "tester", "cloud-arbiter",
 }
-EXPECTED_MODEL = ("zen-proxy", "nemotron-3.5-super-vl-free")
+EXPECTED_MODEL = ("opencode-go", "mimo-v2.6-flash")
 EXPECTED_AGENT_MODES = {
     "build": "primary",
     "architect": "all",

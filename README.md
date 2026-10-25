@@ -44,7 +44,7 @@ El flujo real es un instalador reversible controlado por Git:
 
 ### Modelo fijado
 
-La fábrica fija `opencode/mimo-v2.6-flash-free` en `opencode.json` y en el
+La fábrica fija `opencode-go/mimo-v2.6-flash` en `opencode.json` y en el
 frontmatter de los seis agentes de `.opencode/agents/`.
 
 ### Migración de la configuración
@@ -85,9 +85,17 @@ modifican mediante esta captura.
 
 ## Modelo de referencia
 
-`zen-proxy/nemotron-3.5-super-vl-free` (Nemotron 3.5 Super VL gratuito, disponible vía Zen Proxy en OpenCode). Es el modelo fijado en `opencode.json` y en los seis agentes.
+`opencode-go/mimo-v2.6-flash` (MiMo V2.6 Flash, servido por el proveedor
+integrado OpenCode Go). Es el modelo fijado en `opencode.json` y en los seis
+agentes, sin bloque `providers`: el formato `opencode-go/<model-id>` en la
+clave `model` basta porque OpenCode ya integra el proveedor.
 
-El cambio desde `nvidia/nemotron-3-ultra-550b-a55b` se realizó porque el modelo Ultra 550B no está disponible en los proveedores gratuitos configurados; Nemotron 3.5 Super VL ofrece capacidades multimodales y de razonamiento fuertes sin coste.
+Requisitos:
+
+- Plan OpenCode Go activo, con un límite de uso de aproximadamente **60 $/mes**
+  propio del plan Go.
+- Conexión del workspace mediante `/connect` → **OpenCode Go** (autenticación
+  con la cuenta de OpenCode).
 
 ## Cómo volver a OpenRouter (cuando haya crédito)
 
@@ -115,7 +123,7 @@ Advertencia: sin `limit.output` ni `options.max_tokens`, OpenCode solicita el
 valor por defecto de **131072** tokens de salida, que es exactamente lo que
 provoca el error de créditos anterior. Además hay que volver a fijar
 `openrouter/xiaomi/mimo-v2.6-flash` en el frontmatter `model:` de los seis
-agentes de `.opencode/agents/` (hoy fijan `opencode/mimo-v2.6-flash-free`).
+agentes de `.opencode/agents/` (hoy fijan `opencode-go/mimo-v2.6-flash`).
 
 ## Principios de calidad
 
@@ -174,7 +182,7 @@ Archivo: `.opencode/agents/tester.md`.
 ### Modelo y verificación de la fábrica
 
 La configuración del repositorio y el script `scripts/verify-factory.sh`
-usan `opencode/mimo-v2.6-flash-free` como modelo configurado.
+usan `opencode-go/mimo-v2.6-flash` como modelo configurado.
 
 El script `bash scripts/verify-factory.sh` valida la configuración JSON, el
 modelo fijado en los seis agentes, el newline final de los archivos
@@ -205,6 +213,33 @@ salida reales:
 - `bash scripts/verify-factory.sh` → código 0, todos los pasos en `PASS`.
 - Estas validaciones no equivalen a ejecutar las pruebas de un proyecto Java
   ni a verificar la calidad de todas las respuestas generadas por los agentes.
+
+### Validación del cambio a OpenCode Go (25 de octubre de 2026)
+
+Cambio de modelo de `nvidia/nemotron-3-ultra-550b-a55b` a
+`opencode-go/mimo-v2.6-flash`, ejecutado con estos códigos de salida reales:
+
+- `jq -e . opencode.json` y `jq -e ~/.config/opencode/opencode.json` → código 0.
+- `grep -l '^model: opencode-go/mimo-v2.6-flash' .opencode/agents/*.md | wc -l`
+  → `6`.
+- `grep -rn 'nemotron-3-ultra-550b-a55b'` sobre JSON/MD/SH/PY del repositorio →
+  0 coincidencias.
+- `python3 -m py_compile scripts/factory.py` → código 0.
+- `python3 scripts/factory.py self-test` → código 0, `SELF-TEST COMPLETADO`.
+- `bash scripts/verify-factory.sh` → código 0, todos los pasos en `PASS`.
+- `opencode debug config` → para `opencode.json` del repositorio:
+  `providerID: opencode-go`, `model: mimo-v2.6-flash`, `default_agent: build`.
+- `opencode debug agents` → los seis agentes con `opencode-go/mimo-v2.6-flash`
+  y sus modos esperados.
+- `opencode run --model opencode-go/mimo-v2.6-flash "Responde únicamente: OK"`
+  → respuesta `OK`, código 0 (llamada real al modelo).
+- Config global: respaldo `~/.config/opencode/opencode.json.bak-20261025`;
+  la comparación con `del(.model)` da código 0, es decir, solo cambia el campo
+  `model` (`mistral/codestral-2508` → `opencode-go/mimo-v2.6-flash`).
+- Corrección aplicada en la revisión: el grep del paso 1b quedó anclado a la
+  línea completa (`grep -qx`), de modo que un modelo con sufijo (por ejemplo
+  `mimo-v2.6-flash-free`) ya no aprueba el check. Comprobado con un fichero
+  falso: sufijo `-free` → código 1, modelo exacto → código 0.
 
 ### Separación entre fábrica y proyectos consumidores
 

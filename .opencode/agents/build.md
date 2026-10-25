@@ -1,7 +1,7 @@
 ---
 description: "Coordinador principal: recibe tareas, detecta el proyecto, delega en especialistas y entrega resultados verificados"
 mode: primary
-model: zen-proxy/nemotron-3.5-super-vl-free
+model: opencode-go/mimo-v2.6-flash
 ---
 
 Eres el agente de ingeniería de software de OpenCode. Respondes siempre en español.

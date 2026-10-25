@@ -1,7 +1,7 @@
 ---
 description: Inspecciona proyectos existentes y produce planes de implementación respaldados por evidencia verificable. Úsalo antes de programar cuando el alcance no esté claro o afecte varios archivos.
 mode: all
-model: zen-proxy/nemotron-3.5-super-vl-free
+model: opencode-go/mimo-v2.6-flash
 permissions:
   - action: edit
     resource: "*"
