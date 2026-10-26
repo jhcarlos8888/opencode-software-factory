@@ -1,0 +1,110 @@
+// Plantilla de calidad Java para Gradle — OpenCode Software Factory
+// =================================================================
+// Inyección automática (con respaldo previo y solo lo que falte):
+//     python3 scripts/factory.py quality <proyecto> --apply
+// Informe sin modificar nada:
+//     python3 scripts/factory.py quality <proyecto>
+// Pegado a mano (Groovy DSL): copia los bloques que falten al FINAL de
+// build.gradle, sin duplicar los que ya declares. Requiere el plugin
+// 'java' aplicado y solo funciona con build.gradle (no con .gradle.kts).
+// Ejecución en el proyecto:
+//     ./gradlew check              # tests + checkstyle + pmd + jacoco
+//     ./gradlew checkstyleMain     # -> build/reports/checkstyle/
+//     ./gradlew pmdMain            # -> build/reports/pmd/
+//     ./gradlew jacocoTestReport   # -> build/reports/jacoco/
+// Versiones verificadas con JDK 17 (Temurin 17.0.20) y Gradle 8.14.5:
+//     checkstyle 12.3.1, pmd 7.28.0, jacoco 0.8.15.
+// Checkstyle 12.3.1 es la última versión con <java.version>17 en su POM
+// (Maven Central); 13.x y 14.x exigen Java 21 y rompen el build en un
+// entorno con Java 17 porque la plantilla no declara toolchain.
+// SpotBugs en Gradle requiere el plugin del Portal (com.github.spotbugs) y
+// se añade aparte; esta plantilla no lo incluye para no romper la build.
+
+// [[quality:checkstyle]]
+apply plugin: 'checkstyle'
+
+checkstyle {
+    toolVersion = '12.3.1'
+    // Configuración inline, sin ficheros externos: los incumplimientos
+    // objetivos van a severidad error (rompen el build porque maxErrors
+    // vale 0) y el estilo va a warning (maxWarnings sin límite: solo
+    // informa).
+    config = resources.text.fromString('''<?xml version="1.0"?>
+<!DOCTYPE module PUBLIC
+    "-//Checkstyle//DTD Checkstyle Configuration 1.3//EN"
+    "https://checkstyle.org/dtds/configuration_1_3.dtd">
+<module name="Checker">
+  <module name="FileTabCharacter"/>
+  <module name="RegexpSingleline">
+    <property name="format" value="\\s+$"/>
+    <property name="message" value="Espacio en blanco al final de la línea"/>
+  </module>
+  <module name="LineLength">
+    <property name="severity" value="warning"/>
+    <property name="max" value="120"/>
+    <property name="ignorePattern" value="^package |^import |https?://"/>
+  </module>
+  <module name="TreeWalker">
+    <module name="UnusedImports"/>
+    <module name="RedundantImport"/>
+    <module name="NeedBraces"/>
+    <module name="EmptyStatement"/>
+    <module name="EqualsHashCode"/>
+    <module name="ArrayTypeStyle"/>
+    <module name="UpperEll"/>
+    <module name="ModifierOrder"/>
+  </module>
+</module>
+''')
+}
+// [[quality:end]]
+
+// [[quality:pmd]]
+apply plugin: 'pmd'
+
+pmd {
+    toolVersion = '7.28.0'
+    consoleOutput = true
+    // Ruleset por defecto de Gradle: category/java/errorprone.xml, un
+    // conjunto pequeño de reglas objetivas. Gradle no permite umbral por
+    // prioridad (en Maven usamos failurePriority=2): aquí cualquier
+    // violación rompe el build. Para modo solo informe, añade
+    // ignoreFailures = true.
+}
+// [[quality:end]]
+
+// [[quality:jacoco]]
+apply plugin: 'jacoco'
+
+jacoco {
+    toolVersion = '0.8.15'
+}
+
+jacocoTestReport {
+    dependsOn test
+    reports {
+        xml.required = true
+        html.required = true
+    }
+}
+
+jacocoTestCoverageVerification {
+    dependsOn test
+    violationRules {
+        rule {
+            element = 'BUNDLE'
+            limit {
+                counter = 'LINE'
+                value = 'COVEREDRATIO'
+                // Umbral modesto para no bloquear proyectos nuevos.
+                minimum = 0.50
+            }
+        }
+    }
+}
+
+tasks.named('check') {
+    dependsOn jacocoTestReport
+    dependsOn jacocoTestCoverageVerification
+}
+// [[quality:end]]

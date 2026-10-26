@@ -1,7 +1,26 @@
 
 # OpenCode Software Factory
 
-Repositorio fuente de la fábrica de software multiagente.
+Repositorio fuente de la fábrica de software multiagente: un instalador
+reversible que lleva agentes, comandos, skills y configuración a cualquier
+proyecto consumidor de OpenCode.
+
+## Índice
+
+- [Objetivos](#objetivos)
+- [Estructura del repositorio](#estructura-del-repositorio)
+- [Guía de uso](#guía-de-uso)
+  - [Requisitos previos](#requisitos-previos)
+  - [Comandos del instalador](#comandos-del-instalador)
+  - [Uso dentro de OpenCode](#uso-dentro-de-opencode)
+  - [Calidad Java](#calidad-java)
+  - [Permisos de los agentes](#permisos-de-los-agentes)
+  - [Verificación y troubleshooting](#verificación-y-troubleshooting)
+- [Modelo de referencia](#modelo-de-referencia)
+- [MCP y configuración global](#mcp-y-configuración-global)
+- [Principios de calidad](#principios-de-calidad)
+- [Separación entre fábrica y proyectos consumidores](#separación-entre-fábrica-y-proyectos-consumidores)
+- [Limitaciones conocidas](#limitaciones-conocidas)
 
 ## Objetivos
 
@@ -11,58 +30,67 @@ Repositorio fuente de la fábrica de software multiagente.
 - Separar la infraestructura de la fábrica de los proyectos de trabajo.
 - Permitir instalación y reversión controladas.
 
-## Estructura
+## Estructura del repositorio
 
 - `.opencode/agents/`: 6 agentes Markdown (`build`, `architect`,
   `implementer`, `reviewer`, `tester`, `cloud-arbiter`).
 - `.opencode/commands/`: 5 comandos (`/planificar`, `/implementar`,
   `/revisar`, `/verificar`, `/calidad-java`).
-- `.opencode/skills/`: 10 skills del directorio global de OpenCode.
-- `.agents/skills/`: 1 skill de terceros (`reverse-engineer-anything`).
+- `.opencode/skills/`: 10 skills de la fábrica (un directorio con
+  `SKILL.md` por skill).
+- `.agents/skills/`: 1 skill de terceros (`reverse-engineer-anything`, 8
+  ficheros) que la fábrica instala pero no mantiene.
 - `config/global-inline-agents.snapshot.json`: instantánea de los agentes
-  `build` y `reverse` definidos actualmente en la configuración global.
-- `opencode.json`: configuración predeterminada de este repositorio.
-- `templates/AGENTS.md`: plantilla de instrucciones que la fábrica instala en
-  los proyectos consumidores.
+  `build` y `reverse` definidos en la configuración global del usuario; se
+  conserva como referencia y **no** se instala en los proyectos.
+- `opencode.json`: configuración predeterminada de este repositorio
+  (`model`, `default_agent` y `compaction`).
+- `templates/AGENTS.md`: plantilla de instrucciones que la fábrica instala
+  en los proyectos consumidores.
+- `templates/quality/`: plantillas de calidad Java (Maven y Gradle) que
+  `factory.py quality --apply` inyecta en el build del proyecto; incluye su
+  propio `README.md` con el uso resumido.
+- `scripts/factory.py`: instalador y utilidades (`install`, `status`,
+  `doctor`, `uninstall`, `quality`, `self-test`); solo librería estándar de
+  Python.
+- `scripts/verify-factory.sh`: batería estructural del repositorio.
+- `AGENTS.md`, `LICENSE`: instrucciones propias de este repositorio y
+  licencia.
+
+El repositorio **no** incluye proyectos de ejemplo: los cuatro stacks
+soportados (Java/Maven, Java/Gradle, TypeScript y Python) se validan
+instalando la fábrica sobre un proyecto consumidor de ese stack, y el
+`self-test` trabaja con directorios temporales aislados.
 
 ## Guía de uso
 
-Guía completa para instalar la fábrica en un proyecto y usarla desde OpenCode.
-Todos los códigos de salida de esta sección se ejecutaron el **25 de octubre
-de 2026** en esta máquina y se observaron su salida. Lo que no se ejecutó
-aparece marcado explícitamente como *no ejecutado*.
-
 ### Requisitos previos
 
-| Requisito | Versión observada | Comprobación |
+| Requisito | Versión en esta máquina | Comprobación |
 | --- | --- | --- |
-| Python 3 | 3.14.4 | `python3 --version` → 0 |
-| CLI de OpenCode v2 | v2.0.31 | `opencode --version` → 0 |
-| git | 2.53.0 | `git --version` → 0 |
+| Python 3 | 3.14.4 | `python3 --version` |
+| CLI de OpenCode v2 | v2.0.31 | `opencode --version` |
+| git | 2.53.0 | `git --version` |
 | Plan OpenCode Go | conectado con `/connect` → **OpenCode Go** | comprobación interactiva en la CLI |
-| JDK (para la batería Java) | `java -version` → OpenJDK 17.0.20 (Temurin 17.0.20+8); en la máquina hay además instalados `21.0.12+1.1-tem` y `25.0.4-tem` | `java -version` → 0 |
-| Maven / Gradle | 3.9.16 / 8.14.5 | `mvn -version`, `gradle --version` → 0 |
+| JDK (para la batería Java) | `java -version` → OpenJDK 17.0.20 (Temurin 17.0.20+8); hay además instalados `21.0.12+1.1-tem` y `25.0.4-tem` | `java -version` |
+| Maven / Gradle | 3.9.16 / 8.14.5 | `mvn -version`, `gradle --version` |
 | Docker | **no instalado** | `docker --version` → 127 (command not found) |
 
-- El instalador (`scripts/factory.py`) usa solo la librería estándar de
-  Python: no hay dependencias que instalar con `pip`.
-- **Stacks soportados**: el instalador es agnóstico del stack (copia agentes,
-  comandos y skills sin interpretar el proyecto). Los permisos de verificación
-  sin aprobación cubren Java (Maven/Gradle), Python (pytest, unittest, ruff),
-  Node/TypeScript (npm, tsc, eslint) y `make`. Los cuatro stacks soportados
-  por la fábrica —Java/Gradle, Java/Maven, TypeScript y Python— se validan
-  instalando la fábrica en cualquier proyecto consumidor de ese stack. Los
-  antiguos proyectos de prueba que este repositorio incluía
-  (`springboot-gradle/`, `springboot-maven/`, `typescript/` y `python/`) fueron
-  **eliminados**: ningún script depende de ellos y el `self-test` trabaja con
-  directorios temporales aislados, por lo que no aportaban nada.
+- El instalador usa solo la librería estándar de Python: no hay
+  dependencias que instalar con `pip`, y **la fábrica no instala ninguna
+  herramienta en el sistema** (solo copia ficheros en el proyecto).
+- El instalador es agnóstico del stack: copia agentes, comandos y skills
+  sin interpretar el proyecto. Los permisos sin aprobación cubren Java
+  (Maven/Gradle), Python (pytest, unittest, ruff), Node/TypeScript (npm,
+  tsc, eslint) y `make`.
 - Sin plan de modelo conectado la instalación funciona, pero los agentes no
-  podrán responder: conecta con `/connect` → **OpenCode Go** antes de delegar.
+  podrán responder: conecta con `/connect` → **OpenCode Go** antes de
+  delegar.
 - Docker ausente implica que Testcontainers y cualquier prueba que necesite
-  contenedores **no puede ejecutarse en esta máquina** (marcar como no
+  contenedores no puede ejecutarse en esta máquina (se marca como no
   ejecutable, nunca como pasada).
 
-### Instalación paso a paso
+### Comandos del instalador
 
 ```bash
 # 1. Vista previa: no modifica nada (muestra lo que se copiaría)
@@ -72,50 +100,47 @@ python3 scripts/factory.py install --dry-run <ruta-del-proyecto>
 python3 scripts/factory.py install <ruta-del-proyecto>
 
 # 3. Comprobación de archivos y de comportamiento real
-python3 scripts/factory.py status  <ruta-del-proyecto>
-python3 scripts/factory.py doctor  <ruta-del-proyecto>
+python3 scripts/factory.py status   <ruta-del-proyecto>
+python3 scripts/factory.py doctor   <ruta-del-proyecto>
 
-# 4. Reversión: retira únicamente los archivos sin modificar
+# 4. Plugins de calidad Java en el build del proyecto (ver "Calidad Java")
+python3 scripts/factory.py quality  <ruta-del-proyecto>            # solo informa
+python3 scripts/factory.py quality  <ruta-del-proyecto> --apply    # respalda e inyecta
+
+# 5. Reversión: retira únicamente los archivos sin modificar
 python3 scripts/factory.py uninstall <ruta-del-proyecto>
+
+# 6. Pruebas del propio instalador, en directorios temporales aislados
+python3 scripts/factory.py self-test
 ```
 
-Salida real de `install` en un directorio nuevo (25/10/2026, código 0):
+`install` copia 31 ficheros en un proyecto nuevo: 6 agentes + 5 comandos +
+10 skills de la fábrica (un `SKILL.md` por skill) + 8 ficheros de la skill
+de terceros `reverse-engineer-anything` + `opencode.json` + `AGENTS.md`.
 
-```text
-Destino: /tmp/opencode/factory-guide-demo
-Archivos nuevos: 31
-Archivos idénticos o preexistentes que se conservarán: 0
-  + .opencode/agents/architect.md
-  ... (6 agentes, 5 comandos, 10 skills) ...
-  + .agents/skills/reverse-engineer-anything/SKILL.md
-  + opencode.json
-  + AGENTS.md
+Qué hace cada comando:
 
-Instalación completada.
-Manifiesto de control: /home/jcherre/.local/state/opencode-software-factory/3db2ee952bf55d2bb40df918.json
-opencode.json solo se crea si falta o si coincide con el de la
-fábrica; nunca se sobrescribe. AGENTS.md solo se crea si falta
-y nunca se sobrescribe.
-```
-
-Los 31 archivos se descomponen en: 6 agentes + 5 comandos + 10 skills de la
-fábrica (un `SKILL.md` por skill) + 8 ficheros de la skill de terceros
-`reverse-engineer-anything` + `opencode.json` + `AGENTS.md`.
-
-Salida real de `status` justo después de instalar: 31 líneas `SIN CAMBIOS`
-→ código 0.
-
-Salida real de `doctor` **inmediatamente** después de `install` (código 0,
-27 `PASS`, 0 `ERROR`):
-
-```text
-NOTA: 'opencode debug agents' aún no muestra los agentes del proyecto (intento 1/5); se reintenta en 2 s.
-PASS: agente 'architect' reconocido
-...
-PASS: modelo mimo-v2.6-flash en /tmp/.../opencode.json (obtenido: mimo-v2.6-flash)
-
-Doctor: la fábrica funciona en este proyecto.
-```
+- **`install`**: instala agentes, comandos, skills, `opencode.json` y (solo
+  si falta) `AGENTS.md`, y registra la instalación en un manifiesto.
+  `--dry-run` muestra lo que haría sin tocar nada. No puede reinstalar
+  sobre un destino con manifiesto: usa `status` o `uninstall` antes.
+- **`status`**: compara los archivos instalados con el manifiesto y
+  etiqueta cada uno (`SIN CAMBIOS`, `MODIFICADO (se conservará)`,
+  `ENLACE SIMBÓLICO (se conservará)` o `AUSENTE`).
+- **`doctor`**: comprueba que la fábrica funciona realmente en el proyecto
+  consumidor usando el CLI de OpenCode (`opencode debug agents` y
+  `opencode debug config`): los 6 agentes reconocidos con su modo,
+  proveedor y modelo correctos, y la carga del `opencode.json` del proyecto
+  con `default_agent: build` y el modelo esperado. Son 27 controles (4 por
+  agente × 6, más 3 de configuración).
+- **`uninstall`**: retira los archivos instalados que nadie modificó y
+  conserva los editados, dejando constancia de ellos en el manifiesto.
+- **`quality`**: detecta los plugins de calidad del build del proyecto y
+  muestra un informe `PRESENTE`/`FALTA` con los comandos de ejecución; sin
+  `--apply` no escribe nada.
+- **`self-test`**: instala, comprueba la preservación de ficheros del
+  consumidor y revierte en directorios temporales propios (no usa ningún
+  directorio del repo).
 
 #### Códigos de retorno
 
@@ -124,43 +149,38 @@ Doctor: la fábrica funciona en este proyecto.
 | `install` | instalación completada (o `--dry-run` sin tocar nada) | error técnico: destino inválido, ruta insegura, fuente ausente o manifiesto ya existente para ese destino | **CONFLICTO**: algún archivo de destino existe con contenido distinto; **no se instaló ningún archivo** |
 | `status` | sin instalación registrada, o todos los archivos `SIN CAMBIOS` | error técnico (manifiesto ilegible o ruta insegura) | algún archivo `MODIFICADO` o sustituido por un enlace (se conservará) |
 | `doctor` | todos los controles en `PASS` | error técnico: falta `opencode.json`, la CLI `opencode` no existe, la salida no es JSON o un `debug` superó los 180 s | hay hallazgos (agentes, modos, modelo o configuración que no coinciden) |
-| `uninstall` | desinstalación completa, o no había instalación registrada | error técnico | se conservaron archivos modificados; el registro se actualiza solo con esos archivos |
-| `self-test` | `SELF-TEST COMPLETADO` | una aserción falló (no provocado en este entorno) | no aplica |
-
-Verificado hoy: `install --dry-run` → 0; `install` → 0; `install` con
-`opencode.json` distinto → 2 (`CONFLICTOS: no se instaló ningún archivo.`);
-`status` sin cambios → 0; `status` con un archivo editado → 2; `uninstall`
-limpio → 0; `uninstall` con un archivo editado → 2 (`Quedaron 1 archivos
-modificados.`); `doctor` sin `opencode.json` → 1.
+| `uninstall` | desinstalación completa, o no había instalación registrada | error técnico | se conservan los archivos modificados y el manifiesto pasa a registrar solo esos archivos |
+| `quality` | todo lo gestionable está presente (sin `--apply`) o quedó inyectado (con `--apply`) | error técnico: ruta inválida, directorio sin `pom.xml`/`build.gradle`, plantilla ausente o error de lectura | falta algún plugin, el build es ambiguo (`pom.xml` + `build.gradle` conviven), es `build.gradle.kts`, el `pom.xml` no es XML bien formado, el fichero no es UTF-8 o la inyección no sería segura: **no se modificó nada** |
+| `self-test` | salida `SELF-TEST COMPLETADO` | una aserción falla y la ejecución se interrumpe | no aplica |
 
 #### Protecciones y manifiesto
 
 - **`opencode.json` nunca se sobrescribe**: si falta se crea con el de la
-  fábrica, si es idéntico se conserva (`skipped`) y si es distinto el
-  instalador aborta en `CONFLICTO` con código 2 **sin instalar nada**.
-  Detalle completo en [Instalación de `opencode.json` con protección
-  `CONFLICTO`](#instalación-de-opencodejson-con-protección-conflicto).
+  fábrica; si es idéntico se conserva (`skipped`); si es distinto el
+  instalador aborta en `CONFLICTO` con código 2 **sin instalar nada** (ni
+  el resto de archivos se copian). El fichero que instala la fábrica
+  contiene solo `model`, `default_agent` y `compaction`.
 - **`AGENTS.md` nunca se sobrescribe**: si ya existe (archivo, enlace o lo
   que sea) se conserva intacto; no es conflicto y no aborta la instalación.
   Si lo creó la fábrica y nadie lo modificó, `uninstall` lo retira; si el
   usuario lo editó, se conserva.
 - **Manifiesto de control**: cada destino tiene un manifiesto en
-  `~/.local/state/opencode-software-factory/<clave>.json`, donde `<clave>` son
-  los primeros 24 hexadecimales del SHA-256 de la ruta absoluta del destino.
-  Guarda la ruta, el commit de la fábrica y el SHA-256 de cada archivo
-  instalado. Solo puede existir uno por destino: mientras exista, `install`
-  se niega a reinstalar (`Usa 'status' o 'uninstall' antes de reinstalar.`).
-  La ubicación se puede cambiar con `OPENCODE_SOFTWARE_FACTORY_STATE` o
-  `XDG_STATE_HOME`.
+  `~/.local/state/opencode-software-factory/<clave>.json`, donde `<clave>`
+  son los primeros 24 hexadecimales del SHA-256 de la ruta absoluta del
+  destino. Guarda la ruta, el commit de la fábrica y el SHA-256 de cada
+  archivo instalado. Solo puede existir uno por destino: mientras exista,
+  `install` se niega a reinstalar (`Usa 'status' o 'uninstall' antes de
+  reinstalar.`). La ubicación se puede cambiar con
+  `OPENCODE_SOFTWARE_FACTORY_STATE` o `XDG_STATE_HOME`.
 - La instantánea de `config/global-inline-agents.snapshot.json`, la
   configuración global del usuario y los MCP **no** se modifican ni se
   instalan en los proyectos.
 
 ### Uso dentro de OpenCode
 
-La instalación añade al proyecto consumidor 5 comandos, 6 agentes y 10 skills
-(más una skill de terceros). Tras instalar, reinicia la sesión de OpenCode en
-el proyecto para que cargue los archivos nuevos.
+La instalación añade al proyecto consumidor 5 comandos, 6 agentes y 10
+skills (más una skill de terceros). Tras instalar, reinicia la sesión de
+OpenCode en el proyecto para que cargue los ficheros nuevos.
 
 #### Comandos (5)
 
@@ -177,14 +197,14 @@ el proyecto para que cargue los archivos nuevos.
 | Agente | Modo | Función |
 | --- | --- | --- |
 | `build` | `primary` | Coordinador por defecto (`default_agent: build`): recibe la tarea, detecta el proyecto, delega y entrega resultados verificados |
-| `architect` | `all` | Planificación en solo lectura con evidencia verificable |
-| `implementer` | `all` | Implementación con cambios pequeños y tests añadidos |
-| `reviewer` | `all` | Revisión independiente del diff, sin modificar nada |
-| `tester` | `all` | Ejecución real de build, tests y análisis estático, con evidencia |
+| `architect` | `all` | Planificación en solo lectura con evidencia verificable: inspecciona instrucciones, manifiestos, código y pruebas, y distingue hechos verificados, inferencias y datos desconocidos |
+| `implementer` | `all` | Implementación con cambios pequeños, tests añadidos y verificación ejecutada |
+| `reviewer` | `all` | Revisión independiente del diff (`git status` + `git diff HEAD`), sin modificar nada |
+| `tester` | `all` | Ejecución real de build, tests y análisis estático, con evidencia: comando exacto, código de salida y pruebas no ejecutadas |
 | `cloud-arbiter` | `subagent` | Árbitro para discrepancias difíciles o fallos persistentes; no usar de forma rutinaria |
 
-Los seis fijan `opencode-go/mimo-v2.6-flash` en su frontmatter; `doctor` lo
-comprueba agente por agente.
+Los seis fijan `opencode-go/mimo-v2.6-flash` en su frontmatter; `doctor`
+lo comprueba agente por agente.
 
 #### Skills (10 en `.opencode/skills`)
 
@@ -192,7 +212,7 @@ Se cargan con la herramienta `skill` cuando la tarea lo pida:
 
 | Skill | Cuándo se carga |
 | --- | --- |
-| `project-discovery` | Al empezar a trabajar en un repositorio desconocido |
+| `project-discovery` | Al empezar a trabajar en un repositorio desconocido: exige que las conclusiones se apoyen en ficheros leídos o comprobaciones ejecutadas y revisar el estado de Git |
 | `implementation-plan` | Cuando la tarea toca varios archivos o el alcance es ambiguo |
 | `independent-review` | Tras cualquier cambio no trivial, antes de declararlo terminado |
 | `systematic-debugging` | Ante un fallo reproducible, un error o un test que falla |
@@ -201,7 +221,12 @@ Se cargan con la herramienta `skill` cuando la tarea lo pida:
 | `dependency-audit` | Al revisar vulnerabilidades (CVE), licencias o versiones de dependencias |
 | `security-scan` | Al pedir SAST, detección de secretos o hardening de seguridad |
 | `spring-boot-architecture` | Al crear, revisar o modificar un servicio Spring Boot |
-| `java-build-quality` | Al verificar un proyecto Java o pedir cobertura/análisis estático |
+| `java-build-quality` | Al verificar un proyecto Java o pedir cobertura/análisis estático (comandos exactos Maven/Gradle, rutas de informes, qué hacer si falta una herramienta) |
+
+Todas las skills deben tener frontmatter válido (`---` de apertura y
+cierre, `name` igual al directorio y `description` no vacía): sin él
+OpenCode no carga la skill. `verify-factory.sh` lo comprueba sobre las 10
+locales y la de terceros (11 en total).
 
 Además, la skill de terceros `reverse-engineer-anything` se instala en
 `.agents/skills/` (ingeniería inversa sobre artefactos ya compilados o
@@ -219,12 +244,234 @@ empaquetados); no la mantiene la fábrica.
 4. `build` delega la verificación en `tester` (`/verificar` o
    `/calidad-java`), que devuelve comando exacto, código de salida y fallos.
 5. `build` delega la revisión en `reviewer` (`/revisar`), que examina el diff
-   real (`git status` + `git diff HEAD`) y reporta defectos demostrables sin
-   modificar nada.
+   real y reporta defectos demostrables sin modificar nada.
 6. Si implementador y revisor discrepan, o un fallo persiste tras varios
    intentos, `build` puede convocar a `cloud-arbiter`.
 7. Solo entonces se da la tarea por terminada, con la evidencia de los
    pasos 4 y 5 en el informe.
+
+### Calidad Java
+
+Estrategia **CLI-first**: toda la calidad se ejecuta con herramientas de
+línea de comandos locales, sin servidor, sin contenedores y sin credenciales
+en el repositorio. La skill `java-build-quality` y el comando
+`/calidad-java` son la referencia operativa.
+
+#### Plantillas de calidad (`templates/quality/`)
+
+Dos fragmentos con los plugins ya configurados y con versiones fijadas:
+
+| Fichero | Ecosistema | Plugins que aporta |
+| --- | --- | --- |
+| `maven-quality-plugins.xml` | Maven (`pom.xml`, bloques `<plugin>` para `<build><plugins>`) | checkstyle 3.6.0, PMD 3.28.0, SpotBugs 4.10.5.0, JaCoCo 0.8.15 |
+| `gradle-quality.gradle` | Gradle con Groovy DSL (`build.gradle`, requiere el plugin `java`) | checkstyle 12.3.1, PMD 7.28.0, JaCoCo 0.8.15. **SpotBugs no se incluye**: en Gradle requiere el plugin del Portal (`com.github.spotbugs`), se informa pero no se inyecta para no romper la build |
+
+Las versiones de la plantilla Gradle están fijadas para el **JDK 17**
+(Temurin 17.0.20, el `java` del PATH) con Gradle 8.14.5: Checkstyle
+12.3.1 es la última versión cuyo POM declara `<java.version>17</java.version>`
+en Maven Central; las líneas 13.x/14.x exigen Java 21 y, como la plantilla
+no declara *toolchain*, la herramienta se ejecuta con el JVM de Gradle y la
+build falla en un entorno con Java 17. Si usas Java 21, puedes subir
+`toolVersion` a `14.3.0` sin más cambios.
+
+Qué configuran:
+
+- **Checkstyle** con reglas inline (sin ficheros externos): tabuladores y
+  espacios al final de línea rompen el build; longitud de línea 120 como
+  *warning*; `UnusedImports`, `RedundantImport`, `NeedBraces`,
+  `EmptyStatement`, `EqualsHashCode`, `ArrayTypeStyle`, `UpperEll` y
+  `ModifierOrder`. En Maven se liga a la fase `verify` con
+  `failOnViolation` y `maxAllowedViolations=0`; en Gradle con
+  `maxErrors` 0.
+- **PMD**: en Maven `failurePriority=2` (prioridades 1-2 rompen el build,
+  3-5 quedan como aviso en `target/pmd.xml`); en Gradle usa el ruleset por
+  defecto y cualquier violación rompe el build (para solo informar,
+  `ignoreFailures = true`).
+- **SpotBugs** (solo Maven): `effort=Max`, `failThreshold=High`, informe
+  XML.
+- **JaCoCo**: `prepare-agent` + `report` + `check` con umbral de cobertura
+  de líneas `COVEREDRATIO >= 0.50` sobre el paquete (`BUNDLE`). En Gradle,
+  `check` pasa a depender de `jacocoTestReport` y
+  `jacocoTestCoverageVerification`. Si tu `maven-surefire-plugin` declara
+  un `<argLine>` propio, incluye `${argLine}` dentro para que JaCoCo pueda
+  inyectar su agente.
+
+#### Inyección: `factory.py quality [--apply]`
+
+```bash
+python3 scripts/factory.py quality <proyecto>           # informe, no toca nada
+python3 scripts/factory.py quality <proyecto> --apply   # respalda e inyecta
+```
+
+Comportamiento:
+
+- Detecta el build: `pom.xml` → Maven, `build.gradle` → Gradle Groovy,
+  `build.gradle.kts` → informa y no toca nada (la plantilla es Groovy). Si
+  conviven varios, el build es **ambiguo**: solo informa.
+- **Sin `--apply` nunca escribe**: imprime `PRESENTE`/`FALTA` por plugin y
+  el comando de ejecución, y devuelve `0` si todo lo gestionable está
+  presente o `2` si falta algo.
+- **Con `--apply`** solo inyecta los plugins que falten (no duplica los
+  presentes), tras crear un respaldo del fichero de build en
+  `~/.local/state/opencode-software-factory/quality/` (misma ruta
+  ajustable con `OPENCODE_SOFTWARE_FACTORY_STATE` o `XDG_STATE_HOME`).
+  Antes de escribir valida que el resultado siga siendo correcto (XML bien
+  formado y plugins detectados); si no puede inyectar con seguridad, no
+  modifica nada y devuelve `2`.
+- **Idempotente**: una segunda pasada con `--apply` no cambia el fichero.
+- **Se rechazan sin tocar nada** (código `2`): un `<build>` con `<plugins/>`
+  auto-cerrado (habría que crear un segundo `<plugins>`), un `<build>` sin
+  `</build>`, un primer `<build>` dentro de `<profiles>` o un `<profiles>` que
+  precede al `<build>` (posición ambigua).
+- **Detección Maven**: solo cuenta lo activo en `<build><plugins>`; un plugin
+  declarado únicamente en `<pluginManagement>`, en un `<profiles>` (que puede
+  estar inactivo), en `<reporting>` o solo como `<dependency>` (del proyecto o
+  de otro plugin) se reporta FALTA y se inyecta en
+  `<build><plugins>`, dejando esos bloques intactos. Si el `<build>` ya tiene
+  su `<plugins>` (aunque esté antes de `<pluginManagement>`), se usa ese y no
+  se crea otro: el XSD de Maven admite como máximo un `<plugins>` en `<build>`.
+- **Qué significa `PRESENTE`**: el `<artifactId>` del plugin aparece declarado
+  en el `<build>` del pom (en la práctica, dentro de su `<plugins>`: los
+  comentarios y los bloques `<pluginManagement>`, `<profiles>`, `<reporting>`,
+  `<dependencies>` y `<dependencyManagement>` se enmascaran antes de buscar, de
+  modo que **un plugin citado solo como `<dependency>` no cuenta**). `PRESENTE`
+  **no** implica que esté ligado al ciclo `verify`: un plugin declarado sin un
+  `<execution>` que se ejecute en esa fase se reporta PRESENTE pero
+  `mvn verify` no lo ejecuta. Revísalo a mano si dependes de eso.
+- **Alcance Gradle (limitación conocida)**: el análisis mira solo el
+  `build.gradle` de la raíz. Un plugin declarado únicamente en un submódulo
+  se reporta FALTA aunque otro módulo lo aplique, y uno declarado en el
+  `plugins {}` del raíz con `apply false` se reporta PRESENTE aunque no se
+  aplique ahí. No se resuelve en la fábrica: aplícalo a mano en los módulos
+  que corresponda.
+- Si el fichero de build no está en UTF-8 no se analiza ni se modifica y
+  devuelve `2`.
+- Si el proyecto no tiene ninguno de los tres ficheros de build, devuelve
+  `1`.
+- Ante cualquier duda, el mensaje invita a pegar los bloques a mano desde
+  `templates/quality/` (cada plantilla indica en su cabecera los comandos y
+  los informes que genera).
+
+#### Comandos de ejecución por ecosistema
+
+Usa el wrapper del proyecto si existe (`./mvnw` / `./gradlew`); si no, el
+`mvn`/`gradle` del sistema y dilo en el informe. `-B` = Maven no
+interactivo.
+
+| Propósito | Maven | Gradle |
+| --- | --- | --- |
+| Tests unitarios | `mvn -B test` | `./gradlew test` |
+| Batería completa (tests + análisis ligados a `verify`/`check`) | `mvn -B verify` (tests + checkstyle + pmd + spotbugs + jacoco) | `./gradlew build` y `./gradlew check` (tests + checkstyle + pmd + jacoco) |
+| Estilo | `mvn -B checkstyle:check` | `./gradlew checkstyleMain` |
+| Estática (reglas) | `mvn -B pmd:check` | `./gradlew pmdMain` |
+| Estática (bugs) | `mvn -B spotbugs:check` | `./gradlew spotbugsMain` (requiere el plugin del Portal declarado) |
+| Cobertura (informe) | `mvn -B jacoco:report` | `./gradlew jacocoTestReport` |
+| Auditoría OWASP de dependencias | `mvn org.owasp:dependency-check-maven:check` | `./gradlew dependencyCheckAnalyze` |
+| Árbol de dependencias | `mvn dependency:tree` | `./gradlew dependencies` |
+| SAST / secretos (si están instalados) | `semgrep --config auto .`, `bandit -r .`, `truffleHog .`, `detect-secrets scan` | ídem |
+
+#### Dónde quedan los informes
+
+| Herramienta | Maven | Gradle |
+| --- | --- | --- |
+| Cobertura HTML | `target/site/jacoco/index.html` | `build/reports/jacoco/test/html/index.html` |
+| Cobertura XML | `target/site/jacoco/jacoco.xml` | `build/reports/jacoco/test/jacocoTestReport.xml` |
+| Checkstyle | `target/checkstyle-result.xml` | `build/reports/checkstyle/main.html` |
+| SpotBugs | `target/spotbugsXml.xml` | `build/reports/spotbugs/main.html` |
+| PMD | `target/pmd.xml` | `build/reports/pmd/main.html` |
+| OWASP dependency-check | `target/dependency-check-report.html` | `build/reports/dependency-check/` |
+| Tests (JUnit XML/HTML) | `target/surefire-reports/` | `build/reports/tests/test/` |
+
+Los informes solo existen tras ejecutar la herramienta correspondiente:
+**nunca cites un informe que no se haya generado**.
+
+#### Qué hay disponible en esta máquina
+
+| Herramienta | Estado |
+| --- | --- |
+| Maven 3.9.16, Gradle 8.14.5, JDK 17 (además 21 y 25) | instalados |
+| Plugins de calidad (checkstyle, PMD, SpotBugs, JaCoCo, OWASP) | la fábrica **no** los instala: el build los declara y Maven/Gradle los descargan a `~/.m2` o `~/.gradle` en la primera ejecución |
+| Docker | no instalado → sin Testcontainers |
+| `semgrep`, `bandit`, `sonar-scanner`, `codeql`, `truffleHog`, `detect-secrets` | no instalados (`command -v <herramienta>` no los encuentra) |
+
+Si el proyecto no declara una herramienta, el resultado es
+`Task ... not found` o `No plugin found for prefix`. En ese caso la skill
+`java-build-quality` obliga a **reportar "no disponible" y proponer añadir
+el plugin con versión fijada**; si se prueba igualmente por descriptor, se
+informa el código de salida real y se deja claro que es una ejecución sin
+configuración del proyecto (reglas por defecto). Nunca se simula un
+resultado ni se inventa un porcentaje de cobertura.
+
+### Permisos de los agentes
+
+Los permisos van en el frontmatter de cada agente y se evalúan por orden,
+con la regla de OpenCode **"last matching rule wins"** (gana la **última**
+regla que coincide) y resultado `ask` si ninguna coincide; cuando una
+operación toca varios recursos (por ejemplo un comando compuesto), basta un
+`deny` para bloquearla. Referencia:
+https://opencode.ai/v2/docs/permissions/
+
+- **`architect` y `reviewer` (solo lectura)**: `edit * → deny` y
+  `shell * → deny` globales, con una lista explícita de reglas `allow` de
+  inspección colocadas **después** de los `deny` (para que ganen por
+  "last match"): lectura de git (`status`, `log`, `diff`, `show`),
+  inspección de ficheros (`ls`, `cat`, `grep`, `head`, `tail`, `sed -n`,
+  `wc`, `sort`, `uniq`, `cut`, `stat`, `diff`, `du`, `file`, `which`,
+  `echo`, `pwd`), pruebas (`pytest`, `unittest`, `./gradlew test`,
+  `./mvnw test`, `mvn test` y variantes `-B`), comandos de versión
+  (`java -version`, `mvn -version`, `gradle --version`) y las
+  verificaciones de la fábrica (`bash scripts/verify-factory.sh`,
+  `python3 scripts/factory.py self-test`, `python3 -m py_compile *`,
+  `jq -e *`). No hay regla para `find` (usa las herramientas `glob` y
+  `grep`) ni para `bash` genérico ni para la batería Java: el revisor se
+  apoya en los informes y códigos que produce `tester`.
+- **`reviewer` (además de lo anterior)**: puede inspeccionar un build sin
+  modificarlo con `python3 scripts/factory.py quality *` (solo informe) y
+  `python3 scripts/factory.py install --help` / `install * --dry-run`; el
+  `deny python3 scripts/factory.py quality *--apply*` va **después** del
+  allow, así que `quality --apply` (en cualquier posición del flag) queda
+  bloqueado para quien no debe modificar nada.
+- **`tester`**: `shell * → ask` por defecto y `edit * → deny`; la lista
+  `allow` habilita **sin aprobación** la inspección (git de lectura,
+  `bash scripts/verify-factory.sh`,
+  `python3 scripts/factory.py self-test|status|doctor`), la batería
+  Maven/Gradle (wrappers y del sistema, incluidos checkstyle, pmd,
+  spotbugs, jacoco, OWASP y `dependency:*`), Python
+  (`pytest`, `unittest`, `compileall`, `ruff`), Node/TypeScript (`npm`,
+  `tsc`, `eslint`, `node --test`), `make test|build`, `bash`/`sh`,
+  auditorías de dependencias y SAST/secretos cuando estén instalados.
+- **Denegados en `tester`** (y por tanto excluidos): `sudo`, `rm`,
+  `rm -rf`, `git push`, `git commit`, `git checkout`, `git reset`,
+  `git restore`, `curl`, `wget`, `bash -c`, `sh -c`, cualquier comando cuyo
+  texto contenga `>` (reglas `deny` `*>` y `*>*`, que también cubren
+  `2>&1` y un `>` dentro de un argumento), cualquier acceso a `*.env*` y
+  toda edición de archivos.
+- `find` no está permitido por shell en ningún agente: `-delete` y `-exec`
+  permitirían mutar el árbol de ficheros desde agentes de solo lectura.
+  Para localizar ficheros usa `glob` y `grep`.
+- En `architect` y `reviewer` las redirecciones quedan denegadas: si una
+  tarea legítima necesita redirigir, repórtalo en vez de ejecutarlo.
+- Las reglas `*.env*` → `deny` son las últimas reglas `shell` de
+  `architect`, `reviewer` y `tester`: cubren `grep`, `sed`, `ls`, etc.
+  sobre `.env`, no solo `cat`/`head`/`tail`.
+- `./gradlew bootRun` no tiene ninguna regla específica: en `tester`
+  resuelve en `ask` y en `architect`/`reviewer` cae en su `shell * → deny`.
+  En ningún caso arranca el servidor sin aprobación.
+- La lista de permitidos sin aprobación de `tester` es la que habilita la
+  batería de [Calidad Java](#calidad-java); la ausencia de una herramienta
+  en el PATH se informa como "no disponible", nunca como ejecutada.
+
+#### Ejecuciones no interactivas (`ask` y `--auto`)
+
+En un cliente **no interactivo** (`opencode run`, CI) un permiso que
+resuelve en `ask` no tiene quién lo apruebe y la operación se
+**auto-rechaza**. Por eso las reglas de inspección y de build de los agentes van como `allow`
+explícitas **después** de los `deny` globales (para que ganen por "last
+match"), y los `deny` de secretos, redirecciones y comandos peligrosos
+quedan al final. En ejecuciones **interactivas** el TUI pregunta en lugar
+de rechazar, y existe el flag global `--auto`
+(`opencode run --auto ...`), que aprueba lo que no esté denegado (los
+`deny` siguen aplicándose).
 
 ### Verificación y troubleshooting
 
@@ -232,157 +479,55 @@ empaquetados); no la mantiene la fábrica.
 | --- | --- | --- |
 | `jq -e . opencode.json` | JSON de la fábrica bien formado | `0` |
 | `python3 -m py_compile scripts/factory.py` | Sintaxis del instalador | `0` |
-| `python3 scripts/factory.py self-test` | Instalación/preservación/reversión en directorios temporales | `0`, salida `SELF-TEST COMPLETADO` |
-| `bash scripts/verify-factory.sh` | Batería estructural completa (config, modelo, newline, plantilla, agentes, skills y su frontmatter, config y agentes efectivos de OpenCode, self-test) | `0` y 11 líneas `PASS` |
+| `python3 scripts/factory.py self-test` | Instalación/preservación/reversión/inyección `quality` en directorios temporales | `0`, salida `SELF-TEST COMPLETADO` |
+| `bash scripts/verify-factory.sh` | Batería estructural completa (config, modelo, newline, plantilla y fragmentos de calidad, agentes, skills y su frontmatter, config y agentes efectivos de OpenCode, self-test) | `0` y 12 líneas `PASS` |
 | `python3 scripts/factory.py status <proyecto>` | Estado de los archivos instalados | `0` sin cambios, `2` con cambios |
 | `python3 scripts/factory.py doctor <proyecto>` | Comprobación funcional en el proyecto consumidor | `0` todo PASS, `2` hallazgos, `1` error técnico |
+| `python3 scripts/factory.py quality <proyecto> [--apply]` | Plugins de calidad del build | `0` completo, `1` error, `2` falta algo o build ambiguo |
 | `opencode debug config` / `opencode debug agents` | Configuración y agentes que OpenCode carga realmente | `0` con salida JSON |
 
-Observado el 25/10/2026: `verify-factory.sh` → 0 con 11 `PASS`,
-`py_compile` → 0, `self-test` → 0.
+`verify-factory.sh` es una comprobación **estructural**: no sustituye las
+pruebas del proyecto consumidor ni demuestra por sí sola que las respuestas
+de los agentes sean correctas.
 
-**`opencode debug agents` puede tardar en directorios recién instalados**: el
-servicio de OpenCode tarda en cargar la configuración de una ubicación nueva,
-y la primera invocación puede devolver `[]` o solo los agentes globales (por
-ejemplo `build` con modelo `None`), lo que producía **falsos negativos** en
-`doctor`. Comportamiento actual (corregido el 25/10/2026 en
-`scripts/factory.py`): `doctor` reintenta **hasta 5 veces con 2 s de espera**
-hasta que aparezcan los 6 agentes esperados, informando cada espera con una
-línea `NOTA: ... (intento N/5); se reintenta en 2 s.`; solo tras agotar los
-intentos informa los hallazgos con la respuesta disponible. Ejecutado hoy:
-`install` + `doctor` inmediato → **0** (27 `PASS`, con un reintento en el
-intento 1/5).
+**`opencode debug agents` puede tardar en directorios recién instalados**:
+el servicio de OpenCode tarda en cargar la configuración de una ubicación
+nueva, y la primera invocación puede devolver `[]` o solo los agentes
+globales (por ejemplo `build` con modelo `None`), lo que produciría falsos
+negativos en `doctor`. Por eso `doctor` reintenta **hasta 5 veces con 2 s
+de espera** hasta que aparezcan los 6 agentes esperados, informando cada
+espera con una línea `NOTA: ... (intento N/5); se reintenta en 2 s.`; solo
+tras agotar los intentos informa los hallazgos con la respuesta disponible.
 
 **Re-ejecutar `status`/`doctor` tras modificar archivos**:
 
 - `status` → `2` y línea `MODIFICADO (se conservará)`: el archivo se editó
-  respecto al manifiesto; `uninstall` lo conservará y actualizará el registro.
-  Es el estado esperado tras personalizar un agente o comando.
+  respecto al manifiesto; `uninstall` lo conservará y actualizará el
+  registro. Es el estado esperado tras personalizar un agente o comando.
 - `doctor` valida el *frontmatter* de los agentes (id, modo, proveedor,
-  modelo) y la configuración que OpenCode carga: editado un agente añadiendo
-  una línea al final del cuerpo, `doctor` → `0` (comprobado hoy); si cambias
-  `mode:` o `model:`, `doctor` → `2`.
+  modelo) y la configuración que OpenCode carga: si cambias `mode:` o
+  `model:` en un agente, `doctor` → `2`.
 - Si el manifiesto desaparece, `status` informa `Sin instalación registrada`
-  → `0`, y `install` volverá a estar disponible.
-
-**Permisos en ejecuciones no interactivas (`opencode run`, CI)**: según la
-doc oficial de permisos de OpenCode (https://opencode.ai/v2/docs/permissions/)
-rige **"last matching rule wins"** (gana la ÚLTIMA regla que coincide; si
-ninguna coincide, el resultado es `ask`). En un cliente **no interactivo**
-(`opencode run`, CI) un permiso que resuelve en `ask` **se auto-rechaza**
-(`permission requested: shell (...); auto-rejecting`), y **"Any `deny` denies
-the operation"**: si un comando compuesto (`cmd; echo EXIT=$?`, `bash -c '...'`)
-produce varios recursos, basta con que una parte caiga en un `deny` para que
-se bloquee la operación entera. Por eso los agentes llevan listas `allow`
-explícitas de inspección y de build/tests **después** de los `deny` globales
-(para que ganen por "last match") y `deny` explícitos de secretos al final.
-En ejecuciones **interactivas** el TUI pregunta en lugar de auto-rechazar, y
-existe el flag global `--auto` (`opencode run --auto ...`) que aprueba lo que
-no esté denegado.
-
-### Ejemplo real: demo Spring Boot (25 de octubre de 2026)
-
-Proyecto: `/tmp/opencode/factory-demo/factory-demo` — Spring Boot **3.5.16**
-con Gradle y JaCoCo (`id 'org.springframework.boot' version '3.5.16'`,
-`id 'jacoco'`), generado con Spring Initializr. Manifiesto
-`~/.local/state/opencode-software-factory/51c187548ef3be12270ce0b5.json`:
-31 archivos, commit de la fábrica `4c431b0`.
-
-Ejecutado hoy en ese proyecto:
-
-- `python3 scripts/factory.py status /tmp/opencode/factory-demo/factory-demo`
-  → **0**, 31 líneas `SIN CAMBIOS`.
-- `python3 scripts/factory.py doctor /tmp/opencode/factory-demo/factory-demo`
-  → **0**, 27 `PASS`, 0 `ERROR`, cierre
-  `Doctor: la fábrica funciona en este proyecto.`
-- `./gradlew build` (en el demo) → **0**, `BUILD SUCCESSFUL in 955ms`.
-
-Reproducido hoy en un directorio nuevo (`/tmp/opencode/factory-guide-demo`)
-para demostrar el flujo completo y limpio:
-
-- `install` → **0** (31 archivos nuevos, manifiesto creado).
-- `doctor` inmediato después → **0** (27 `PASS`, 1 `NOTA` de reintento).
-- `status` → **0** (31 `SIN CAMBIOS`).
-- `uninstall` → **0** (`Desinstalación completada. Archivos eliminados: 31`).
-
-## Estado de migración
-
-El flujo real es un instalador reversible controlado por Git:
-
-- `python3 scripts/factory.py install <proyecto>`: instala agentes, skills,
-  comandos, `opencode.json` y (solo si falta) `AGENTS.md` en el proyecto
-  consumidor.
-- `python3 scripts/factory.py status <proyecto>`: revisa los archivos instalados.
-- `python3 scripts/factory.py uninstall <proyecto>`: retira únicamente los
-  archivos sin modificar.
-- `python3 scripts/factory.py doctor <proyecto>`: comprueba que la fábrica
-  funciona realmente en el proyecto consumidor usando el CLI de OpenCode
-  (`opencode debug agents` y `opencode debug config`): los 6 agentes
-  reconocidos con su modo, proveedor y modelo correctos, y la carga del
-  `opencode.json` del proyecto con `default_agent: build` y el modelo esperado.
-  Devuelve 0 si todo PASS, 2 si hay hallazgos y 1 si hay un error técnico.
-- `python3 scripts/factory.py self-test`: prueba el instalador en directorios
-  temporales aislados.
-
-### Modelo fijado
-
-La fábrica fija `opencode-go/mimo-v2.6-flash` en `opencode.json` y en el
-frontmatter de los seis agentes de `.opencode/agents/`.
-
-### Migración de la configuración
-
-- `provider` → `providers` (la clave `provider` está deprecada según el
-  esquema oficial de OpenCode).
-- `compaction.prune` → `compaction.keep.tokens: 15000` (`prune` está deprecado).
-- La configuración actual **no** usa `providers`: el modelo es el integrado de
-  OpenCode. El bloque `providers` solo hace falta al volver a OpenRouter
-  (ver más abajo).
-
-### Instalación de `opencode.json` con protección `CONFLICTO`
-
-- Si el proyecto no tiene `opencode.json`, se crea con el contenido de la
-  fábrica y se registra en el manifiesto.
-- Si el `opencode.json` del proyecto es idéntico al de la fábrica, se omite
-  (`skipped`) y se conserva.
-- Si el `opencode.json` del proyecto es distinto, el instalador entra en
-  estado `CONFLICTO` y devuelve el código 2 sin instalar nada: el archivo del
-  proyecto jamás se sobrescribe.
-
-### Instalación de `AGENTS.md` (plantilla opcional)
-
-- Si el proyecto **no** tiene `AGENTS.md`, se crea con la plantilla
-  `templates/AGENTS.md` y se registra en el manifiesto.
-- Si el proyecto **ya** tiene `AGENTS.md` (archivo, enlace o lo que sea), se
-  conserva intacto: no es un conflicto, no aborta la instalación y no se
-  registra en el manifiesto. Nunca se sobrescribe.
-- `uninstall` retira el `AGENTS.md` creado por la fábrica solo si nadie lo
-  modificó; si el usuario lo editó, se conserva.
-
-Los agentes `build` y `reverse` siguen activos en la configuración global.
-La instantánea se conserva para migrarlos de forma controlada más adelante.
-No modificar ni instalar automáticamente esa instantánea.
-
-La configuración global, los MCP y las credenciales existentes no se
-modifican mediante esta captura.
+  → `0`, y `install` vuelve a estar disponible.
 
 ## Modelo de referencia
 
 `opencode-go/mimo-v2.6-flash` (MiMo V2.6 Flash, servido por el proveedor
-integrado OpenCode Go). Es el modelo fijado en `opencode.json` y en los seis
-agentes, sin bloque `providers`: el formato `opencode-go/<model-id>` en la
-clave `model` basta porque OpenCode ya integra el proveedor.
+integrado OpenCode Go). Es el modelo fijado en `opencode.json` y en los
+seis agentes, sin bloque `providers`: el formato `opencode-go/<model-id>`
+en la clave `model` basta porque OpenCode ya integra el proveedor.
 
 Requisitos:
 
-- Plan OpenCode Go activo, con un límite de uso de aproximadamente **60 $/mes**
-  propio del plan Go.
-- Conexión del workspace mediante `/connect` → **OpenCode Go** (autenticación
-  con la cuenta de OpenCode).
+- Plan OpenCode Go activo, con un límite de uso de aproximadamente
+  **60 $/mes** propio del plan Go.
+- Conexión del workspace mediante `/connect` → **OpenCode Go**
+  (autenticación con la cuenta de OpenCode).
 
-## Cómo volver a OpenRouter (cuando haya crédito)
+### Cambio a otro proveedor (OpenRouter)
 
-Cuando el workspace vuelva a tener crédito, se puede restaurar el modelo
-anterior con este bloque en `opencode.json`:
+Para usar OpenRouter en lugar del proveedor integrado, `opencode.json`
+adopta esta forma:
 
 ```json
 {
@@ -401,11 +546,37 @@ anterior con este bloque en `opencode.json`:
 }
 ```
 
-Advertencia: sin `limit.output` ni `options.max_tokens`, OpenCode solicita el
-valor por defecto de **131072** tokens de salida, que es exactamente lo que
-provoca el error de créditos anterior. Además hay que volver a fijar
-`openrouter/xiaomi/mimo-v2.6-flash` en el frontmatter `model:` de los seis
-agentes de `.opencode/agents/` (hoy fijan `opencode-go/mimo-v2.6-flash`).
+Sin `limit.output` ni `options.max_tokens`, OpenCode pide el valor por
+defecto de **131072** tokens de salida, muy por encima del límite de 3500
+configurado en el bloque anterior.
+Además hay que fijar `openrouter/xiaomi/mimo-v2.6-flash` en el frontmatter
+`model:` de los seis agentes de `.opencode/agents/`.
+
+## MCP y configuración global
+
+Servidores MCP declarados en la configuración global del usuario
+(`~/.config/opencode/opencode.json`), que la fábrica no toca:
+
+| MCP | Uso |
+| --- | --- |
+| `context7` | documentación de librerías y frameworks |
+| `playwright` | navegación y pruebas de navegador |
+| `rea` | acompaña a la skill de terceros `reverse-engineer-anything` |
+
+Los tres se obtienen con
+`jq -r '.mcp.servers | keys[]' ~/.config/opencode/opencode.json`.
+Ninguno lo gestiona ni instala la fábrica.
+
+**SonarQube no se usa**: requiere servidor propio o cuenta SonarCloud con
+token, `sonar-scanner` no está instalado y tampoco hay Docker para
+levantarlo. Mientras tanto, la estrategia es la CLI-first descrita en
+[Calidad Java](#calidad-java). Si algún día se adopta, la configuración del
+escáner, la URL del servidor y el **token van en la configuración global
+del usuario** o en variables de entorno.
+
+**Regla general**: MCP, credenciales, tokens y cualquier secreto viven en
+la configuración global del usuario, **nunca en el `opencode.json` de la
+fábrica** ni en ningún fichero versionado del repositorio.
 
 ## Principios de calidad
 
@@ -415,469 +586,33 @@ agentes de `.opencode/agents/` (hoy fijan `opencode-go/mimo-v2.6-flash`).
 - Proteger operaciones destructivas y despliegues mediante aprobación.
 - Separar hallazgos comprobados de hipótesis.
 
-## Herramientas de calidad (CLI, sin servidor)
+## Separación entre fábrica y proyectos consumidores
 
-Estrategia adoptada: **CLI-first**. Toda la calidad se ejecuta con
-herramientas de línea de comandos locales, sin servidor, sin contenedores y
-sin credenciales en el repositorio. La skill `java-build-quality` (y el
-comando `/calidad-java`) son la referencia operativa.
-
-### Comandos exactos (Maven / Gradle)
-
-Usa el wrapper del proyecto si existe (`./mvnw` / `./gradlew`); si no, el
-`mvn`/`gradle` del sistema y dilo en el informe. `-B` = Maven no interactivo.
-
-| Propósito | Maven | Gradle |
-| --- | --- | --- |
-| Tests unitarios | `mvn -B test` | `./gradlew test` |
-| Build completo y verificación (tests + cualquier plugin ligado a las fases `verify`/`check`) | `mvn -B verify` | `./gradlew build` y `./gradlew check` |
-| Estilo | `mvn checkstyle:check` | `./gradlew checkstyleMain` |
-| Estática (bugs) | `mvn spotbugs:check` | `./gradlew spotbugsMain` |
-| Estática (reglas) | `mvn pmd:check` | `./gradlew pmdMain` |
-| Cobertura (informe) | `mvn jacoco:report` | `./gradlew jacocoTestReport` |
-| Auditoría OWASP de dependencias | `mvn org.owasp:dependency-check-maven:check` | `./gradlew dependencyCheckAnalyze` |
-| Árbol de dependencias | `mvn dependency:tree` | `./gradlew dependencies` |
-| SAST / secretos (si están instalados) | `semgrep --config auto .`, `bandit -r .`, `truffleHog .`, `detect-secrets scan` | ídem |
-
-La última fila **no se ejecutó en este entorno**: ninguna de esas
-herramientas SAST está instalada en esta máquina.
-
-### Dónde quedan los informes
-
-| Herramienta | Maven | Gradle |
-| --- | --- | --- |
-| Cobertura HTML | `target/site/jacoco/index.html` | `build/reports/jacoco/test/html/index.html` |
-| Cobertura XML | `target/site/jacoco/jacoco.xml` | `build/reports/jacoco/test/test/index.xml` |
-| Checkstyle | `target/checkstyle-result.xml` | `build/reports/checkstyle/main.html` |
-| SpotBugs | `target/spotbugsXml.xml` | `build/reports/spotbugs/main.html` |
-| PMD | `target/pmd.xml` | `build/reports/pmd/main.html` |
-| OWASP dependency-check | `target/dependency-check-report.html` | `build/reports/dependency-check/` |
-| Tests (JUnit XML/HTML) | `target/surefire-reports/` | `build/reports/tests/test/` |
-
-Los informes solo existen tras ejecutar la herramienta correspondiente:
-**nunca cites un informe que no se haya generado**.
-
-### Qué permisos habilitan la batería
-
-En `tester` (`.opencode/agents/tester.md`), con edición denegada
-(`edit * → deny`):
-
-- Por defecto `shell * → ask`; la lista `effect: allow` habilita **sin
-  aprobación**: `./gradlew test|build|clean test|check|jacocoTestReport|
-  spotbugsMain|checkstyleMain|pmdMain|dependencies|spotbugsTest` (además de
-  `./gradlew dependencyCheckAnalyze`), `./mvnw -B -v`, `./mvnw test|-B
-  test|verify|-B verify|clean test|-B clean test|checkstyle:*|pmd:*|
-  spotbugs:*|jacoco:*|org.owasp:dependency-check-maven:*|dependency:*`, más
-  las variantes `-B` del wrapper (`./mvnw -B checkstyle:*|pmd:*|spotbugs:*|
-  jacoco:*|org.owasp:dependency-check-maven:*`),
-  `gradle test|check|clean test|build|jacocoTestReport`, `mvn test|verify|
-  -B test|-B verify|-B clean test`, `mvn checkstyle:*|spotbugs:*|pmd:*|
-  jacoco:*|dependency:*`, `mvn org.owasp:dependency-check-maven:*`, más las
-  variantes `-B` de Maven (`mvn -B checkstyle:*|pmd:*|spotbugs:*|jacoco:*|
-  org.owasp:dependency-check-maven:*|dependency:*`), además de
-  pytest/unittest/ruff, npm/tsc/eslint, `make test` y `make build` (no existe
-  regla para `make` a secas: queda en `ask`), `bash`/`sh` y las lecturas de
-  git (`status`, `diff`, `log`, `show`).
-- Denegados y por tanto excluidos: `sudo`, `rm`, `rm -rf`, `git push`,
-  `git commit`, `git checkout`, `git reset`, `git restore`, `curl`, `wget`,
-  `bash -c`, `sh -c`, las redirecciones de escritura —las reglas `deny`
-  `*>` y `*>*`, que casan cualquier comando cuyo texto contenga `>` (también
-  `2>&1`, `2>/dev/null` o un `>` presente dentro de un argumento, p. ej. un
-  patrón de `grep`)—, cualquier acceso a `*.env*` y toda edición de
-  archivos.
-
-En `reviewer` (`.opencode/agents/reviewer.md`), también sin edición y con
-`shell * → deny` global, la lista de permitidos son **41 reglas `allow`**:
-lectura de git (`status`, `log`, `diff`, `show`), pruebas (`pytest`,
-`python3 -m pytest`, `python3 -m unittest`, `./gradlew test`, `./mvnw test`,
-`./mvnw -B test`, `mvn test`, `mvn -B test`), inspección de ficheros (`ls`,
-`cat`, `grep`, `head`, `tail`, `sed -n`, `wc`, `sort`, `uniq`, `cut`, `stat`,
-`diff`, `du`, `file`, `which`, `echo`, `pwd`), comandos de versión o build
-mínimos (`java -version`, `mvn -version`, `gradle --version`,
-`./gradlew --version|tasks|check|assemble|bootJar`) y las verificaciones de
-la fábrica (`bash scripts/verify-factory.sh`,
-`python3 scripts/factory.py self-test`, `python3 -m py_compile *`,
-`jq -e *`). **No hay regla para `find`** (usa las herramientas `glob` y
-`grep`), **ni para `bash` genérico** (solo existe el `allow` puntual
-`bash scripts/verify-factory.sh`), ni para el resto de la batería Java
-(checkstyle, spotbugs, pmd, jacoco, OWASP): el revisor se apoya en los
-informes y códigos que produce `tester`.
-
-`./gradlew bootRun` **no tiene ninguna regla específica**: en `tester` (cuya
-regla general es `shell * → ask`) resuelve en `ask` —en ejecución no
-interactiva se auto-rechaza y en el TUI pregunta— y en `architect`/`reviewer`
-cae en su regla global `shell * → deny`. En ningún caso arranca el servidor
-sin aprobación; para probar en vivo se usa a mano o con `--auto`/interactivo.
-
-#### Nota de seguridad sobre los permisos de shell
-
-Corrección aplicada el 25 de octubre de 2026 tras defectos **demostrados** en
-ejecución real (no hipótesis):
-
-- **`find` no está permitido por `shell` en ningún agente**: `-delete` y
-  `-exec` permitían mutar el árbol de ficheros desde agentes de solo lectura
-  (demostrado: `find scripts -maxdepth 1 -name verify-factory.sh -delete` borró
-  el fichero sin ninguna denegación). Para localizar ficheros usa las
-  herramientas `glob` y `grep`.
-- **En `architect` y `reviewer` toda redirección queda denegada**: existe una
-  regla `shell` `deny` cuyo patrón casaba cualquier comando que contenga `>`,
-  colocada después de los `deny` de `*.env*` y antes de la regla final
-  `*.env*` → `deny`. Así `echo HOLA > fichero` deja de escribir archivos desde
-  un agente de solo lectura (antes lo escribía). Si una tarea legítima necesita
-  redirigir, repórtalo en vez de ejecutarlo.
-- **En `tester`, `bash -c *` y `sh -c *` quedan denegados** para que no eludan
-  sus `deny` (`bash -c 'rm ...'`, `bash -c 'curl ...'`, `bash -c 'git push ...'`).
-  Las redirecciones de escritura las cubren las reglas `deny` `*>` y `*>*`,
-  equivalentes: casan cualquier comando cuyo texto contenga `>`, así que
-  también bloquean `2>&1`, `2>/dev/null` y un `>` presente dentro de un
-  argumento (p. ej. un patrón de `grep`). **No rompe el flujo obligatorio**:
-  ninguno de los comandos que prescribe `/calidad-java` (los siete pasos de
-  la batería) ni ninguna de las verificaciones (`bash
-  scripts/verify-factory.sh`, `python3 scripts/factory.py self-test`,
-  `python3 -m py_compile *`, `jq -e *`) lleva `>` en su texto. Si necesitas
-  comparar texto, usa la herramienta `grep` (o `glob`) en lugar de la shell,
-  o ejecuta el comando sin redirigir. El `allow`
-  `bash scripts/verify-factory.sh` sigue funcionando porque su texto tampoco
-  contiene `>`.
-- Las reglas `*.env*` → `deny` son las **últimas** reglas `shell` de
-  `architect`, `reviewer` y `tester`: cubren `grep`, `sed`, `ls`, etc. sobre
-  `.env`, no solo `cat`/`head`/`tail`.
-
-### Qué está verificado hoy (25 de octubre de 2026)
-
-Ejecutado en el demo Spring Boot (`/tmp/opencode/factory-demo/factory-demo`,
-Gradle 8.14.5 + JDK 17.0.20 del PATH):
-
-| Comando | Código | Resultado observado |
-| --- | --- | --- |
-| `./gradlew build` | `0` | `BUILD SUCCESSFUL in 955ms` |
-| `./gradlew check` | `0` | `BUILD SUCCESSFUL in 636ms` |
-| `./gradlew jacocoTestReport` | `0` | informe en `build/reports/jacoco/test/html/index.html` |
-| `./gradlew spotbugsMain` | `1` | `Task 'spotbugsMain' not found in root project 'factory-demo'` (plugin no declarado) |
-| `./gradlew checkstyleMain` | `1` | `Task 'checkstyleMain' not found...` (idem) |
-| `./gradlew pmdMain` | `1` | `Task 'pmdMain' not found...` (idem) |
-| `./gradlew dependencyCheckAnalyze` | `1` | `Task 'dependencyCheckAnalyze' not found...` (idem) |
-
-Ejecutado sobre una **copia** de `springboot-maven/` en `/tmp` (Maven 3.9.16,
-proyecto de prueba que solo declara el plugin compilador; el directorio de
-origen se eliminó posteriormente del repo —la copia se hizo cuando existía—):
-
-| Comando | Código | Resultado observado |
-| --- | --- | --- |
-| `mvn -B test` | `0` | `BUILD SUCCESS`, `No tests to run` |
-| `mvn -B verify` | `0` | `BUILD SUCCESS` |
-| `mvn -B checkstyle:check` | `1` | resuelve el plugin por prefijo y ejecuta con reglas por defecto: `You have 5 Checkstyle violations`; informe en `target/checkstyle-result.xml` |
-| `mvn -B spotbugs:check` | `0` | `BUILD SUCCESS`; informe en `target/spotbugsXml.xml` |
-| `mvn -B pmd:check` | `0` | `BUILD SUCCESS` |
-| `mvn -B jacoco:report` | `1` | `No plugin found for prefix 'jacoco'`: sin `jacoco-maven-plugin` en el `pom.xml` no hay informe |
-
-También verificado hoy: para cada una de `semgrep`, `bandit`,
-`sonar-scanner`, `codeql`, `truffleHog` y `detect-secrets`,
-`command -v <herramienta>` → **no encontrado**.
-
-**No ejecutado en este entorno** (señálalo siempre como tal):
-
-- `mvn org.owasp:dependency-check-maven:check` y
-  `./gradlew dependencyCheckAnalyze`: no se ejecutaron; la primera ejecución
-  descarga la base NVD (minutos y red). En el demo, además, falla por no
-  tener el plugin declarado.
-- Batería Maven sobre un proyecto que declare `checkstyle`, `spotbugs`, `pmd`
-  y `jacoco` en su `pom.xml` (los resultados de arriba son con plugins
-  resueltos por prefijo o sin configurar).
-- Cualquier herramienta SAST/secretos de la tabla anterior: no instalada.
-- Pruebas con Testcontainers u otros contenedores: Docker no está instalado
-  (`docker --version` → 127).
-- La versión concreta de los plugins de build resueltos por descriptor y la
-  ejecución real del servidor MCP `playwright`.
-
-### Qué requiere configuración del proyecto
-
-Si el proyecto no declara la herramienta, el resultado es
-`Task ... not found` o `No plugin found for prefix` (códigos `1` de arriba).
-En ese caso, la skill `java-build-quality` obliga a **reportar "no
-disponible" y proponer añadir el plugin con versión fijada**; si se decide
-probarlo igualmente por descriptor, se informa el código de salida real y se
-deja claro que es una ejecución **sin configuración del proyecto** (reglas
-por defecto). Nunca se simula un resultado ni se inventa un porcentaje de
-cobertura.
-
-## SonarQube y MCPs (opcional, requiere infraestructura)
-
-### Por qué no está SonarQube hoy
-
-- SonarQube necesita un **servidor propio o una cuenta SonarCloud con
-  token**; no es una CLI autocontenida.
-- En este entorno **no hay Docker** (`docker --version` → 127), **no hay
-  servidor SonarQube** y **`sonar-scanner` no está instalado**
-  (`command -v sonar-scanner` → no encontrado). Todo verificado el
-  25/10/2026.
-- Por tanto, la estrategia adoptada es **CLI-first** (sección anterior):
-  checkstyle, spotbugs, pmd, jacoco, OWASP dependency-check y semgrep/bandit
-  cuando estén instalados, todo local y reproducible con un comando.
-
-### Si algún día se adopta
-
-- La configuración del escáner, la URL del servidor y el **token van en la
-  configuración global del usuario** (`~/.config/opencode/opencode.json`) o
-  en variables de entorno, **nunca en el `opencode.json` de la fábrica** ni
-  en ningún archivo versionado del repositorio: evita secretos en Git y
-  mantiene separada la fábrica de la infraestructura personal.
-- El `opencode.json` que instala la fábrica sigue siendo solo
-  `model`, `default_agent` y `compaction` (verificado hoy con `jq -e
-  opencode.json` → 0).
-
-### Decisiones registradas sobre MCP
-
-- **MCPs comunitarios de análisis Java / SonarQube evaluados y descartados**
-  por criterios de licencia, infraestructura necesaria (servidor/token) y
-  mantenimiento de la comunidad: ninguno se instaló. Estado: **no verificado**
-  (no se ejecutó ninguno, no se comprobó su licencia ni su comportamiento en
-  esta máquina).
-- **`context7`**: MCP de documentación disponible globalmente en este
-  entorno; **no lo gestiona la fábrica** ni se instala con ella. Estado:
-  presente en la configuración global (ver abajo).
-- **`playwright`**: MCP de navegador configurado en la **config global del
-  usuario**, no en la de la fábrica. Estado: presente en la configuración
-  global; la navegación real por MCP **no se ejecutó** en esta sesión.
-- Servidores MCP declarados hoy en la config global (comando real):
-  `jq -r '.mcp.servers | keys[]' ~/.config/opencode/opencode.json` →
-  `context7`, `playwright`, `rea` (código 0, 25/10/2026). `rea` acompaña a
-  la skill de terceros `reverse-engineer-anything` y tampoco lo gestiona la
-  fábrica.
-
-## Mejoras de fiabilidad y validación
-
-### Arquitecto: planes respaldados por evidencia
-
-El agente `architect` debe inspeccionar las instrucciones, los manifiestos,
-el código y las pruebas pertinentes antes de proponer un plan. Debe distinguir
-hechos verificados, inferencias y datos desconocidos; diferenciar versiones
-declaradas de versiones resueltas; y no inventar rutas, dependencias,
-comandos ni resultados. Su función es planificar, no modificar el repositorio.
-
-Archivo: `.opencode/agents/architect.md`.
-
-### Descubrimiento de proyectos
-
-La skill `project-discovery` exige que las conclusiones sobre estructura,
-stack, dependencias, pruebas y comandos se apoyen en archivos leídos o
-comprobaciones ejecutadas. También exige revisar el estado de Git y respetar
-los cambios preexistentes.
-
-Archivo: `.opencode/skills/project-discovery/SKILL.md`.
-
-### Tester: resultados reales y permisos
-
-El agente `tester` debe informar los comandos ejecutados, sus códigos de
-salida, los resultados observados y las pruebas que no se ejecutaron.
-Debe diferenciar la verificación estructural de la ejecución real de las
-pruebas del proyecto. La edición de archivos permanece denegada.
-
-Permisos de shell actuales del `tester`:
-
-- **Sin aprobación** (`effect: allow`): lectura de Git (`git status`, `git
-  diff`, `git log`, `git show`), `bash scripts/verify-factory.sh`,
-  `python3 scripts/factory.py self-test|status|doctor`, builds y tests
-  habituales: Gradle (`./gradlew test|build|clean test|check|
-  jacocoTestReport|spotbugsMain|checkstyleMain|pmdMain|dependencies|
-  spotbugsTest|dependencyCheckAnalyze`, `gradle test|check|clean test|build|
-  jacocoTestReport`), Maven con wrapper (`./mvnw -B -v`, `./mvnw test|-B
-  test|verify|-B verify|clean test|-B clean test|checkstyle:*|pmd:*|
-  spotbugs:*|jacoco:*|org.owasp:dependency-check-maven:*|dependency:*`, más
-  las variantes `-B` `./mvnw -B checkstyle:*|pmd:*|spotbugs:*|jacoco:*|
-  org.owasp:dependency-check-maven:*`), Maven del sistema (`mvn test|verify`,
-  `mvn -B test|verify|-B clean test`, `mvn checkstyle:*|spotbugs:*|pmd:*|
-  jacoco:*|dependency:*`, `mvn org.owasp:dependency-check-maven:*`, más las
-  variantes `-B` `mvn -B checkstyle:*|pmd:*|spotbugs:*|jacoco:*|
-  org.owasp:dependency-check-maven:*|dependency:*`), Python
-  (`python3 -m pytest`, `pytest`, `python3 -m unittest`,
-  `python3 -m compileall`, `ruff check`), Node/TS (`npm test`,
-  `npm run test`, `npm ci`, `npm install`, `npx tsc`, `tsc`, `eslint`,
-  `node --test`), `make test|build`, `bash`/`sh`, auditorías de dependencias
-  (`npm audit`, `pnpm audit`, `yarn audit`, `pip-audit`, `safety check`,
-  `cargo audit`, `govulncheck`) y SAST/secretos (`semgrep`, `bandit`,
-  `codeql`, `gosec`, `sonar-scanner`, `truffleHog`, `git-secrets`,
-  `detect-secrets`, `cargo clippy`).
-- **Denegados explícitamente** (`effect: deny`, y por tanto prevalecen):
-  `sudo`, `rm`, `rm -rf`, `git push`, `git commit`, `git checkout`,
-  `git reset`, `git restore`, `curl`, `wget`, `bash -c`, `sh -c` (para que no
-  eludan los `deny` anteriores), las redirecciones de escritura, que cubren
-  las reglas `*>` y `*>*` (bloquean cualquier comando cuyo texto contenga
-  `>`), cualquier comando sobre `*.env*` (cubre también `grep`, `sed`,
-  `ls`...) y toda edición de archivos. Las reglas `*.env*` son las últimas
-  reglas `shell` de la lista.
-- **Todo lo demás** sigue pidiendo aprobación (`shell * -> ask`). `find` ya no
-  está permitido: usa `glob`/`grep` (ver
-  [Nota de seguridad sobre los permisos de shell](#nota-de-seguridad-sobre-los-permisos-de-shell)).
-
-La lista de comandos permitidos sin aprobación es la que habilita la batería
-descrita en [Herramientas de calidad](#herramientas-de-calidad-cli-sin-servidor);
-la ausencia de una herramienta en el PATH se informa como "no disponible",
-nunca como ejecutada.
-
-Archivo: `.opencode/agents/tester.md`.
-
-### Modelo y verificación de la fábrica
-
-La configuración del repositorio y el script `scripts/verify-factory.sh`
-usan `opencode-go/mimo-v2.6-flash` como modelo configurado.
-
-El script `bash scripts/verify-factory.sh` valida la configuración JSON, el
-modelo fijado en los seis agentes, el newline final de los archivos
-instalables, la plantilla `templates/AGENTS.md`, la estructura de agentes y
-skills, el frontmatter (`---`, `name` y `description`) de **todas** las
-skills (11: 10 locales de `.opencode/skills` más la de terceros
-`reverse-engineer-anything`, en `.agents/skills`), la carga de la
-configuración de OpenCode, el reconocimiento de los agentes y, al final, el
-self-test del instalador. Esta comprobación es
-estructural: no sustituye las pruebas del proyecto consumidor ni demuestra
-por sí sola que las respuestas de los agentes sean correctas.
-
-### Validaciones registradas
-
-Ejecutadas el 24 de octubre de 2026 en este repositorio, con sus códigos de
-salida reales:
-
-- `jq -e . opencode.json` → código 0 (JSON válido).
-- `python3 -m py_compile scripts/factory.py` → código 0 (sin errores).
-- `python3 scripts/factory.py self-test` → código 0, salida
-  `SELF-TEST COMPLETADO`. Incluye los cuatro casos: instalación con
-  `AGENTS.md` ausente (se crea y la desinstalación lo retira),
-  `AGENTS.md` preexistente (se conserva intacto, no es conflicto),
-  `opencode.json` idéntico y conflictos que abortan sin sobrescribir.
-- `python3 scripts/factory.py doctor <proyecto recién instalado>` → código 0
-  con 27 líneas `PASS` y 0 `ERROR`. Se observó que la primera invocación de
-  `opencode debug agents` en un directorio nuevo devuelve `[]`; `doctor`
-  lo detecta, lo informa con una línea `NOTA` y reintenta. **Actualizado el
-  25/10/2026**: el reintento pasó a ser de hasta 5 intentos con 2 s de
-  espera (además, la respuesta parcial puede ser `[]` o solo los agentes
-  globales, por ejemplo `build` con modelo `None`); el detalle y la salida
-  real están en [Guía de uso](#guía-de-uso).
-- `python3 scripts/factory.py doctor <directorio sin opencode.json>` →
-  código 1 con mensaje explicativo.
-- `bash scripts/verify-factory.sh` → código 0, todos los pasos en `PASS`.
-- Estas validaciones no equivalen a ejecutar las pruebas de un proyecto Java
-  ni a verificar la calidad de todas las respuestas generadas por los agentes.
-- Validaciones del 25 de octubre de 2026 (batería completa con códigos
-  reales, demo Spring Boot incluido): ver
-  [Guía de uso](#guía-de-uso) y
-  [Ejemplo real](#ejemplo-real-demo-spring-boot-25-de-octubre-de-2026).
-
-### Validación del cambio a OpenCode Go (25 de octubre de 2026)
-
-Cambio de modelo de `nvidia/nemotron-3-ultra-550b-a55b` a
-`opencode-go/mimo-v2.6-flash`, ejecutado con estos códigos de salida reales:
-
-- `jq -e . opencode.json` y `jq -e ~/.config/opencode/opencode.json` → código 0.
-- `grep -l '^model: opencode-go/mimo-v2.6-flash' .opencode/agents/*.md | wc -l`
-  → `6`.
-- `grep -rn 'nemotron-3-ultra-550b-a55b'` sobre JSON/MD/SH/PY del repositorio →
-  0 coincidencias.
-- `python3 -m py_compile scripts/factory.py` → código 0.
-- `python3 scripts/factory.py self-test` → código 0, `SELF-TEST COMPLETADO`.
-- `bash scripts/verify-factory.sh` → código 0, todos los pasos en `PASS`.
-- `opencode debug config` → para `opencode.json` del repositorio:
-  `providerID: opencode-go`, `model: mimo-v2.6-flash`, `default_agent: build`.
-- `opencode debug agents` → los seis agentes con `opencode-go/mimo-v2.6-flash`
-  y sus modos esperados.
-- `opencode run --model opencode-go/mimo-v2.6-flash "Responde únicamente: OK"`
-  → respuesta `OK`, código 0 (llamada real al modelo).
-- Config global: respaldo `~/.config/opencode/opencode.json.bak-20261025`;
-  la comparación con `del(.model)` da código 0, es decir, solo cambia el campo
-  `model` (`mistral/codestral-2508` → `opencode-go/mimo-v2.6-flash`).
-- Corrección aplicada en la revisión: el grep del paso 1b quedó anclado a la
-  línea completa (`grep -qx`), de modo que un modelo con sufijo (por ejemplo
-  `mimo-v2.6-flash-free`) ya no aprueba el check. Comprobado con un fichero
-  falso: sufijo `-free` → código 1, modelo exacto → código 0.
-
-### Separación entre fábrica y proyectos consumidores
-
-La fuente mantenible de los agentes, skills, comandos, scripts y documentación
-debe permanecer en este repositorio: `opencode-software-factory`.
-Los proyectos consumidores son destinos de instalación y prueba, no el lugar
-donde se deben desarrollar o documentar las mejoras generales de la fábrica.
+La fuente mantenible de los agentes, skills, comandos, scripts y
+documentación debe permanecer en este repositorio:
+`opencode-software-factory`. Los proyectos consumidores son destinos de
+instalación y prueba, no el lugar donde se deben desarrollar o documentar
+las mejoras generales de la fábrica.
 
 Antes de instalar o sincronizar cambios en un consumidor, se debe revisar
 el estado del destino y preservar sus archivos propios, su configuración
-`opencode.json` y cualquier modificación ajena. No se deben eliminar archivos
-sin verificar su procedencia y obtener autorización cuando exista duda.
+`opencode.json` y cualquier modificación ajena. No se deben eliminar
+archivos sin verificar su procedencia y obtener autorización cuando exista
+duda.
 
-### Nuevas skills
+## Limitaciones conocidas
 
-La fábrica instala hoy **10 skills** en `.opencode/skills/` (además de la
-skill de terceros `reverse-engineer-anything`, en `.agents/skills/`, que no
-mantiene la fábrica):
-
-- **project-discovery**: descubre y analiza un proyecto desconocido antes de
-  modificarlo, con evidencia de archivos leídos y comandos ejecutados.
-- **implementation-plan**: divide una tarea en pasos pequeños y
-  verificables, con archivos afectados y criterios de aceptación.
-- **independent-review**: método de revisión independiente de los cambios
-  antes de dar trabajo por terminado.
-- **systematic-debugging**: diagnostica errores reproducibles con evidencia,
-  hipótesis y pruebas, sin ocultar síntomas.
-- **test-and-repair**: ejecuta build y tests, interpreta los fallos reales y
-  corrige hasta que pasen o hasta agotar los intentos.
-- **metric-collector**: registra etapa, comando exacto, duración, código de
-  salida y timestamp para comparar ejecuciones.
-- **dependency-audit**: audita dependencias en busca de vulnerabilidades
-  (CVE), licencias incompatibles y versiones desactualizadas.
-- **security-scan**: escaneo de seguridad estático (SAST) y detección de
-  secretos con las herramientas disponibles en el proyecto.
-- **spring-boot-architecture**: estructura, capas, perfiles, validación,
-  manejo de errores y testing de servicios Spring Boot.
-- **java-build-quality**: comandos exactos de la batería de calidad Java
-  (Maven/Gradle), rutas de informes y qué hacer si falta una herramienta.
-
-Todas las skills están incluidas en la validación de
-`scripts/verify-factory.sh`: las 10 locales de `.opencode/skills` y la de
-terceros `reverse-engineer-anything`, de `.agents/skills` (11 en total).
-Desde el 25/10/2026 esa validación comprueba el frontmatter de **todas** las
-skills (`---` de apertura y cierre, `name` igual
-al directorio y `description` no vacía): sin frontmatter OpenCode **no carga
-la skill**. Tres skills (`metric-collector`, `dependency-audit` y
-`security-scan`) carecían de él y por eso no aparecían en el listado de
-skills disponibles; se les añadió `---`/`name`/`description` y ahora cargan.
-
-### Proyectos de prueba incluidos
-
-Este repositorio **ya no incluye** proyectos de ejemplo: los directorios que
-existieron (`springboot-gradle/`, `springboot-maven/`, `typescript/` y
-`python/`) se eliminaron porque ningún script de la fábrica depende de ellos.
-
-Cómo se valida hoy la instalación en distintos stacks:
-
-- **Aislado y reproducible**: `python3 scripts/factory.py self-test` crea
-  directorios temporales propios (no usa ningún directorio del repo), instala,
-  comprueba la preservación de ficheros del consumidor y revierte, con salida
-  `SELF-TEST COMPLETADO` y código `0`.
-- **Sobre un proyecto consumidor real**: `python3 scripts/factory.py install
-  <ruta-proyecto>` y luego `python3 scripts/factory.py doctor <ruta-proyecto>`
-  sobre cualquier proyecto del stack que se quiera comprobar. La guía de
-  validación documenta ya el ejemplo del demo Gradle
-  (`/tmp/opencode/factory-demo/factory-demo`) con sus comandos y resultados.
-
-### Pendientes
-
-- Probar el cumplimiento de las nuevas reglas del arquitecto con resultados
-  contrastados contra los archivos reales del proyecto de prueba.
-- Verificar que el tester informe correctamente los códigos de salida y
-  distinga las pruebas reales de las verificaciones estructurales.
-- Revisar cualquier configuración sobrante del proyecto consumidor por
-  separado, sin usarlo como repositorio fuente de las mejoras.
-- Ejecutar la batería de calidad completa (checkstyle, spotbugs, pmd, jacoco,
-  OWASP dependency-check) sobre un proyecto **que declare esos plugins**, con
-  sus informes y códigos de salida reales. Hoy solo se ejecutó lo que el
-  demo Gradle soporta (`build`, `check`, `jacocoTestReport` → 0; los cuatro
-  tasks de análisis → 1 por no estar declarados) y, en Maven, plugins
-  resueltos por prefijo sobre una copia de `springboot-maven/` (el directorio
-  de pruebas se eliminó posteriormente del repo; la copia se hizo cuando
-  existía).
-- Instalar y ejecutar una herramienta SAST/secretos (p. ej. `semgrep`) para
-  validar `security-scan` de extremo a extremo: ninguna está instalada en
-  esta máquina (`command -v` → no encontrado).
-- Decidir, si acaso, la adopción de SonarQube o de un MCP de calidad:
-  requiere servidor o cuenta Cloud con token, y su configuración debería ir
-  en la config global del usuario. Ninguno está verificado en este entorno.
-- Probar el flujo con contenedores (Testcontainers) cuando haya Docker en la
-  máquina; hoy `docker --version` → 127.
+- **Sin Docker**: no se pueden ejecutar pruebas con Testcontainers ni
+  contenedores (`docker --version` → 127).
+- **Sin herramientas SAST/secretos instaladas**: `semgrep`, `bandit`,
+  `sonar-scanner`, `codeql`, `truffleHog` y `detect-secrets` no están en el
+  PATH; se informan como "no disponibles".
+- **Sin SonarQube**: ver [MCP y configuración global](#mcp-y-configuración-global).
+- **SpotBugs en Gradle** no se inyecta: requiere el plugin del Portal
+  (`com.github.spotbugs`), que hay que declarar a mano.
+- **`build.gradle.kts` no lo gestiona `quality`**: la plantilla es Groovy;
+  hay que pegar los bloques a mano.
+- **La auditoría OWASP** necesita que el proyecto declare el plugin; la
+  primera ejecución descarga la base NVD (requiere red y varios minutos).
+- Los permisos sin aprobación están pensados para Java, Python,
+  Node/TypeScript y `make`; otros stacks quedan en `ask`.

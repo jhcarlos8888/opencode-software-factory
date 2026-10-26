@@ -64,7 +64,7 @@ Gradle falla con `Task 'xyz' not found` → §5.
 | Herramienta | Maven | Gradle |
 | --- | --- | --- |
 | Cobertura (HTML) | `target/site/jacoco/index.html` | `build/reports/jacoco/test/html/index.html` |
-| Cobertura (XML, para máquinas) | `target/site/jacoco/jacoco.xml` | `build/reports/jacoco/test/test/index.xml` |
+| Cobertura (XML, para máquinas) | `target/site/jacoco/jacoco.xml` | `build/reports/jacoco/test/jacocoTestReport.xml` |
 | Checkstyle | `target/checkstyle-result.xml` y `target/checkstyle-checker.xml` | `build/reports/checkstyle/main.html` + `build/reports/checkstyle/main.xml` |
 | SpotBugs | `target/spotbugsXml.xml` (y `target/spotbugs.html`) | `build/reports/spotbugs/main.html` |
 | PMD | `target/pmd.xml` | `build/reports/pmd/main.html` |

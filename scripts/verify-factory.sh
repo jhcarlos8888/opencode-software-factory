@@ -30,11 +30,26 @@ echo "PASS: los 6 agentes fijan opencode-go/mimo-v2.6-flash"
 
 echo
 echo "== 1c. Validar newline final =="
+# Fragmentos que la plantilla de calidad debe traer siempre; se comprueba su
+# existencia antes del bucle para no reportar un "falta newline" engañoso.
+for fragment_file in \
+    templates/quality/maven-quality-plugins.xml \
+    templates/quality/gradle-quality.gradle; do
+    if [ ! -s "$fragment_file" ]; then
+        echo "ERROR: falta o está vacío el fragmento de calidad $fragment_file"
+        exit 1
+    fi
+done
+echo "PASS: fragmentos de calidad presentes (maven y gradle)"
+
 newline_targets=()
 while IFS= read -r -d '' target_file; do
     newline_targets+=("$target_file")
 done < <(
-    printf '%s\0' opencode.json .gitignore templates/AGENTS.md
+    printf '%s\0' opencode.json .gitignore templates/AGENTS.md \
+        templates/quality/README.md \
+        templates/quality/maven-quality-plugins.xml \
+        templates/quality/gradle-quality.gradle
     find .opencode/agents .opencode/commands .opencode/skills .agents/skills \
         -type f -name '*.md' -print0
 )

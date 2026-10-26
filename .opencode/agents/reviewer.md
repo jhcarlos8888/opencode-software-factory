@@ -140,6 +140,26 @@ permissions:
   - action: shell
     resource: "./gradlew bootJar *"
     effect: allow
+
+  # quality en modo informe: el revisor puede evaluar un directorio real.
+  # El deny va DESPUÉS del allow porque la última regla que casa manda, así
+  # --apply queda bloqueado para un agente de solo lectura.
+  - action: shell
+    resource: "python3 scripts/factory.py quality *"
+    effect: allow
+  - action: shell
+    resource: "python3 scripts/factory.py quality *--apply*"
+    effect: deny
+  # install solo en modo consulta: --dry-run no escribe y --help es solo
+  # lectura; un `install <ruta>` sin --dry-run no casa ninguna allow y cae
+  # en el deny global del principio de esta lista.
+  - action: shell
+    resource: "python3 scripts/factory.py install --help"
+    effect: allow
+  - action: shell
+    resource: "python3 scripts/factory.py install * --dry-run"
+    effect: allow
+
   - action: shell
     resource: "python3 -c *"
     effect: deny
@@ -206,6 +226,8 @@ Busca en este orden de prioridad:
 - Identifica los comandos de verificación leyendo README y los archivos de build.
 - Para Python, utiliza únicamente las pruebas autorizadas de unittest o pytest.
 - Para Gradle, ejecuta `./gradlew test --rerun-tasks`.
+- `python3 scripts/factory.py quality <ruta>` está permitido solo en modo
+  informe; `--apply` está denegado porque modificaría el build del proyecto.
 - No ejecutes comandos fuera de tus permisos ni utilices execute para eludirlos.
 - Registra el resultado real del comando y distingue tareas de build de tests individuales.
 - Distingue pruebas ejecutadas, inspección estática y cobertura pendiente.

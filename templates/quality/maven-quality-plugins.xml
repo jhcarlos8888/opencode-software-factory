@@ -1,0 +1,167 @@
+<!--
+  Plantilla de calidad Java para Maven — OpenCode Software Factory
+  =================================================================
+  Inyección automática (con respaldo previo y solo lo que falte):
+      python3 scripts/factory.py quality <proyecto> --apply
+  Informe sin modificar nada:
+      python3 scripts/factory.py quality <proyecto>
+  Pegado a mano: copia cada bloque <plugin> dentro de
+  <build><plugins>...</plugins></build> del pom.xml, sin duplicar los que
+  ya declares (en ese caso borra el bloque de esta plantilla).
+  Ejecución en el proyecto:
+      mvn -B verify              # tests + checkstyle + pmd + spotbugs + jacoco
+      mvn -B checkstyle:check    # solo estilo -> target/checkstyle-result.xml
+      mvn -B pmd:check           # solo estática -> target/pmd.xml
+      mvn -B spotbugs:check      # solo bugs -> target/spotbugsXml.xml
+      mvn -B jacoco:report       # solo cobertura -> target/site/jacoco/
+  Versiones verificadas en Maven Central (release): checkstyle 3.6.0,
+  pmd 3.28.0, spotbugs 4.10.5.0, jacoco 0.8.15.
+  Nota: si tu maven-surefire-plugin declara un <argLine> propio, incluye
+  ${argLine} dentro para que JaCoCo pueda inyectar su agente.
+-->
+<plugins>
+
+<!-- [[quality:checkstyle]] -->
+  <plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-checkstyle-plugin</artifactId>
+    <version>3.6.0</version>
+    <configuration>
+      <failOnViolation>true</failOnViolation>
+      <violationSeverity>error</violationSeverity>
+      <maxAllowedViolations>0</maxAllowedViolations>
+      <includeTestSourceDirectory>false</includeTestSourceDirectory>
+      <!-- Configuración inline, sin ficheros externos: los incumplimientos
+           objetivos van a severidad error (rompen el build con
+           failOnViolation) y el estilo va a warning (solo informa). -->
+      <checkstyleRules>
+        <module name="Checker">
+          <module name="FileTabCharacter"/>
+          <module name="RegexpSingleline">
+            <property name="format" value="\s+$"/>
+            <property name="message" value="Espacio en blanco al final de la línea"/>
+          </module>
+          <module name="LineLength">
+            <property name="severity" value="warning"/>
+            <property name="max" value="120"/>
+            <property name="ignorePattern" value="^package |^import |https?://"/>
+          </module>
+          <module name="TreeWalker">
+            <module name="UnusedImports"/>
+            <module name="RedundantImport"/>
+            <module name="NeedBraces"/>
+            <module name="EmptyStatement"/>
+            <module name="EqualsHashCode"/>
+            <module name="ArrayTypeStyle"/>
+            <module name="UpperEll"/>
+            <module name="ModifierOrder"/>
+          </module>
+        </module>
+      </checkstyleRules>
+    </configuration>
+    <executions>
+      <execution>
+        <id>quality-checkstyle</id>
+        <phase>verify</phase>
+        <goals>
+          <goal>check</goal>
+        </goals>
+      </execution>
+    </executions>
+  </plugin>
+<!-- [[quality:end]] -->
+
+<!-- [[quality:pmd]] -->
+  <plugin>
+    <groupId>org.apache.maven.plugins</groupId>
+    <artifactId>maven-pmd-plugin</artifactId>
+    <version>3.28.0</version>
+    <configuration>
+      <failOnViolation>true</failOnViolation>
+      <!-- Prioridad 1-2 (nivel alto) rompe el build; 3-5 quedan como avisos
+           en target/pmd.xml. Usa failurePriority=5 si lo quieres estricto. -->
+      <failurePriority>2</failurePriority>
+      <printFailingErrors>true</printFailingErrors>
+    </configuration>
+    <executions>
+      <execution>
+        <id>quality-pmd</id>
+        <phase>verify</phase>
+        <goals>
+          <goal>check</goal>
+        </goals>
+      </execution>
+    </executions>
+  </plugin>
+<!-- [[quality:end]] -->
+
+<!-- [[quality:spotbugs]] -->
+  <plugin>
+    <groupId>com.github.spotbugs</groupId>
+    <artifactId>spotbugs-maven-plugin</artifactId>
+    <version>4.10.5.0</version>
+    <configuration>
+      <xmlOutput>true</xmlOutput>
+      <effort>Max</effort>
+      <failOnError>true</failOnError>
+      <!-- Solo bugs de prioridad High rompen el build. -->
+      <failThreshold>High</failThreshold>
+    </configuration>
+    <executions>
+      <execution>
+        <id>quality-spotbugs</id>
+        <phase>verify</phase>
+        <goals>
+          <goal>check</goal>
+        </goals>
+      </execution>
+    </executions>
+  </plugin>
+<!-- [[quality:end]] -->
+
+<!-- [[quality:jacoco]] -->
+  <plugin>
+    <groupId>org.jacoco</groupId>
+    <artifactId>jacoco-maven-plugin</artifactId>
+    <version>0.8.15</version>
+    <executions>
+      <execution>
+        <id>quality-jacoco-agent</id>
+        <goals>
+          <goal>prepare-agent</goal>
+        </goals>
+      </execution>
+      <execution>
+        <id>quality-jacoco-report</id>
+        <phase>verify</phase>
+        <goals>
+          <goal>report</goal>
+        </goals>
+      </execution>
+      <execution>
+        <id>quality-jacoco-check</id>
+        <phase>verify</phase>
+        <goals>
+          <goal>check</goal>
+        </goals>
+        <configuration>
+          <rules>
+            <rule>
+              <element>BUNDLE</element>
+              <limits>
+                <limit>
+                  <counter>LINE</counter>
+                  <value>COVEREDRATIO</value>
+                  <!-- Umbral modesto para no bloquear proyectos nuevos. -->
+                  <minimum>0.50</minimum>
+                </limit>
+              </limits>
+            </rule>
+          </rules>
+        </configuration>
+      </execution>
+    </executions>
+  </plugin>
+<!-- [[quality:end]] -->
+
+</plugins>
