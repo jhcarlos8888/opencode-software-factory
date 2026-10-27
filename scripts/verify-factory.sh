@@ -16,17 +16,25 @@ echo "PASS: configuración del repositorio válida"
 
 echo
 echo "== 1b. Validar modelo fijado en los agentes =="
+agent_total=0
 agent_models=0
 for agent_file in .opencode/agents/*.md; do
+    agent_total=$((agent_total + 1))
     if grep -qx 'model: opencode-go/mimo-v2.6-flash' "$agent_file"; then
         agent_models=$((agent_models + 1))
+    else
+        echo "ERROR: falta 'model: opencode-go/mimo-v2.6-flash' en $agent_file"
     fi
 done
-if [ "$agent_models" -ne 6 ]; then
-    echo "ERROR: se esperaban 6 agentes con el modelo fijado; encontrados: $agent_models"
+if [ "$agent_total" -ne 7 ]; then
+    echo "ERROR: se esperaban 7 ficheros de agente; encontrados: $agent_total"
     exit 1
 fi
-echo "PASS: los 6 agentes fijan opencode-go/mimo-v2.6-flash"
+if [ "$agent_models" -ne "$agent_total" ]; then
+    echo "ERROR: solo $agent_models de $agent_total agentes fijan opencode-go/mimo-v2.6-flash"
+    exit 1
+fi
+echo "PASS: los 7 agentes fijan opencode-go/mimo-v2.6-flash"
 
 echo
 echo "== 1c. Validar newline final =="
@@ -100,7 +108,7 @@ config = json.loads((root / "opencode.json").read_text(encoding="utf-8"))
 
 required_agents = {
     "build", "architect", "implementer",
-    "reviewer", "tester", "cloud-arbiter"
+    "reviewer", "tester", "cloud-arbiter", "reverse"
 }
 
 agent_dir = root / ".opencode" / "agents"
@@ -275,9 +283,10 @@ jq -e '
   and has_agent("reviewer"; "all")
   and has_agent("tester"; "all")
   and has_agent("cloud-arbiter"; "subagent")
+  and has_agent("reverse"; "primary")
 ' "$agents_tmp" >/dev/null
 
-echo "PASS: coordinador y cinco agentes especializados reconocidos"
+echo "PASS: coordinador, reverse y cinco agentes especializados reconocidos"
 
 echo
 echo "== 5. Ejecutar self-test del instalador =="

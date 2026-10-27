@@ -21,7 +21,7 @@ OPTIONAL_TARGETS = ("AGENTS.md",)
 OPTIONAL_SOURCES = {"AGENTS.md": "templates/AGENTS.md"}
 EXPECTED_AGENTS = {
     "build", "architect", "implementer",
-    "reviewer", "tester", "cloud-arbiter",
+    "reviewer", "tester", "cloud-arbiter", "reverse",
 }
 EXPECTED_MODEL = ("opencode-go", "mimo-v2.6-flash")
 EXPECTED_AGENT_MODES = {
@@ -31,6 +31,7 @@ EXPECTED_AGENT_MODES = {
     "reviewer": "all",
     "tester": "all",
     "cloud-arbiter": "subagent",
+    "reverse": "primary",
 }
 
 # Plantillas de calidad Java por tipo de build (relativas a la raíz).

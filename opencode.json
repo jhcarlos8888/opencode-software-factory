@@ -7,5 +7,122 @@
     "keep": {
       "tokens": 15000
     }
+  },
+  "permissions": [
+    {
+      "action": "websearch",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "webfetch",
+      "resource": "*",
+      "effect": "allow"
+    },
+    {
+      "action": "rea_*",
+      "resource": "*",
+      "effect": "deny"
+    }
+  ],
+  "providers": {
+    "zen-proxy": {
+      "name": "Zen Proxy Local",
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:8787/v1"
+      },
+      "body": {
+        "temperature": 0.2,
+        "top_p": 0.9
+      },
+      "models": {
+        "big-pickle": {
+          "name": "Big Pickle"
+        },
+        "beam-free": {
+          "name": "Beam Free"
+        },
+        "flint-40b-free": {
+          "name": "Flint 40B Free"
+        },
+        "mimo-v2.6-flash-free": {
+          "name": "MiMo V2.6 Flash Free"
+        },
+        "nemotron-3.5-super-vl-free": {
+          "name": "Nemotron 3.5 Super VL Free"
+        },
+        "nemotron-3.5-lightning-free": {
+          "name": "Nemotron 3.5 Lightning Free"
+        },
+        "deepseek-v4.1-flash-free": {
+          "name": "DeepSeek V4.1 Flash Free"
+        },
+        "glm-5.3-flash-free": {
+          "name": "GLM 5.3 Flash Free"
+        }
+      }
+    },
+    "lmstudio": {
+      "name": "LM Studio Local",
+      "package": "aisdk:@ai-sdk/openai-compatible",
+      "settings": {
+        "baseURL": "http://127.0.0.1:1234/v1",
+        "timeout": 300000
+      },
+      "body": {
+        "temperature": 0.2,
+        "top_p": 0.9
+      },
+      "models": {
+        "qwen3-coder-30b-a3b-instruct-q4km-autoround": {
+          "name": "qwen3-coder-30b-a3b-instruct-q4km-autoround",
+          "limit": {
+            "context": 32768,
+            "output": 4096
+          }
+        }
+      }
+    }
+  },
+  "mcp": {
+    "servers": {
+      "rea": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "rea-agents@6.4.0",
+          "mcp"
+        ],
+        "timeout": {
+          "startup": 600000,
+          "catalog": 600000,
+          "execution": 600000
+        },
+        "environment": {
+          "GHIDRA_INSTALL_DIR": "/home/jcherre/.ghidra/ghidra_12.1.4_PUBLIC",
+          "JAVA_HOME": "/home/jcherre/.sdkman/candidates/java/21.0.12+1.1-tem",
+          "REA_APKTOOL_COMMAND": "/home/jcherre/.local/bin/apktool",
+          "REA_JADX_MCP_JAR": "/home/jcherre/.local/share/reverse-engineering/jadx/jadx-headless-mcp-0.7.1-all.jar"
+        }
+      },
+      "context7": {
+        "type": "remote",
+        "url": "https://mcp.context7.com/mcp"
+      },
+      "playwright": {
+        "type": "local",
+        "command": [
+          "npx",
+          "-y",
+          "@playwright/mcp",
+          "--executable-path",
+          "/home/jcherre/.cache/ms-playwright/chromium-1248/chrome-linux64/chrome",
+          "--headless",
+          "--no-sandbox"
+        ]
+      }
+    }
   }
 }

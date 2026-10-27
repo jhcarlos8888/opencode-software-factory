@@ -32,19 +32,23 @@ proyecto consumidor de OpenCode.
 
 ## Estructura del repositorio
 
-- `.opencode/agents/`: 6 agentes Markdown (`build`, `architect`,
-  `implementer`, `reviewer`, `tester`, `cloud-arbiter`).
+- `.opencode/agents/`: 7 agentes Markdown (`build`, `architect`,
+  `implementer`, `reviewer`, `tester`, `cloud-arbiter`, `reverse`).
 - `.opencode/commands/`: 5 comandos (`/planificar`, `/implementar`,
   `/revisar`, `/verificar`, `/calidad-java`).
 - `.opencode/skills/`: 10 skills de la fábrica (un directorio con
   `SKILL.md` por skill).
 - `.agents/skills/`: 1 skill de terceros (`reverse-engineer-anything`, 8
   ficheros) que la fábrica instala pero no mantiene.
-- `config/global-inline-agents.snapshot.json`: instantánea de los agentes
-  `build` y `reverse` definidos en la configuración global del usuario; se
-  conserva como referencia y **no** se instala en los proyectos.
+- `config/global-inline-agents.snapshot.json`: respaldo histórico de los
+  agentes `build` y `reverse` tal como estaban definidos en la
+  configuración global del usuario antes de la centralización (oct 2026);
+  esas definiciones ya viven en este repositorio y el snapshot se conserva
+  solo como referencia; **no** se instala en los proyectos.
 - `opencode.json`: configuración predeterminada de este repositorio
-  (`model`, `default_agent` y `compaction`).
+  (`model`, `default_agent`, `compaction`, `permissions`, `providers` y
+  `mcp`: los 3 MCP con sus rutas locales viven aquí desde la
+  centralización).
 - `templates/AGENTS.md`: plantilla de instrucciones que la fábrica instala
   en los proyectos consumidores.
 - `templates/quality/`: plantillas de calidad Java (Maven y Gradle) que
@@ -114,7 +118,7 @@ python3 scripts/factory.py uninstall <ruta-del-proyecto>
 python3 scripts/factory.py self-test
 ```
 
-`install` copia 31 ficheros en un proyecto nuevo: 6 agentes + 5 comandos +
+`install` copia 32 ficheros en un proyecto nuevo: 7 agentes + 5 comandos +
 10 skills de la fábrica (un `SKILL.md` por skill) + 8 ficheros de la skill
 de terceros `reverse-engineer-anything` + `opencode.json` + `AGENTS.md`.
 
@@ -129,10 +133,10 @@ Qué hace cada comando:
   `ENLACE SIMBÓLICO (se conservará)` o `AUSENTE`).
 - **`doctor`**: comprueba que la fábrica funciona realmente en el proyecto
   consumidor usando el CLI de OpenCode (`opencode debug agents` y
-  `opencode debug config`): los 6 agentes reconocidos con su modo,
+  `opencode debug config`): los 7 agentes reconocidos con su modo,
   proveedor y modelo correctos, y la carga del `opencode.json` del proyecto
-  con `default_agent: build` y el modelo esperado. Son 27 controles (4 por
-  agente × 6, más 3 de configuración).
+  con `default_agent: build` y el modelo esperado. Son 31 controles (4 por
+  agente × 7, más 3 de configuración).
 - **`uninstall`**: retira los archivos instalados que nadie modificó y
   conserva los editados, dejando constancia de ellos en el manifiesto.
 - **`quality`**: detecta los plugins de calidad del build del proyecto y
@@ -159,7 +163,9 @@ Qué hace cada comando:
   fábrica; si es idéntico se conserva (`skipped`); si es distinto el
   instalador aborta en `CONFLICTO` con código 2 **sin instalar nada** (ni
   el resto de archivos se copian). El fichero que instala la fábrica
-  contiene solo `model`, `default_agent` y `compaction`.
+  contiene `model`, `default_agent`, `compaction`, `permissions`,
+  `providers` y `mcp` (ver [MCP y configuración
+  global](#mcp-y-configuración-global)).
 - **`AGENTS.md` nunca se sobrescribe**: si ya existe (archivo, enlace o lo
   que sea) se conserva intacto; no es conflicto y no aborta la instalación.
   Si lo creó la fábrica y nadie lo modificó, `uninstall` lo retira; si el
@@ -172,13 +178,15 @@ Qué hace cada comando:
   `install` se niega a reinstalar (`Usa 'status' o 'uninstall' antes de
   reinstalar.`). La ubicación se puede cambiar con
   `OPENCODE_SOFTWARE_FACTORY_STATE` o `XDG_STATE_HOME`.
-- La instantánea de `config/global-inline-agents.snapshot.json`, la
-  configuración global del usuario y los MCP **no** se modifican ni se
-  instalan en los proyectos.
+- La instantánea de `config/global-inline-agents.snapshot.json` es un
+  respaldo histórico y **no** se instala en los proyectos. La
+  configuración global del usuario no se modifica. Los MCP **sí** se
+  instalan en los proyectos: viven en el `opencode.json` de la fábrica
+  (ver [MCP y configuración global](#mcp-y-configuración-global)).
 
 ### Uso dentro de OpenCode
 
-La instalación añade al proyecto consumidor 5 comandos, 6 agentes y 10
+La instalación añade al proyecto consumidor 5 comandos, 7 agentes y 10
 skills (más una skill de terceros). Tras instalar, reinicia la sesión de
 OpenCode en el proyecto para que cargue los ficheros nuevos.
 
@@ -192,7 +200,12 @@ OpenCode en el proyecto para que cargue los ficheros nuevos.
 | `/revisar` | `reviewer` | Revisa el diff actual en busca de defectos demostrables; solo lectura |
 | `/calidad-java` | `tester` | Batería Java completa (build, tests, checkstyle, spotbugs, pmd, jacoco, OWASP) con códigos de salida reales e informe de evidencia |
 
-#### Agentes (6) y sus modos
+Nota: los comandos `/preguntar` y `/explicar-codigo`, que vivían en la
+configuración global del usuario, se retiraron a propósito durante la
+centralización (octubre de 2026) y ya no están disponibles (solo quedan en
+un respaldo externo al repositorio).
+
+#### Agentes (7) y sus modos
 
 | Agente | Modo | Función |
 | --- | --- | --- |
@@ -202,8 +215,9 @@ OpenCode en el proyecto para que cargue los ficheros nuevos.
 | `reviewer` | `all` | Revisión independiente del diff (`git status` + `git diff HEAD`), sin modificar nada |
 | `tester` | `all` | Ejecución real de build, tests y análisis estático, con evidencia: comando exacto, código de salida y pruebas no ejecutadas |
 | `cloud-arbiter` | `subagent` | Árbitro para discrepancias difíciles o fallos persistentes; no usar de forma rutinaria |
+| `reverse` | `primary` | Ingeniería inversa sobre binarios y artefactos ya compilados, con el MCP `rea` y las herramientas `rea_*` |
 
-Los seis fijan `opencode-go/mimo-v2.6-flash` en su frontmatter; `doctor`
+Los siete fijan `opencode-go/mimo-v2.6-flash` en su frontmatter; `doctor`
 lo comprueba agente por agente.
 
 #### Skills (10 en `.opencode/skills`)
@@ -495,7 +509,7 @@ el servicio de OpenCode tarda en cargar la configuración de una ubicación
 nueva, y la primera invocación puede devolver `[]` o solo los agentes
 globales (por ejemplo `build` con modelo `None`), lo que produciría falsos
 negativos en `doctor`. Por eso `doctor` reintenta **hasta 5 veces con 2 s
-de espera** hasta que aparezcan los 6 agentes esperados, informando cada
+de espera** hasta que aparezcan los 7 agentes esperados, informando cada
 espera con una línea `NOTA: ... (intento N/5); se reintenta en 2 s.`; solo
 tras agotar los intentos informa los hallazgos con la respuesta disponible.
 
@@ -514,8 +528,12 @@ tras agotar los intentos informa los hallazgos con la respuesta disponible.
 
 `opencode-go/mimo-v2.6-flash` (MiMo V2.6 Flash, servido por el proveedor
 integrado OpenCode Go). Es el modelo fijado en `opencode.json` y en los
-seis agentes, sin bloque `providers`: el formato `opencode-go/<model-id>`
-en la clave `model` basta porque OpenCode ya integra el proveedor.
+siete agentes. El proveedor integrado `opencode-go` no necesita entrada en
+el bloque `providers` de `opencode.json`: el formato
+`opencode-go/<model-id>` en la clave `model` basta porque OpenCode ya
+integra el proveedor. El bloque `providers` versiona únicamente
+proveedores locales opcionales (`zen-proxy` y `lmstudio`) que no afectan
+al modelo por defecto.
 
 Requisitos:
 
@@ -550,12 +568,14 @@ Sin `limit.output` ni `options.max_tokens`, OpenCode pide el valor por
 defecto de **131072** tokens de salida, muy por encima del límite de 3500
 configurado en el bloque anterior.
 Además hay que fijar `openrouter/xiaomi/mimo-v2.6-flash` en el frontmatter
-`model:` de los seis agentes de `.opencode/agents/`.
+`model:` de los siete agentes de `.opencode/agents/`.
 
 ## MCP y configuración global
 
-Servidores MCP declarados en la configuración global del usuario
-(`~/.config/opencode/opencode.json`), que la fábrica no toca:
+Servidores MCP declarados en el `opencode.json` de la fábrica. Por decisión
+explícita de centralización (octubre de 2026) se versionan en este
+repositorio y `install` los lleva a los proyectos consumidores junto con
+el resto de la configuración:
 
 | MCP | Uso |
 | --- | --- |
@@ -564,8 +584,9 @@ Servidores MCP declarados en la configuración global del usuario
 | `rea` | acompaña a la skill de terceros `reverse-engineer-anything` |
 
 Los tres se obtienen con
-`jq -r '.mcp.servers | keys[]' ~/.config/opencode/opencode.json`.
-Ninguno lo gestiona ni instala la fábrica.
+`jq -r '.mcp.servers | keys[]' opencode.json`. Solo declaran rutas locales
+y comandos de arranque (binarios, `npx`, URL remota): no contienen
+credenciales ni tokens.
 
 **SonarQube no se usa**: requiere servidor propio o cuenta SonarCloud con
 token, `sonar-scanner` no está instalado y tampoco hay Docker para
@@ -574,9 +595,14 @@ levantarlo. Mientras tanto, la estrategia es la CLI-first descrita en
 escáner, la URL del servidor y el **token van en la configuración global
 del usuario** o en variables de entorno.
 
-**Regla general**: MCP, credenciales, tokens y cualquier secreto viven en
-la configuración global del usuario, **nunca en el `opencode.json` de la
-fábrica** ni en ningún fichero versionado del repositorio.
+**Regla general**: los MCP (`rea`, `context7`, `playwright`) viven en el
+`opencode.json` versionado de la fábrica por centralización explícita, y
+por eso se instalan en los proyectos consumidores. Ese fichero solo puede
+contener configuración no sensible (rutas locales, comandos, URLs públicas,
+permisos y proveedores), **nunca credenciales, tokens ni secretos reales**: las credenciales, los tokens y cualquier
+secreto siguen viviendo en la configuración global del usuario o en
+variables de entorno, **nunca en el `opencode.json` de la fábrica** ni en
+ningún fichero versionado del repositorio.
 
 ## Principios de calidad
 

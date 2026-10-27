@@ -622,7 +622,7 @@ suposición.
 | Node.js/TypeScript | Node v24.21.0 · npm 11.19.0 · `npx` 11.19.0 · `tsc` 7.0.2 · `eslint` 10.12.0 | `node --version`, `npm --version`, `npx --version`, `tsc -v`, `eslint -v` → 0 |
 | Python | Python 3.14.4 · `pytest` 9.0.2 · `ruff` 0.17.0 | `python3 --version`, `python3 -m pytest --version`, `ruff --version` → 0 |
 | Build/VCS | GNU Make 4.4.1 · git 2.53.0 · jq 1.8.1 | `make --version`, `git --version`, `jq --version` → 0 |
-| Web / MCP | servidor MCP `playwright` configurado con 25 herramientas en el catálogo de la sesión; navegadores chromium en `~/.cache/ms-playwright` (`chromium-1248`, `chromium_headless_shell-1248`) | `jq -r '.mcp.servers \| keys[]' ~/.config/opencode/opencode.json` → `context7`, `playwright`, `rea` · `ls ~/.cache/ms-playwright` |
+| Web / MCP | servidor MCP `playwright` configurado con 25 herramientas en el catálogo de la sesión; navegadores chromium en `~/.cache/ms-playwright` (`chromium-1248`, `chromium_headless_shell-1248`) | `jq -r '.mcp.servers \| keys[]' opencode.json` → `context7`, `playwright`, `rea` · `ls ~/.cache/ms-playwright` |
 | CLI | OpenCode v2.0.31 | `opencode --version` → 0 |
 
 **No verificada en esta ejecución**: la ejecución real de navegador vía MCP y
