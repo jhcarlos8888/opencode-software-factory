@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { basename, resolve } from "node:path";
+import { planTask, type TaskPlan } from "./task-planner.js";
 import { readdir, readFile, stat } from "node:fs/promises";
 
 const execFileAsync = promisify(execFile);
@@ -29,6 +30,7 @@ export interface ProjectAnalysis {
   mode: "read-only";
   objective: string;
   complexity: { level: "low" | "medium" | "high" | "very-high"; score: number; reasons: string[]; fileCount: number; };
+  taskPlan: TaskPlan;
 }
 
 export async function analyzeProject(rawPath: string, objective = ""): Promise<ProjectAnalysis> {
@@ -144,6 +146,7 @@ export async function analyzeProject(rawPath: string, objective = ""): Promise<P
       : recommendations,
     mode: "read-only",
     objective: objective.trim(),
-    complexity: { level: complexityLevel, score: complexityScore, reasons: complexityReasons, fileCount }
+    complexity: { level: complexityLevel, score: complexityScore, reasons: complexityReasons, fileCount },
+    taskPlan: planTask(objective)
   };
 }

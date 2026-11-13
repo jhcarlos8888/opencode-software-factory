@@ -5,6 +5,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
+import { planTask } from "./task-planner.js";
 import {
   addExecutionEvent, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
   getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, markUnfinishedExecutionsInterrupted, orphanExecutionDecisions,
@@ -373,7 +374,8 @@ async function runOpenCodeAgent(
   agent: AgentInput,
   projectPath: string,
   factoryRoot: string,
-  prompt: string
+  prompt: string,
+  timeoutMs: number
 ): Promise<string> {
   const runtime = state.openCode;
   if (!runtime) throw new Error("OpenCode no está iniciado para esta ejecución.");
@@ -408,13 +410,14 @@ async function runOpenCodeAgent(
   runtime.serverErrors.length = 0;
   let promptDone = false;
   let promptError: Error | null = null;
-  const promptPromise = openCodeRequest<unknown>(runtime, "POST", `/api/session/${encodeURIComponent(sessionId)}/prompt`, { text: prompt }, 60 * 60 * 1000)
+  const promptPromise = openCodeRequest<unknown>(runtime, "POST", `/api/session/${encodeURIComponent(sessionId)}/prompt`, { text: prompt }, timeoutMs)
     .then(() => { promptDone = true; })
     .catch((error) => { promptError = error instanceof Error ? error : new Error(String(error)); promptDone = true; });
   const seenParts = new Set<string>();
   const seenForms = new Set<string>();
   let lastText = "";
-  while (!promptDone && !state.cancelled) {
+  const deadline = Date.now() + timeoutMs;
+  while (!promptDone && !state.cancelled && Date.now() < deadline) {
     try {
       lastText = await pollOpenCodeAgent(state, agent, sessionId, seenParts, seenForms);
     } catch (error) {
@@ -426,6 +429,11 @@ async function runOpenCodeAgent(
     await openCodeRequest(runtime, "POST", `/api/session/${encodeURIComponent(sessionId)}/interrupt`).catch(() => undefined);
     await promptPromise.catch(() => undefined);
     throw new Error("Ejecución cancelada por el usuario.");
+  }
+  if (Date.now() >= deadline) {
+    await openCodeRequest(runtime, "POST", `/api/session/${encodeURIComponent(sessionId)}/interrupt`).catch(() => undefined);
+    await promptPromise.catch(() => undefined);
+    throw new Error(`Se agotó el límite de ${Math.round(timeoutMs / 60000)} min para el agente ${agent.agentId}.`);
   }
   await promptPromise;
   await pollOpenCodeAgent(state, agent, sessionId, seenParts, seenForms).then((text) => { lastText = text || lastText; }).catch(() => undefined);
@@ -536,10 +544,13 @@ async function runClaudeAgent(
   agent: AgentInput,
   projectPath: string,
   factoryRoot: string,
-  prompt: string
+  prompt: string,
+  timeoutMs: number
 ): Promise<string> {
   const controller = new AbortController();
   state.claudeControllers.set(agent.id, controller);
+  let timedOut = false;
+  const timeoutHandle = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   const role = await loadRoleInstructions(factoryRoot, agent.agentId);
   let sessionId: string | null = null;
   let finalText = "";
@@ -669,9 +680,16 @@ async function runClaudeAgent(
       }
       if (state.cancelled) break;
     }
+  } catch (error) {
+    if (timedOut && !state.cancelled) {
+      throw new Error("Se agotó el límite de " + Math.round(timeoutMs / 60000) + " min para el agente " + agent.agentId + ".");
+    }
+    throw error;
   } finally {
+    clearTimeout(timeoutHandle);
     state.claudeControllers.delete(agent.id);
   }
+  if (timedOut && !state.cancelled) throw new Error(`Se agotó el límite de ${Math.round(timeoutMs / 60000)} min para el agente ${agent.agentId}.`);
   if (state.cancelled) throw new Error("Ejecución cancelada por el usuario.");
   if (resultFailure) throw new Error(resultFailure);
   if (!finalText.trim()) throw new Error("Claude Code finalizó sin una respuesta verificable.");
@@ -760,7 +778,17 @@ async function executeRun(
       }
     }
 
+    const taskPlan = planTask(instructions);
+    const agentTimeoutMs = taskPlan.depth === "quick" ? 2 * 60 * 1000 : taskPlan.depth === "focused" ? 8 * 60 * 1000 : 25 * 60 * 1000;
+    addLog(state.runId, "PLANNER", "success", `Plan ${taskPlan.depth}: ${taskPlan.recommendedAgents.length} agentes recomendados; límite por agente ${Math.round(agentTimeoutMs / 60000)} min.`);
+    const depthGuidance = taskPlan.depth === "quick"
+      ? "INVESTIGACIÓN RÁPIDA: lee primero README.md y documentos de instrucciones. Revisa manifiestos y árbol superficial; consulta solo 5-8 archivos representativos. No recorras exhaustivamente el repositorio, no busques herramientas que no necesitas, no elabores planes extensos y detente cuando tengas evidencia suficiente para responder al formato solicitado."
+      : taskPlan.depth === "focused"
+        ? "INVESTIGACIÓN FOCALIZADA: identifica el módulo relacionado con el objetivo y sigue únicamente sus dependencias directas. Evita explorar áreas no relacionadas y explica cualquier límite de evidencia."
+        : "INVESTIGACIÓN PROFUNDA: realiza un análisis sistemático del alcance solicitado, sigue dependencias relevantes y respalda conclusiones con rutas/archivos. No amplíes el alcance sin justificación.";
     const structuralContext = [
+      `Planificador: ${taskPlan.kind}; complejidad de tarea ${taskPlan.complexity}; profundidad ${taskPlan.depth}; agentes recomendados: ${taskPlan.recommendedAgents.join(", ")}.`,
+      depthGuidance,
       `Repositorio: ${projectPath}`,
       `Instrucciones: ${instructions}`,
       "Los agentes pueden inspeccionar directamente los archivos del proyecto según sus permisos."
@@ -786,8 +814,8 @@ async function executeRun(
         const roleInstructions = await loadRoleInstructions(factoryRoot, agent.agentId);
         const prompt = makeAgentPrompt(agent.agentId, instructions, roleInstructions, structuralContext, previousResults);
         const output = agent.engine === "opencode"
-          ? await runOpenCodeAgent(state, agent, projectPath, factoryRoot, prompt)
-          : await runClaudeAgent(state, agent, projectPath, factoryRoot, prompt);
+          ? await runOpenCodeAgent(state, agent, projectPath, factoryRoot, prompt, agentTimeoutMs)
+          : await runClaudeAgent(state, agent, projectPath, factoryRoot, prompt, agentTimeoutMs);
         previousResults.push(`AGENTE ${agent.agentId.toUpperCase()} (resumen):\n${output.slice(-9000)}`);
         updateExecutionAgent(agent.id, { status: "succeeded", finishedAt: new Date().toISOString(), error: null });
         addLog(state.runId, agent.agentId.toUpperCase(), "success", `Fase ${agent.agentId} terminada.`, agent.id);

@@ -34,6 +34,16 @@ interface Assignment {
   enabled: boolean;
 }
 
+interface TaskPlan {
+  kind: "explanation" | "diagnosis" | "implementation" | "testing" | "architecture-review" | "general";
+  complexity: "low" | "medium" | "high";
+  depth: "quick" | "focused" | "deep";
+  recommendedAgents: string[];
+  reasons: string[];
+  estimatedMinutes: number;
+  changesExpected: boolean;
+}
+
 interface ProjectAnalysis {
   name: string;
   path: string;
@@ -45,6 +55,7 @@ interface ProjectAnalysis {
   mode: "read-only";
   objective: string;
   complexity: { level: "low" | "medium" | "high" | "very-high"; score: number; reasons: string[]; fileCount: number; };
+  taskPlan: TaskPlan;
   suggestedAssignments: Assignment[];
   recommendationReady: boolean;
   recommendationMessage: string;
@@ -429,7 +440,7 @@ export default function App() {
         setPendingAssignments(result.suggestedAssignments);
         setRecommendationStatus("pending");
         setNotice(`Preconsulta ${result.complexity.level}: hay una propuesta preparada. Revísala y decide si aceptarla o configurar manualmente.`);
-        recordActivity("ROUTER", `Propuesta preparada para ${result.suggestedAssignments.length} agentes usando únicamente favoritos.`, "success");
+        recordActivity("ROUTER", `Plan ${result.taskPlan.depth}: ${result.taskPlan.recommendedAgents.length} agentes seleccionados usando únicamente favoritos.`, "success");
       } else {
         setPendingAssignments(null);
         setRecommendationStatus(null);
@@ -679,23 +690,34 @@ export default function App() {
                   <span className="read-only-tag">SIN MODIFICACIONES</span>
                 </div>
                 <div className="complexity-panel">
-                  <div><span className="mini-label">DIFICULTAD ESTIMADA</span><strong className={`complexity-${analysis.complexity.level}`}>{({ low: "Baja", medium: "Media", high: "Alta", "very-high": "Muy alta" })[analysis.complexity.level]}</strong></div>
+                  <div><span className="mini-label">COMPLEJIDAD DEL PROYECTO</span><strong className={`complexity-${analysis.complexity.level}`}>{({ low: "Baja", medium: "Media", high: "Alta", "very-high": "Muy alta" })[analysis.complexity.level]}</strong></div>
                   <div><span className="mini-label">PUNTUACIÓN HEURÍSTICA</span><strong>{analysis.complexity.score} puntos</strong></div>
                   <div><span className="mini-label">ARCHIVOS REVISADOS</span><strong>{analysis.complexity.fileCount}{analysis.complexity.fileCount >= 5000 ? "+" : ""}</strong></div>
                   <div className="complexity-reasons">{analysis.complexity.reasons.map((reason) => <span key={reason}>• {reason}</span>)}</div>
+                </div>
+                <div className="complexity-panel task-plan-panel">
+                  <div><span className="mini-label">COMPLEJIDAD DE LA TAREA</span><strong>{({ low: "Baja", medium: "Media", high: "Alta" })[analysis.taskPlan.complexity]}</strong></div>
+                  <div><span className="mini-label">PROFUNDIDAD DE INVESTIGACIÓN</span><strong>{({ quick: "Rápida", focused: "Focalizada", deep: "Profunda" })[analysis.taskPlan.depth]}</strong></div>
+                  <div><span className="mini-label">TIPO DE TRABAJO</span><strong>{({ explanation: "Explicación", diagnosis: "Diagnóstico", implementation: "Implementación", testing: "Pruebas", "architecture-review": "Revisión arquitectónica", general: "General" })[analysis.taskPlan.kind]}</strong></div>
+                  <div><span className="mini-label">EQUIPO PROPUESTO</span><strong>{analysis.taskPlan.recommendedAgents.length} agente(s)</strong></div>
+                  <div className="complexity-reasons">
+                    {analysis.taskPlan.reasons.map((reason) => <span key={reason}>• {reason}</span>)}
+                    <span>• Tiempo orientativo: {analysis.taskPlan.estimatedMinutes} min; no es un límite garantizado.</span>
+                    <span>• {analysis.taskPlan.changesExpected ? "La tarea solicita cambios." : "Tarea de solo lectura: no se esperan modificaciones."}</span>
+                  </div>
                 </div>
                 {analysis.recommendationReady && pendingAssignments && (
                   <div className="recommendation-review">
                     <div className="recommendation-review-head">
                       <div>
                         <span className="terminal-kicker">ROUTING / PREVIEW</span>
-                        <strong>Propuesta de asignación por agente</strong>
+                        <strong>Equipo recomendado: {pendingAssignments.filter((item) => item.enabled).length} de {pendingAssignments.length} agentes</strong>
                         <p>La fábrica eligió exclusivamente entre tus modelos favoritos. Todavía no se ha aplicado ni guardado ningún cambio.</p>
                       </div>
                       <span className="pending-tag">PENDIENTE DE TU DECISIÓN</span>
                     </div>
                     <div className="suggestion-table">
-                      {pendingAssignments.map((item) => (
+                      {pendingAssignments.filter((item) => item.enabled).map((item) => (
                         <div className="suggestion-row" key={item.agentId}>
                           <strong>{roleNames[item.agentId] ?? item.agentId}</strong>
                           <span>{item.engine === "claude" ? `Claude Code · ${claudeProvider === "apmix" ? "APMix" : "Anthropic"}` : "OpenCode"}</span>

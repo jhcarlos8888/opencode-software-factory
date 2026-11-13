@@ -77,3 +77,8 @@ Un panel local donde se registre un proyecto, se compruebe OpenCode y Claude Cod
 - [ ] Git Worktrees y ejecución de cambios.
 
 El preanálisis 0.1.0 detecta manifiestos, stack probable, archivos de contexto y estado Git; no equivale todavía a un análisis semántico con un modelo. La fase siguiente debe conectar los adaptadores reales y ejecutar primero tareas de solo lectura.
+
+
+## Entrega del planificador (primera iteración)
+
+La clasificación determinista, los límites por agente y el caso de regresión están documentados en [06-planificador-inteligente.md](06-planificador-inteligente.md). La selección de agentes recomendados se refleja en enabled; la propuesta sigue requiriendo aceptación y guardado explícitos.

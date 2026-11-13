@@ -403,8 +403,12 @@ app.post<{ Body: { path?: string; instructions?: string } }>("/api/projects/anal
       tester: ["opencode", "claude"], "cloud-arbiter": ["claude", "opencode"],
       reverse: ["opencode", "claude"]
     };
+    const selectedAgents = new Set(analysis.taskPlan.recommendedAgents);
+    const recommendationDifficulty = analysis.taskPlan.complexity === "low"
+      ? "low"
+      : analysis.taskPlan.complexity === "high" ? "high" : analysis.complexity.level;
     const suggestedAssignments = current.map((assignment) => {
-      const preferredTier = roleTierByDifficulty[analysis.complexity.level]?.[assignment.agentId] ?? ["balanced", "premium", "economy"];
+      const preferredTier = roleTierByDifficulty[recommendationDifficulty]?.[assignment.agentId] ?? ["balanced", "premium", "economy"];
       const prefs = rolePreference[assignment.agentId] ?? ["opencode", "claude"];
       const candidates = favorites.slice().sort((a, b) => {
         const tierDiff = preferredTier.indexOf(a.tier) - preferredTier.indexOf(b.tier);
@@ -414,14 +418,16 @@ app.post<{ Body: { path?: string; instructions?: string } }>("/api/projects/anal
         return a.modelId.localeCompare(b.modelId);
       });
       const chosen = candidates[0];
-      return chosen ? { ...assignment, engine: chosen.engine, modelId: chosen.modelId } : assignment;
+      return chosen
+        ? { ...assignment, engine: chosen.engine, modelId: chosen.modelId, enabled: selectedAgents.has(assignment.agentId) }
+        : { ...assignment, enabled: selectedAgents.has(assignment.agentId) };
     });
     return {
       ...analysis,
       suggestedAssignments,
       recommendationReady: favorites.length > 0,
       recommendationMessage: favorites.length
-        ? "Se generaron recomendaciones usando exclusivamente tus modelos favoritos activos."
+        ? "Plan " + analysis.taskPlan.depth + ": " + analysis.taskPlan.recommendedAgents.length + " agentes seleccionados usando exclusivamente tus modelos favoritos activos."
         : "Aún no hay modelos favoritos. Configúralos para activar la asignación automática."
     };
   } catch (error) {
