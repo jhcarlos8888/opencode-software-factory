@@ -370,7 +370,7 @@ export default function App() {
     try {
       const result = await api<{ started: boolean; runId: string; execution: ExecutionData | null }>("/api/executions", {
         method: "POST",
-        body: JSON.stringify({ path: projectPath, instructions: projectInstructions })
+        body: JSON.stringify({ path: projectPath, instructions: projectInstructions, taskDepth: analysis.taskPlan.depth })
       });
       setExecution(result.execution);
       setNotice(`Ejecución ${result.runId.slice(0, 8)} iniciada. Puedes supervisar cada agente en la consola y atender sus solicitudes en el Centro de decisiones.`);
@@ -697,7 +697,17 @@ export default function App() {
                 </div>
                 <div className="complexity-panel task-plan-panel">
                   <div><span className="mini-label">COMPLEJIDAD DE LA TAREA</span><strong>{({ low: "Baja", medium: "Media", high: "Alta" })[analysis.taskPlan.complexity]}</strong></div>
-                  <div><span className="mini-label">PROFUNDIDAD DE INVESTIGACIÓN</span><strong>{({ quick: "Rápida", focused: "Focalizada", deep: "Profunda" })[analysis.taskPlan.depth]}</strong></div>
+                  <div className="select-field">
+                    <label htmlFor="task-depth">PROFUNDIDAD DE INVESTIGACIÓN</label>
+                    <select id="task-depth" value={analysis.taskPlan.depth} onChange={(event) => {
+                      const depth = event.target.value as TaskPlan["depth"];
+                      setAnalysis((current) => current ? { ...current, taskPlan: { ...current.taskPlan, depth, estimatedMinutes: depth === "quick" ? 1 : depth === "focused" ? 5 : 15 } } : current);
+                    }}>
+                      <option value="quick">Rápida · límite 2 min por agente</option>
+                      <option value="focused">Focalizada · límite 8 min por agente</option>
+                      <option value="deep">Profunda · límite 25 min por agente</option>
+                    </select>
+                  </div>
                   <div><span className="mini-label">TIPO DE TRABAJO</span><strong>{({ explanation: "Explicación", diagnosis: "Diagnóstico", implementation: "Implementación", testing: "Pruebas", "architecture-review": "Revisión arquitectónica", general: "General" })[analysis.taskPlan.kind]}</strong></div>
                   <div><span className="mini-label">EQUIPO PROPUESTO</span><strong>{analysis.taskPlan.recommendedAgents.length} agente(s)</strong></div>
                   <div className="complexity-reasons">
@@ -712,15 +722,20 @@ export default function App() {
                       <div>
                         <span className="terminal-kicker">ROUTING / PREVIEW</span>
                         <strong>Equipo recomendado: {pendingAssignments.filter((item) => item.enabled).length} de {pendingAssignments.length} agentes</strong>
+                        <p>Puedes activar o desactivar especialistas y ajustar la profundidad antes de aceptar. Los modelos siguen limitados a tus favoritos.</p>
                         <p>La fábrica eligió exclusivamente entre tus modelos favoritos. Todavía no se ha aplicado ni guardado ningún cambio.</p>
                       </div>
                       <span className="pending-tag">PENDIENTE DE TU DECISIÓN</span>
                     </div>
                     <div className="suggestion-table">
-                      {pendingAssignments.filter((item) => item.enabled).map((item) => (
+                      {pendingAssignments.map((item) => (
                         <div className="suggestion-row" key={item.agentId}>
+                          <label className="toggle">
+                            <input type="checkbox" checked={item.enabled} onChange={(event) => setPendingAssignments((current) => current?.map((row) => row.agentId === item.agentId ? { ...row, enabled: event.target.checked } : row) ?? null)} />
+                            <span />
+                          </label>
                           <strong>{roleNames[item.agentId] ?? item.agentId}</strong>
-                          <span>{item.engine === "claude" ? `Claude Code · ${claudeProvider === "apmix" ? "APMix" : "Anthropic"}` : "OpenCode"}</span>
+                          <span>{item.engine === "claude" ? "Claude Code · " + (claudeProvider === "apmix" ? "APMix" : "Anthropic") : "OpenCode"}</span>
                           <code>★ {item.modelId}</code>
                         </div>
                       ))}

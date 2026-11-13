@@ -13,7 +13,7 @@ function normalize(value: string): string {
   return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 /** Classifies requested work independently from repository size/complexity. */
-export function planTask(instructions: string): TaskPlan {
+export function planTask(instructions: string, depthOverride?: ResearchDepth): TaskPlan {
   const text = normalize(instructions);
   const broadScope = /todo el proyecto|proyecto completo|de extremo a extremo|integral|todos los modulos|toda la arquitectura|redisenar|migracion completa|auditoria completa/.test(text);
   const explicitDeep = /auditoria|audita|diseno arquitectonico|investigacion profunda|comparativa|analisis exhaustivo|seguridad|rendimiento|performance/.test(text);
@@ -63,6 +63,7 @@ export function planTask(instructions: string): TaskPlan {
     reasons.push("Se detectaron referencias explicitas a binarios o ingenieria inversa.");
   }
   if (broadScope) reasons.push("El alcance declarado abarca multiples modulos o el proyecto completo.");
-  return { kind, complexity, depth, recommendedAgents: agents, reasons,
-    estimatedMinutes: depth === "quick" ? 1 : depth === "focused" ? 5 : 15, changesExpected };
+  const selectedDepth = depthOverride ?? depth;
+  return { kind, complexity, depth: selectedDepth, recommendedAgents: agents, reasons,
+    estimatedMinutes: selectedDepth === "quick" ? 1 : selectedDepth === "focused" ? 5 : 15, changesExpected };
 }

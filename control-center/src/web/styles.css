@@ -344,7 +344,7 @@ h1 { margin: 8px 0 7px; font-size: clamp(25px, 3vw, 34px); letter-spacing: -1.1p
 .recommendation-review-head p { margin:0; color:#71819a; font-size:11px; line-height:1.55; }
 .terminal-kicker { color:#5572c7; font:700 9px ui-monospace,monospace; letter-spacing:1px; }
 .suggestion-table { display:grid; gap:1px; overflow:hidden; border:1px solid #e2e8f4; border-radius:8px; margin:14px 0; }
-.suggestion-row { display:grid; grid-template-columns:1fr 1.1fr 1.3fr; gap:12px; align-items:center; padding:10px 12px; background:#fff; }
+.suggestion-row { display:grid; grid-template-columns:30px 1fr 1.1fr 1.3fr; gap:12px; align-items:center; padding:10px 12px; background:#fff; }
 .suggestion-row + .suggestion-row { border-top:1px solid #edf0f6; }
 .suggestion-row strong { color:#35445d; font-size:11px; }
 .suggestion-row span { color:#74839a; font-size:10px; }

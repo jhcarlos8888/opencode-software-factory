@@ -446,7 +446,7 @@ app.get<{ Params: { runId: string } }>("/api/executions/:runId", async (request,
   return { execution };
 });
 
-app.post<{ Body: { path?: unknown; instructions?: unknown } }>("/api/executions", async (request, reply) => {
+app.post<{ Body: { path?: unknown; instructions?: unknown; taskDepth?: unknown } }>("/api/executions", async (request, reply) => {
   const projectPath = typeof request.body?.path === "string" ? request.body.path.trim() : getProjectPreferences().path;
   const instructions = typeof request.body?.instructions === "string"
     ? request.body.instructions.slice(0, 12000).trim()
@@ -457,6 +457,10 @@ app.post<{ Body: { path?: unknown; instructions?: unknown } }>("/api/executions"
   if (!instructions) {
     return reply.code(400).send({ error: "Escribe las instrucciones que deben ejecutar los agentes." });
   }
+  const taskDepth = request.body?.taskDepth;
+  if (taskDepth !== undefined && !["quick", "focused", "deep"].includes(String(taskDepth))) {
+    return reply.code(400).send({ error: "Profundidad de tarea inválida." });
+  }
   const nonFavorite = findNonFavoriteAssignment(listAssignments().filter((item) => item.enabled));
   if (nonFavorite) {
     return reply.code(409).send({
@@ -466,7 +470,7 @@ app.post<{ Body: { path?: unknown; instructions?: unknown } }>("/api/executions"
   try {
     await analyzeProject(projectPath, instructions);
     saveProjectPreferences(projectPath, instructions);
-    const result = await startExecution(projectPath, instructions, factoryRoot);
+    const result = await startExecution(projectPath, instructions, factoryRoot, taskDepth as "quick" | "focused" | "deep" | undefined);
     return reply.code(202).send({ started: true, runId: result.runId, execution: getExecution(result.runId) });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

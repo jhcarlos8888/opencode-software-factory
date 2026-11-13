@@ -5,7 +5,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
-import { planTask } from "./task-planner.js";
+import { planTask, type ResearchDepth } from "./task-planner.js";
 import {
   addExecutionEvent, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
   getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, markUnfinishedExecutionsInterrupted, orphanExecutionDecisions,
@@ -742,7 +742,8 @@ async function executeRun(
   projectPath: string,
   instructions: string,
   factoryRoot: string,
-  agents: AgentInput[]
+  agents: AgentInput[],
+  depthOverride?: ResearchDepth
 ): Promise<void> {
   const failures: string[] = [];
   const previousResults: string[] = [];
@@ -778,7 +779,7 @@ async function executeRun(
       }
     }
 
-    const taskPlan = planTask(instructions);
+    const taskPlan = planTask(instructions, depthOverride);
     const agentTimeoutMs = taskPlan.depth === "quick" ? 2 * 60 * 1000 : taskPlan.depth === "focused" ? 8 * 60 * 1000 : 25 * 60 * 1000;
     addLog(state.runId, "PLANNER", "success", `Plan ${taskPlan.depth}: ${taskPlan.recommendedAgents.length} agentes recomendados; límite por agente ${Math.round(agentTimeoutMs / 60000)} min.`);
     const depthGuidance = taskPlan.depth === "quick"
@@ -861,7 +862,7 @@ async function executeRun(
   }
 }
 
-export async function startExecution(projectPath: string, instructions: string, factoryRoot: string): Promise<{ runId: string }> {
+export async function startExecution(projectPath: string, instructions: string, factoryRoot: string, depthOverride?: ResearchDepth): Promise<{ runId: string }> {
   const active = [...runtimeByRun.values()].find((runtime) => !runtime.cancelled);
   if (active) throw new Error("Ya hay una ejecución activa. Termínala o cancélala antes de comenzar otra.");
   const resolvedProjectPath = resolve(projectPath);
@@ -893,7 +894,7 @@ export async function startExecution(projectPath: string, instructions: string, 
   };
   runtimeByRun.set(id, state);
   addLog(id, "ORCHESTRATOR", "success", `Ejecución creada para ${resolvedProjectPath}. ${agents.length} agentes habilitados.`);
-  void executeRun(state, resolvedProjectPath, instructions.trim(), factoryRoot, agents);
+  void executeRun(state, resolvedProjectPath, instructions.trim(), factoryRoot, agents, depthOverride);
   return { runId: id };
 }
 
