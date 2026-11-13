@@ -490,6 +490,19 @@ def doctor(raw_target):
         print("Instala la fábrica en el proyecto antes de ejecutar 'doctor'.")
         return 1
 
+    # El modelo esperado lo declara el propio opencode.json del destino:
+    # permite instalaciones con otro modelo (p. ej. glm-5.3-flash) sin romper
+    # la verificación, siempre que agentes y configuración coincidan entre sí.
+    # Si el fichero no se puede leer, se mantiene EXPECTED_MODEL por defecto.
+    expected_provider, expected_name = EXPECTED_MODEL
+    try:
+        with config_path.open(encoding="utf-8") as fh:
+            local_model = (json.load(fh) or {}).get("model") or ""
+        if isinstance(local_model, str) and "/" in local_model:
+            expected_provider, expected_name = local_model.split("/", 1)
+    except (OSError, json.JSONDecodeError):
+        pass
+
     findings = 0
 
     def check(ok, message):
@@ -597,13 +610,13 @@ def doctor(raw_target):
         # El CLI usa model.id dentro del objeto model de cada agente.
         name = model.get("model", model.get("id"))
         check(
-            provider == EXPECTED_MODEL[0],
-            f"agente '{agent_id}' con proveedor {EXPECTED_MODEL[0]} "
+            provider == expected_provider,
+            f"agente '{agent_id}' con proveedor {expected_provider} "
             f"(obtenido: {provider})",
         )
         check(
-            name == EXPECTED_MODEL[1],
-            f"agente '{agent_id}' con modelo {EXPECTED_MODEL[1]} "
+            name == expected_name,
+            f"agente '{agent_id}' con modelo {expected_name} "
             f"(obtenido: {name})",
         )
 
@@ -639,8 +652,8 @@ def doctor(raw_target):
     model_info = info.get("model") or {}
     model_name = model_info.get("model")
     check(
-        model_name == EXPECTED_MODEL[1],
-        f"modelo {EXPECTED_MODEL[1]} en {config_path} "
+        model_name == expected_name,
+        f"modelo {expected_name} en {config_path} "
         f"(obtenido: {model_name})",
     )
 

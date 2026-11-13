@@ -642,3 +642,25 @@ duda.
   primera ejecución descarga la base NVD (requiere red y varios minutos).
 - Los permisos sin aprobación están pensados para Java, Python,
   Node/TypeScript y `make`; otros stacks quedan en `ask`.
+
+
+## Centro de operaciones multi-motor (en desarrollo)
+
+La fábrica conserva sus agentes, comandos y Skills actuales. La evolución multi-motor se documenta en [docs/multi-engine](docs/multi-engine/00-auditoria-inicial.md).
+
+Se está construyendo una interfaz local para asignar OpenCode o Claude Code y un modelo independiente a cada agente. El primer prototipo está en [control-center](control-center/README.md).
+
+Para iniciar el panel en desarrollo:
+
+```bash
+cd control-center
+npm install
+npm run dev
+```
+
+Abrir http://127.0.0.1:5173. La API queda en 127.0.0.1:4141. La versión inicial detecta motores y catálogos, configura asignaciones por agente y analiza proyectos en modo de solo lectura; todavía no ejecuta tareas ni permite modificaciones automáticas.
+
+
+## Uso del Centro de Control
+
+Consulta [la guía de usuario](docs/GUIA-USUARIO-CONTROL-CENTER.md) para iniciar la interfaz, configurar los agentes, analizar proyectos y conocer los límites de la versión 0.1.0.

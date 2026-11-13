@@ -1,0 +1,532 @@
+import Fastify from "fastify";
+import cors from "@fastify/cors";
+import fastifyStatic from "@fastify/static";
+import { existsSync, statSync } from "node:fs";
+import { spawn } from "node:child_process";
+import { dirname, isAbsolute, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+import { loadFactoryAssets, mergeAssignments } from "./factory.js";
+import { databaseInfo, getClaudeProviderPreference, getProjectPreferences, listAssignments, listFavoriteModels, saveAssignments, saveClaudeProviderPreference, saveFavoriteModels, saveProjectPreferences, synchronizeConfiguredClaudeModel, type AgentAssignment, type ClaudeProviderId, type EngineId, type FavoriteModel, type ModelTier, type PermissionProfile } from "./database.js";
+import { getClaudeModels, getEngineVersion, getOpenCodeModels, listModels } from "./models.js";
+import { analyzeProject } from "./projects.js";
+import { cancelExecution, getExecution, getLatestExecution, recoverExecutionState, respondExecutionDecision, startExecution } from "./execution.js";
+
+const currentDir = dirname(fileURLToPath(import.meta.url));
+const factoryRoot = resolve(process.env.FACTORY_ROOT || resolve(currentDir, "../../.."));
+const host = "127.0.0.1";
+const port = Number(process.env.FACTORY_API_PORT || 4141);
+
+function findNonFavoriteAssignment(assignments: AgentAssignment[]): AgentAssignment | undefined {
+  const activeClaudeProvider = getClaudeProviderPreference();
+  const favoriteKeys = new Set(
+    listFavoriteModels()
+      .filter((favorite) => favorite.provider === (favorite.engine === "claude" ? activeClaudeProvider : "opencode"))
+      .map((favorite) => `${favorite.engine}|${favorite.modelId}`)
+  );
+  return assignments.find((item) => !favoriteKeys.has(`${item.engine}|${item.modelId}`));
+}
+
+async function synchronizeConfiguredClaudeModelAtStartup(): Promise<void> {
+  if (getClaudeProviderPreference() !== "apmix") return;
+  try {
+    const models = await getClaudeModels("apmix");
+    const configured = models.find((item) => item.source === "detected");
+    if (!configured) return;
+    const result = synchronizeConfiguredClaudeModel(configured.id, models.map((item) => item.id));
+    if (result.assignmentsUpdated || result.favoritesUpdated) {
+      console.info(
+        `[Factory Control Center] APMix model synchronized: ${configured.id}; ${result.assignmentsUpdated} assignments and ${result.favoritesUpdated} favorites updated.`
+      );
+    }
+  } catch (error) {
+    console.warn("[Factory Control Center] Could not synchronize configured APMix model.", error);
+  }
+}
+
+await synchronizeConfiguredClaudeModelAtStartup();
+recoverExecutionState();
+
+const app = Fastify({
+  logger: true,
+  bodyLimit: 1024 * 1024,
+  trustProxy: false
+});
+
+await app.register(cors, {
+  origin: ["http://127.0.0.1:5173", "http://localhost:5173"],
+  methods: ["GET", "POST", "PUT", "OPTIONS"]
+});
+
+app.get("/api/health", async () => ({
+  status: "ok",
+  service: "Factory Control Center API",
+  factoryRoot,
+  database: databaseInfo.engine
+}));
+
+app.get("/api/engines", async () => {
+  const [openCodeVersion, claudeVersion] = await Promise.all([
+    getEngineVersion("opencode"),
+    getEngineVersion("claude")
+  ]);
+
+  return {
+    engines: [
+      { id: "opencode", name: "OpenCode", available: openCodeVersion !== null, version: openCodeVersion },
+      { id: "claude", name: "Claude Code", available: claudeVersion !== null, version: claudeVersion }
+    ]
+  };
+});
+
+app.get<{ Params: { engine: string } }>("/api/models/:engine", async (request, reply) => {
+  const engine = request.params.engine;
+  if (engine !== "opencode" && engine !== "claude") {
+    return reply.code(400).send({ error: "Motor no válido. Usa 'opencode' o 'claude'." });
+  }
+
+  try {
+    const models = await listModels(engine as EngineId, getClaudeProviderPreference());
+    return { engine, models };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(503).send({ engine, models: [], error: message });
+  }
+});
+
+app.post("/api/providers/claude/synchronize-model", async (request, reply) => {
+  if (getClaudeProviderPreference() !== "apmix") {
+    return { synchronized: false, provider: "anthropic", assignmentsUpdated: 0, favoritesUpdated: 0 };
+  }
+  try {
+    const models = await getClaudeModels("apmix");
+    const configured = models.find((item) => item.source === "detected");
+    if (!configured) {
+      return reply.code(409).send({ error: "No se detectó un modelo APMix válido en ~/.claude/settings.json." });
+    }
+    const result = synchronizeConfiguredClaudeModel(configured.id, models.map((item) => item.id));
+    return { synchronized: true, provider: "apmix", modelId: configured.id, ...result };
+  } catch {
+    return reply.code(503).send({ error: "No fue posible sincronizar el modelo APMix configurado localmente." });
+  }
+});
+
+app.get("/api/providers/claude", async () => ({
+  selectedProvider: getClaudeProviderPreference(),
+  providers: [
+    {
+      id: "apmix",
+      name: "APMix",
+      baseUrl: "https://api.apmix.ai",
+      protocol: "Anthropic Messages API",
+      validation: "pending",
+      note: "La documentación de APMix indica compatibilidad con Claude Code. La cuenta y el modelo concreto aún deben validarse."
+    },
+    {
+      id: "anthropic",
+      name: "Anthropic oficial",
+      baseUrl: "https://api.anthropic.com",
+      protocol: "Anthropic Messages API",
+      validation: "pending",
+      note: "Usará la autenticación oficial existente cuando se valide, sin reemplazarla ni reescribirla."
+    }
+  ],
+  runtimeConnected: false,
+  credentialsModified: false
+}));
+
+app.put<{ Body: { provider?: unknown } }>("/api/providers/claude", async (request, reply) => {
+  const provider = request.body?.provider;
+  if (provider !== "apmix" && provider !== "anthropic") {
+    return reply.code(400).send({ error: "Proveedor no válido. Usa 'apmix' o 'anthropic'." });
+  }
+  saveClaudeProviderPreference(provider as ClaudeProviderId);
+  return {
+    saved: true,
+    selectedProvider: provider,
+    runtimeConnected: false,
+    credentialsModified: false,
+    message: "Preferencia guardada localmente. No se modificaron credenciales ni settings de Claude Code."
+  };
+});
+
+app.get("/api/favorites", async () => ({ favorites: listFavoriteModels() }));
+
+app.put<{ Body: { favorites?: unknown } }>("/api/favorites", async (request, reply) => {
+  if (!Array.isArray(request.body?.favorites)) return reply.code(400).send({ error: "Se esperaba un arreglo favorites." });
+  const normalized: FavoriteModel[] = [];
+  const seen = new Set<string>();
+  for (const row of request.body.favorites) {
+    if (!row || typeof row !== "object") return reply.code(400).send({ error: "Favorito inválido." });
+    const item = row as Record<string, unknown>;
+    const engine = item.engine;
+    const provider = String(item.provider ?? "");
+    const modelId = String(item.modelId ?? "");
+    const tier = item.tier;
+    if ((engine !== "opencode" && engine !== "claude") ||
+        (engine === "claude" && provider !== "apmix" && provider !== "anthropic") ||
+        (engine === "opencode" && provider !== "opencode") ||
+        !modelId || modelId.length > 200 ||
+        !["economy", "balanced", "premium"].includes(String(tier))) {
+      return reply.code(400).send({ error: "Un favorito contiene motor, proveedor, modelo o nivel inválido." });
+    }
+    const key = [engine, provider, modelId].join("|");
+    if (seen.has(key)) return reply.code(400).send({ error: "Hay modelos favoritos duplicados." });
+    seen.add(key);
+    normalized.push({ engine, provider, modelId, tier: tier as ModelTier });
+  }
+  const grouped = new Map<string, Set<string>>();
+  for (const engine of ["opencode", "claude"] as const) {
+    const provider = engine === "claude" ? getClaudeProviderPreference() : "opencode";
+    const rows = normalized.filter((item) => item.engine === engine && item.provider === provider);
+    if (!rows.length) continue;
+    const ids = new Set((await listModels(engine, getClaudeProviderPreference())).map((model) => model.id));
+    const invalid = rows.find((item) => !ids.has(item.modelId));
+    if (invalid) return reply.code(400).send({ error: `El modelo favorito ${invalid.modelId} no está en el catálogo actual de ${provider}.` });
+  }
+  saveFavoriteModels(normalized);
+  return { saved: normalized.length, favorites: normalized };
+});
+
+
+function openDirectoryDialog(initialPath?: string): Promise<string | null> {
+  return new Promise((resolveSelection, reject) => {
+    const args = [
+      "--file-selection",
+      "--directory",
+      "--title=Seleccionar carpeta del proyecto"
+    ];
+    if (initialPath) args.push("--filename=" + initialPath + "/");
+
+    const child = spawn("zenity", args, { stdio: ["ignore", "pipe", "ignore"] });
+    let output = "";
+    const timeout = setTimeout(() => {
+      child.kill("SIGTERM");
+      reject(new Error("El selector de carpetas superó el tiempo permitido."));
+    }, 180000);
+
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk: string) => {
+      output += chunk;
+      if (output.length > 8192) {
+        clearTimeout(timeout);
+        child.kill("SIGTERM");
+        reject(new Error("La ruta seleccionada excede el tamaño permitido."));
+      }
+    });
+
+    child.once("error", (error: NodeJS.ErrnoException) => {
+      clearTimeout(timeout);
+      reject(new Error(error.code === "ENOENT"
+        ? "No se encontró el selector nativo de carpetas (zenity)."
+        : "No fue posible abrir el selector nativo de carpetas."));
+    });
+
+    child.once("close", (code) => {
+      clearTimeout(timeout);
+      if (code === 0) {
+        const selected = output.trim();
+        if (!selected || !isAbsolute(selected)) {
+          reject(new Error("El selector no devolvió una ruta absoluta válida."));
+          return;
+        }
+        resolveSelection(resolve(selected));
+      } else if (code === 1 || code === 5) {
+        resolveSelection(null);
+      } else {
+        reject(new Error("El selector nativo de carpetas no pudo completarse."));
+      }
+    });
+  });
+}
+
+app.post<{ Body: { currentPath?: unknown } }>("/api/projects/select-directory", async (request, reply) => {
+  let initialPath: string | undefined;
+  const candidate = request.body?.currentPath;
+  if (typeof candidate === "string" && candidate.length <= 4096 && isAbsolute(candidate) && existsSync(candidate)) {
+    try {
+      if (statSync(candidate).isDirectory()) initialPath = resolve(candidate);
+    } catch {
+      // Si la ruta actual ya no existe o no es accesible, el selector abre en la ubicación predeterminada.
+    }
+  }
+
+  try {
+    const selected = await openDirectoryDialog(initialPath);
+    return selected ? { path: selected, cancelled: false } : { path: null, cancelled: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "No fue posible seleccionar la carpeta.";
+    return reply.code(503).send({ error: message });
+  }
+});
+
+app.get("/api/project-preferences", async () => getProjectPreferences());
+
+app.get("/api/factory/assets", async () => loadFactoryAssets(factoryRoot));
+
+app.get("/api/assignments", async () => {
+  const assets = await loadFactoryAssets(factoryRoot);
+  const persisted = listAssignments();
+  return {
+    assignments: mergeAssignments(assets.agents, persisted),
+    saved: persisted.length === assets.agents.length
+  };
+});
+
+app.put<{ Body: { assignments?: unknown } }>("/api/assignments", async (request, reply) => {
+  const input = request.body?.assignments;
+  if (!Array.isArray(input)) {
+    return reply.code(400).send({ error: "Se esperaba un arreglo 'assignments'." });
+  }
+
+  const assets = await loadFactoryAssets(factoryRoot);
+  const knownAgents = new Set(assets.agents.map((agent) => agent.id));
+  const normalized: AgentAssignment[] = [];
+  const seenAgents = new Set<string>();
+
+  for (const row of input) {
+    if (!row || typeof row !== "object") {
+      return reply.code(400).send({ error: "Una asignación tiene formato inválido." });
+    }
+    const item = row as Record<string, unknown>;
+    const agentId = String(item.agentId ?? "");
+    const engine = item.engine;
+    const modelId = String(item.modelId ?? "");
+    const permissionProfile = item.permissionProfile;
+    const enabled = item.enabled;
+
+    if (!knownAgents.has(agentId)) {
+      return reply.code(400).send({ error: `Agente desconocido: ${agentId}` });
+    }
+    if (seenAgents.has(agentId)) {
+      return reply.code(400).send({ error: `Agente duplicado: ${agentId}` });
+    }
+    seenAgents.add(agentId);
+    if (engine !== "opencode" && engine !== "claude") {
+      return reply.code(400).send({ error: `Motor inválido para ${agentId}.` });
+    }
+    if (!modelId || modelId.length > 200) {
+      return reply.code(400).send({ error: `Modelo inválido para ${agentId}.` });
+    }
+    if (!["read-only", "workspace-write", "approval-required"].includes(String(permissionProfile))) {
+      return reply.code(400).send({ error: `Perfil de permisos inválido para ${agentId}.` });
+    }
+    if (typeof enabled !== "boolean") {
+      return reply.code(400).send({ error: `Estado enabled inválido para ${agentId}.` });
+    }
+
+    normalized.push({
+      agentId,
+      engine: engine as EngineId,
+      modelId,
+      permissionProfile: permissionProfile as PermissionProfile,
+      enabled
+    });
+  }
+
+  if (normalized.length !== assets.agents.length) {
+    return reply.code(400).send({ error: "Envía exactamente una asignación por cada agente de la fábrica." });
+  }
+
+  // La fábrica solo permite asignar modelos guardados como favoritos del motor/proveedor activo.
+  const nonFavorite = findNonFavoriteAssignment(normalized);
+  if (nonFavorite) {
+    return reply.code(400).send({
+      error: `El modelo "${nonFavorite.modelId}" asignado a ${nonFavorite.agentId} no está marcado como favorito. Solo se permiten modelos favoritos.`
+    });
+  }
+
+  // Impide guardar IDs de modelo de otro motor o modelos que no figuran en su catálogo actual.
+  for (const engine of ["opencode", "claude"] as const) {
+    const selected = normalized.filter((item) => item.engine === engine);
+    if (selected.length === 0) continue;
+    try {
+      const availableModels = new Set((await listModels(engine, getClaudeProviderPreference())).map((model) => model.id));
+      const invalid = selected.find((item) => !availableModels.has(item.modelId));
+      if (invalid) {
+        return reply.code(400).send({
+          error: `El modelo "${invalid.modelId}" no pertenece al catálogo disponible de ${engine}.`
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return reply.code(503).send({ error: message });
+    }
+  }
+
+  saveAssignments(normalized);
+  return { saved: normalized.length, assignments: normalized };
+});
+
+app.post<{ Body: { path?: string; instructions?: string } }>("/api/projects/analyze", async (request, reply) => {
+  const projectPath = request.body?.path;
+  const instructions = typeof request.body?.instructions === "string" ? request.body.instructions.slice(0, 12000) : "";
+  if (typeof projectPath !== "string" || !projectPath.trim()) {
+    return reply.code(400).send({ error: "Indica la ruta absoluta del proyecto." });
+  }
+
+  try {
+    saveProjectPreferences(projectPath, instructions);
+    const analysis = await analyzeProject(projectPath, instructions);
+    const current = listAssignments();
+    const favorites = listFavoriteModels().filter((item) =>
+      item.provider === (item.engine === "claude" ? getClaudeProviderPreference() : "opencode")
+    );
+    const roleTierByDifficulty: Record<string, Record<string, ModelTier[]>> = {
+      low: {
+        build: ["balanced", "economy", "premium"], architect: ["balanced", "premium", "economy"],
+        implementer: ["economy", "balanced", "premium"], reviewer: ["economy", "balanced", "premium"],
+        tester: ["economy", "balanced", "premium"], "cloud-arbiter": ["premium", "balanced", "economy"],
+        reverse: ["balanced", "economy", "premium"]
+      },
+      medium: {
+        build: ["balanced", "premium", "economy"], architect: ["premium", "balanced", "economy"],
+        implementer: ["balanced", "premium", "economy"], reviewer: ["balanced", "premium", "economy"],
+        tester: ["balanced", "economy", "premium"], "cloud-arbiter": ["premium", "balanced", "economy"],
+        reverse: ["balanced", "premium", "economy"]
+      },
+      high: {
+        build: ["premium", "balanced", "economy"], architect: ["premium", "balanced", "economy"],
+        implementer: ["premium", "balanced", "economy"], reviewer: ["premium", "balanced", "economy"],
+        tester: ["balanced", "premium", "economy"], "cloud-arbiter": ["premium", "balanced", "economy"],
+        reverse: ["balanced", "premium", "economy"]
+      },
+      "very-high": {
+        build: ["premium", "balanced", "economy"], architect: ["premium", "balanced", "economy"],
+        implementer: ["premium", "balanced", "economy"], reviewer: ["premium", "balanced", "economy"],
+        tester: ["balanced", "premium", "economy"], "cloud-arbiter": ["premium", "balanced", "economy"],
+        reverse: ["balanced", "premium", "economy"]
+      }
+    };
+    const rolePreference: Record<string, EngineId[]> = {
+      build: ["opencode", "claude"], architect: ["claude", "opencode"],
+      implementer: ["opencode", "claude"], reviewer: ["claude", "opencode"],
+      tester: ["opencode", "claude"], "cloud-arbiter": ["claude", "opencode"],
+      reverse: ["opencode", "claude"]
+    };
+    const suggestedAssignments = current.map((assignment) => {
+      const preferredTier = roleTierByDifficulty[analysis.complexity.level]?.[assignment.agentId] ?? ["balanced", "premium", "economy"];
+      const prefs = rolePreference[assignment.agentId] ?? ["opencode", "claude"];
+      const candidates = favorites.slice().sort((a, b) => {
+        const tierDiff = preferredTier.indexOf(a.tier) - preferredTier.indexOf(b.tier);
+        if (tierDiff !== 0) return tierDiff;
+        const engineDiff = prefs.indexOf(a.engine) - prefs.indexOf(b.engine);
+        if (engineDiff !== 0) return engineDiff;
+        return a.modelId.localeCompare(b.modelId);
+      });
+      const chosen = candidates[0];
+      return chosen ? { ...assignment, engine: chosen.engine, modelId: chosen.modelId } : assignment;
+    });
+    return {
+      ...analysis,
+      suggestedAssignments,
+      recommendationReady: favorites.length > 0,
+      recommendationMessage: favorites.length
+        ? "Se generaron recomendaciones usando exclusivamente tus modelos favoritos activos."
+        : "Aún no hay modelos favoritos. Configúralos para activar la asignación automática."
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(400).send({ error: message });
+  }
+});
+
+app.get("/api/executions/latest", async () => ({
+  execution: getLatestExecution()
+}));
+
+app.get<{ Params: { runId: string } }>("/api/executions/:runId", async (request, reply) => {
+  const execution = getExecution(request.params.runId);
+  if (!execution) return reply.code(404).send({ error: "Ejecución no encontrada." });
+  return { execution };
+});
+
+app.post<{ Body: { path?: unknown; instructions?: unknown } }>("/api/executions", async (request, reply) => {
+  const projectPath = typeof request.body?.path === "string" ? request.body.path.trim() : getProjectPreferences().path;
+  const instructions = typeof request.body?.instructions === "string"
+    ? request.body.instructions.slice(0, 12000).trim()
+    : getProjectPreferences().instructions;
+  if (!projectPath || !isAbsolute(projectPath)) {
+    return reply.code(400).send({ error: "Selecciona una ruta absoluta para el proyecto." });
+  }
+  if (!instructions) {
+    return reply.code(400).send({ error: "Escribe las instrucciones que deben ejecutar los agentes." });
+  }
+  const nonFavorite = findNonFavoriteAssignment(listAssignments().filter((item) => item.enabled));
+  if (nonFavorite) {
+    return reply.code(409).send({
+      error: `No se puede iniciar: el agente ${nonFavorite.agentId} tiene asignado ${nonFavorite.modelId}, que no está marcado como favorito.`
+    });
+  }
+  try {
+    await analyzeProject(projectPath, instructions);
+    saveProjectPreferences(projectPath, instructions);
+    const result = await startExecution(projectPath, instructions, factoryRoot);
+    return reply.code(202).send({ started: true, runId: result.runId, execution: getExecution(result.runId) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(409).send({ error: message });
+  }
+});
+
+app.post<{ Params: { runId: string } }>("/api/executions/:runId/cancel", async (request, reply) => {
+  try {
+    await cancelExecution(request.params.runId);
+    return { cancelled: true, execution: getExecution(request.params.runId) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(409).send({ error: message });
+  }
+});
+
+app.post<{
+  Params: { runId: string; decisionId: string };
+  Body: { action?: unknown; answer?: unknown };
+}>("/api/executions/:runId/decisions/:decisionId/respond", async (request, reply) => {
+  const action = request.body?.action;
+  if (action !== "allow" && action !== "deny" && action !== "answer") {
+    return reply.code(400).send({ error: "La respuesta debe ser allow, deny o answer." });
+  }
+  const answer = typeof request.body?.answer === "string" ? request.body.answer.slice(0, 12000) : undefined;
+  if (action === "answer" && !answer?.trim()) {
+    return reply.code(400).send({ error: "Escribe una respuesta antes de enviarla." });
+  }
+  try {
+    await respondExecutionDecision(request.params.runId, request.params.decisionId, { action, answer });
+    return { responded: true, execution: getExecution(request.params.runId) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return reply.code(409).send({ error: message });
+  }
+});
+
+// En producción, Fastify sirve también la interfaz compilada desde el mismo origen.
+const webDist = resolve(factoryRoot, "control-center", "dist");
+if (existsSync(join(webDist, "index.html"))) {
+  await app.register(fastifyStatic, {
+    root: webDist,
+    prefix: "/"
+  });
+
+  app.setNotFoundHandler((request, reply) => {
+    if (request.url.startsWith("/api/")) {
+      return reply.code(404).send({ error: "Ruta API no encontrada." });
+    }
+    if (request.method === "GET") {
+      return reply.type("text/html").sendFile("index.html");
+    }
+    return reply.code(404).send();
+  });
+}
+
+app.setErrorHandler((error, request, reply) => {
+  request.log.error(error);
+  reply.code(500).send({ error: "Error interno de Factory Control Center." });
+});
+
+try {
+  await app.listen({ host, port });
+  app.log.info(`Factory Control Center API escuchando en http://${host}:${port}`);
+} catch (error) {
+  app.log.error(error);
+  process.exit(1);
+}
