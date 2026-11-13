@@ -6,7 +6,6 @@ export interface TaskPlan {
   depth: ResearchDepth;
   recommendedAgents: string[];
   reasons: string[];
-  estimatedMinutes: number;
   changesExpected: boolean;
 }
 function normalize(value: string): string {
@@ -64,6 +63,5 @@ export function planTask(instructions: string, depthOverride?: ResearchDepth): T
   }
   if (broadScope) reasons.push("El alcance declarado abarca multiples modulos o el proyecto completo.");
   const selectedDepth = depthOverride ?? depth;
-  return { kind, complexity, depth: selectedDepth, recommendedAgents: agents, reasons,
-    estimatedMinutes: selectedDepth === "quick" ? 1 : selectedDepth === "focused" ? 5 : 15, changesExpected };
+  return { kind, complexity, depth: selectedDepth, recommendedAgents: agents, reasons, changesExpected };
 }

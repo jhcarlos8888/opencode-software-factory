@@ -11,26 +11,26 @@ La clasificación se realiza localmente mediante reglas deterministas, sin envia
 
 ## Profundidad y equipo
 
-| Profundidad | Uso | Límite por agente |
-|---|---|---:|
-| Rápida | Resúmenes y explicaciones; documentación y archivos representativos | 2 min |
-| Focalizada | Diagnóstico o cambio acotado; módulo y dependencias directas | 8 min |
-| Profunda | Auditorías, arquitectura amplia o cambios de alcance general | 25 min |
+| Profundidad | Uso |
+|---|---|
+| Rápida | Resúmenes y explicaciones; documentación y archivos representativos |
+| Focalizada | Diagnóstico o cambio acotado; módulo y dependencias directas |
+| Profunda | Auditorías, arquitectura amplia o cambios de alcance general |
 
 La preconsulta propone agentes y modelos tomados exclusivamente de favoritos. Antes de aceptar, el usuario puede cambiar la profundidad y activar o desactivar cualquier especialista. La propuesta habilita únicamente los agentes recomendados por defecto; los demás quedan desactivados, pero pueden habilitarse manualmente. El usuario conserva la decisión final y debe guardar el equipo.
 
-Los límites son máximos por agente, no promesas de duración total. El tiempo real depende del arranque del motor, proveedor, latencia y herramientas. Cuando se agota el límite, el agente se interrumpe y la fase se registra como fallida; no se marca como exitosa sin respuesta verificable.
+Los agentes no tienen un límite artificial de duración. Cada fase continúa hasta que el motor termina su trabajo o el usuario cancela explícitamente la ejecución. La profundidad (rápida, focalizada o profunda) orienta el alcance de la exploración, no establece un cronómetro ni interrumpe al agente.
 
 ## Reglas de seguridad y alcance
 
 - Las explicaciones y diagnósticos no habilitan escritura automáticamente.
 - La clasificación de implementación no modifica perfiles de permisos: el usuario debe revisar y guardar los permisos del equipo.
-- La profundidad rápida instruye al agente para revisar README, instrucciones, manifiestos y una muestra pequeña de archivos; debe detener la exploración cuando tenga evidencia suficiente.
+- La profundidad rápida orienta al agente a comenzar por README, instrucciones, manifiestos y archivos representativos; puede ampliar la exploración si la evidencia todavía no basta.
 - La clasificación es heurística y debe evolucionar con pruebas de uso real. Una tarea ambigua se enruta conservadoramente al Arquitecto con investigación focalizada.
-- La estimación visible es orientativa; el límite por agente es el control efectivo. La profundidad elegida manualmente se envía a la ejecución y prevalece sobre la profundidad sugerida automáticamente.
+- La profundidad elegida manualmente se envía a la ejecución y prevalece sobre la profundidad sugerida automáticamente. No existe un límite de duración por agente.
 
 ## Caso de regresión
 
 Instrucción: «Quisiera que en un párrafo me explicaras de qué trata el proyecto y su arquitectura».
 
-Resultado esperado: tipo explanation, complejidad de tarea low, profundidad quick, agente architect solamente, sin cambios y con límite de dos minutos para el agente.
+Resultado esperado: tipo explanation, complejidad de tarea low, profundidad quick, agente architect solamente y sin cambios. La ejecución continúa hasta que el agente complete la explicación o el usuario la cancele.

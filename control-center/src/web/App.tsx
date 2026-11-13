@@ -40,7 +40,6 @@ interface TaskPlan {
   depth: "quick" | "focused" | "deep";
   recommendedAgents: string[];
   reasons: string[];
-  estimatedMinutes: number;
   changesExpected: boolean;
 }
 
@@ -701,18 +700,18 @@ export default function App() {
                     <label htmlFor="task-depth">PROFUNDIDAD DE INVESTIGACIÓN</label>
                     <select id="task-depth" value={analysis.taskPlan.depth} onChange={(event) => {
                       const depth = event.target.value as TaskPlan["depth"];
-                      setAnalysis((current) => current ? { ...current, taskPlan: { ...current.taskPlan, depth, estimatedMinutes: depth === "quick" ? 1 : depth === "focused" ? 5 : 15 } } : current);
+                      setAnalysis((current) => current ? { ...current, taskPlan: { ...current.taskPlan, depth } } : current);
                     }}>
-                      <option value="quick">Rápida · límite 2 min por agente</option>
-                      <option value="focused">Focalizada · límite 8 min por agente</option>
-                      <option value="deep">Profunda · límite 25 min por agente</option>
+                      <option value="quick">Rápida · exploración acotada</option>
+                      <option value="focused">Focalizada · módulo y dependencias</option>
+                      <option value="deep">Profunda · análisis amplio</option>
                     </select>
                   </div>
                   <div><span className="mini-label">TIPO DE TRABAJO</span><strong>{({ explanation: "Explicación", diagnosis: "Diagnóstico", implementation: "Implementación", testing: "Pruebas", "architecture-review": "Revisión arquitectónica", general: "General" })[analysis.taskPlan.kind]}</strong></div>
                   <div><span className="mini-label">EQUIPO PROPUESTO</span><strong>{analysis.taskPlan.recommendedAgents.length} agente(s)</strong></div>
                   <div className="complexity-reasons">
                     {analysis.taskPlan.reasons.map((reason) => <span key={reason}>• {reason}</span>)}
-                    <span>• Tiempo orientativo: {analysis.taskPlan.estimatedMinutes} min; no es un límite garantizado.</span>
+                    <span>• Sin límite de duración. La profundidad solo orienta el alcance de la investigación.</span>
                     <span>• {analysis.taskPlan.changesExpected ? "La tarea solicita cambios." : "Tarea de solo lectura: no se esperan modificaciones."}</span>
                   </div>
                 </div>
