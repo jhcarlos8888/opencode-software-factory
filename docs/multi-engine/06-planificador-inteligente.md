@@ -29,6 +29,10 @@ Los agentes no tienen un límite artificial de duración. Cada fase continúa ha
 - La clasificación es heurística y debe evolucionar con pruebas de uso real. Una tarea ambigua se enruta conservadoramente al Arquitecto con investigación focalizada.
 - La profundidad elegida manualmente se envía a la ejecución y prevalece sobre la profundidad sugerida automáticamente. No existe un límite de duración por agente.
 
+## Ejecución concurrente entre motores
+
+Cuando una ejecución incluye agentes de OpenCode y Claude Code y los agentes son de solo lectura, la fábrica ejecuta ambos grupos de motor simultáneamente. El único perfil adicional admitido en este modo es `approval-required` para el agente Tester, cuyas acciones requieren autorización humana. Dentro de cada motor se conserva el orden de sus especialistas y el contexto compartido entre ellos. Los resultados de ambos grupos se consolidan al terminar. Si hay agentes con permiso `workspace-write` u otros perfiles que puedan modificar archivos, se conserva el modo secuencial para evitar modificaciones concurrentes sobre los mismos archivos.
+
 ## Caso de regresión
 
 Instrucción: «Quisiera que en un párrafo me explicaras de qué trata el proyecto y su arquitectura».

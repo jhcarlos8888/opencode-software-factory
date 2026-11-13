@@ -779,41 +779,78 @@ async function executeRun(
       "Los agentes pueden inspeccionar directamente los archivos del proyecto según sus permisos."
     ].join("\n");
     const ordered = agents.slice().sort((a, b) => executionOrder(a.agentId) - executionOrder(b.agentId));
+    const eligible: AgentInput[] = [];
     for (const agent of ordered) {
-      if (state.cancelled) break;
       if ((agent.engine === "opencode" && !openCodeReady) ||
           (agent.engine === "claude" && !claudeReady)) continue;
-      if (!isRelevantSpecialist(agent.agentId, instructions, previousResults)) {
+      eligible.push(agent);
+    }
+
+    const executeAgent = async (agent: AgentInput, contextResults: string[]): Promise<void> => {
+      if (state.cancelled) {
+        updateExecutionAgent(agent.id, { status: "cancelled", error: "Cancelado por el usuario.", finishedAt: new Date().toISOString() });
+        return;
+      }
+      if (!isRelevantSpecialist(agent.agentId, instructions, contextResults)) {
         const reason = agent.agentId === "reverse"
           ? "Se omitió: el objetivo no requiere ingeniería inversa ni se identificaron binarios relevantes."
           : "Se omitió: no hay una discrepancia técnica que requiera arbitraje.";
         updateExecutionAgent(agent.id, { status: "skipped", error: reason, finishedAt: new Date().toISOString() });
         addLog(state.runId, agent.agentId.toUpperCase(), "warning", reason, agent.id);
-        continue;
+        return;
       }
-      const now = new Date().toISOString();
-      updateExecutionAgent(agent.id, { status: "running", startedAt: now, error: null });
+      updateExecutionAgent(agent.id, { status: "running", startedAt: new Date().toISOString(), error: null });
       updateExecutionRun(state.runId, state.pendingCount > 0 ? "waiting" : "running");
       addLog(state.runId, agent.agentId.toUpperCase(), "info", `Comienza la fase de ${agent.agentId}. Motor: ${agent.engine}. Modelo: ${agent.modelId}. Permisos: ${agent.permissionProfile}.`, agent.id);
       try {
         const roleInstructions = await loadRoleInstructions(factoryRoot, agent.agentId);
-        const prompt = makeAgentPrompt(agent.agentId, instructions, roleInstructions, structuralContext, previousResults);
+        const prompt = makeAgentPrompt(agent.agentId, instructions, roleInstructions, structuralContext, contextResults);
         const output = agent.engine === "opencode"
           ? await runOpenCodeAgent(state, agent, projectPath, factoryRoot, prompt)
           : await runClaudeAgent(state, agent, projectPath, factoryRoot, prompt);
-        previousResults.push(`AGENTE ${agent.agentId.toUpperCase()} (resumen):\n${output.slice(-9000)}`);
+        contextResults.push(`AGENTE ${agent.agentId.toUpperCase()} (resumen):\n${output.slice(-9000)}`);
         updateExecutionAgent(agent.id, { status: "succeeded", finishedAt: new Date().toISOString(), error: null });
         addLog(state.runId, agent.agentId.toUpperCase(), "success", `Fase ${agent.agentId} terminada.`, agent.id);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (state.cancelled) {
           updateExecutionAgent(agent.id, { status: "cancelled", error: "Cancelado por el usuario.", finishedAt: new Date().toISOString() });
-          break;
+          return;
         }
         failures.push(agent.agentId);
-        previousResults.push(`AGENTE ${agent.agentId.toUpperCase()} (error): ${message}`);
+        contextResults.push(`AGENTE ${agent.agentId.toUpperCase()} (error): ${message}`);
         updateExecutionAgent(agent.id, { status: "failed", error: sanitizeText(message), finishedAt: new Date().toISOString() });
         addLog(state.runId, agent.agentId.toUpperCase(), "warning", `Fase fallida: ${message}`, agent.id);
+      }
+    };
+
+    const parallelEligible = eligible.filter((agent) => agent.agentId !== "cloud-arbiter");
+    const arbitrationAgents = eligible.filter((agent) => agent.agentId === "cloud-arbiter");
+    const engines = new Set(parallelEligible.map((agent) => agent.engine));
+    const canRunEnginesTogether = engines.has("opencode") && engines.has("claude") &&
+      parallelEligible.every((agent) => agent.permissionProfile === "read-only" ||
+        (agent.agentId === "tester" && agent.permissionProfile === "approval-required"));
+    if (canRunEnginesTogether) {
+      addLog(state.runId, "ORCHESTRATOR", "success", "Modo paralelo seguro: OpenCode y Claude Code trabajarán simultáneamente. Los agentes de cada motor conservan su orden interno; el Tester solo puede ejecutar acciones que autorices.");
+      const baseContext = previousResults.slice();
+      const engineGroups: Array<{ engine: EngineId; agents: AgentInput[] }> = [
+        { engine: "opencode" as EngineId, agents: parallelEligible.filter((agent) => agent.engine === "opencode") },
+        { engine: "claude" as EngineId, agents: parallelEligible.filter((agent) => agent.engine === "claude") }
+      ].filter((group) => group.agents.length > 0);
+      const groupResults = await Promise.all(engineGroups.map(async (group) => {
+        const contextResults = baseContext.slice();
+        for (const agent of group.agents) await executeAgent(agent, contextResults);
+        return contextResults.slice(baseContext.length);
+      }));
+      previousResults.push(...groupResults.flat());
+      for (const agent of arbitrationAgents) await executeAgent(agent, previousResults);
+    } else {
+      if (eligible.some((agent) => agent.permissionProfile === "workspace-write")) {
+        addLog(state.runId, "ORCHESTRATOR", "info", "Modo secuencial: hay agentes con permiso de escritura; se preserva el orden de planificación para evitar conflictos en archivos compartidos.");
+      }
+      for (const agent of eligible) {
+        if (state.cancelled) break;
+        await executeAgent(agent, previousResults);
       }
     }
 
