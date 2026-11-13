@@ -26,6 +26,12 @@ interface ModelOption {
   source: "detected" | "alias";
 }
 
+interface McpServerInfo {
+  name: string;
+  transport: "Local" | "Remoto";
+  enabled: boolean;
+}
+
 interface Assignment {
   agentId: string;
   engine: EngineId;
@@ -106,6 +112,8 @@ export default function App() {
   const [engines, setEngines] = useState<EngineStatus[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
   const [skills, setSkills] = useState<string[]>([]);
+  const [mcpServers, setMcpServers] = useState<McpServerInfo[]>([]);
+  const [mcpConfigFound, setMcpConfigFound] = useState(false);
   const [models, setModels] = useState<Record<EngineId, ModelOption[]>>({
     opencode: [],
     claude: []
@@ -164,8 +172,9 @@ export default function App() {
       // Synchronize the current local APMix model before loading saved assignments
       // so model changes in ~/.claude/settings.json are reflected automatically.
       await api<{ synchronized: boolean }>("/api/providers/claude/synchronize-model", { method: "POST" });
-      const [engineResponse, assetResponse, assignmentResponse, openCodeModels, claudeModels, providerResponse, favoriteResponse, projectPreferences, latestExecution] = await Promise.all([
+      const [engineResponse, mcpResponse, assetResponse, assignmentResponse, openCodeModels, claudeModels, providerResponse, favoriteResponse, projectPreferences, latestExecution] = await Promise.all([
         api<{ engines: EngineStatus[] }>("/api/engines"),
+        api<{ configFound: boolean; servers: McpServerInfo[] }>("/api/mcps"),
         api<{ agents: Agent[]; skills: string[] }>("/api/factory/assets"),
         api<{ assignments: Assignment[]; saved: boolean }>("/api/assignments"),
         api<{ models: ModelOption[] }>("/api/models/opencode"),
@@ -177,6 +186,8 @@ export default function App() {
       ]);
 
       setEngines(engineResponse.engines);
+      setMcpServers(mcpResponse.servers);
+      setMcpConfigFound(mcpResponse.configFound);
       setAgents(assetResponse.agents);
       setSkills(assetResponse.skills);
       setModels({ opencode: openCodeModels.models, claude: claudeModels.models });
@@ -531,11 +542,36 @@ export default function App() {
           <section className="engine-grid">
             <EngineCard engine={openCode} description="Agentes, MCP y herramientas de la fábrica actual." modelCount={models.opencode.length} />
             <EngineCard engine={claude} description="Subagentes y modelos independientes de Claude Code." modelCount={models.claude.length} />
-            <div className="metric-card">
-              <div className="metric-icon">◇</div>
-              <div className="metric-label">AGENTES CONFIGURADOS</div>
-              <div className="metric-value">{configuredCount}<small> / {agents.length}</small></div>
-              <div className="metric-foot">Roles de la fábrica actual</div>
+            <div className="metric-card mcp-card">
+              <div className="mcp-card-metric">
+                <div className="metric-icon">◇</div>
+                <div>
+                  <div className="metric-label">AGENTES CONFIGURADOS</div>
+                  <div className="metric-value">{configuredCount}<small> / {agents.length}</small></div>
+                </div>
+              </div>
+              <div className="mcp-section">
+                <div className="mcp-section-heading">
+                  <div className="metric-label">MCP DEL PROYECTO</div>
+                  <span>{mcpServers.length} CONFIGURADOS</span>
+                </div>
+                {mcpServers.length > 0 ? (
+                  <div className="mcp-list">
+                    {mcpServers.map((server) => (
+                      <div className={server.enabled ? "mcp-item" : "mcp-item mcp-disabled"} key={server.name}>
+                        <span className="mcp-item-dot" />
+                        <strong>{server.name}</strong>
+                        <small>{server.transport}</small>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="mcp-empty">
+                    {mcpConfigFound ? "No hay servidores MCP definidos." : "No se encontró la configuración opencode.json."}
+                  </div>
+                )}
+                <div className="mcp-source-note">Lectura de opencode.json · Estado de conexión no verificado</div>
+              </div>
             </div>
           </section>
 

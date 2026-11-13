@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
+import { basename, delimiter, dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { planTask, type ResearchDepth } from "./task-planner.js";
 import {
@@ -185,10 +185,15 @@ async function freePort(): Promise<number> {
 async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, runId: string): Promise<OpenCodeRuntime> {
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
+  // The user systemd service may not source NVM's shell initialization.
+  // Prepend the Node runtime directory so OpenCode can spawn npx-backed MCPs.
+  const runtimeBin = dirname(process.execPath);
+  const childPath = [runtimeBin, process.env.PATH ?? ""].filter(Boolean).join(delimiter);
   const child = spawn(opencodeBinary, ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--print-logs"], {
     cwd: projectPath,
     env: {
       ...process.env,
+      PATH: childPath,
       OPENCODE_CONFIG: join(factoryRoot, "opencode.json"),
       OPENCODE_CONFIG_DIR: join(factoryRoot, ".opencode")
     },
@@ -265,21 +270,27 @@ function parseOpenCodeData<T>(payload: unknown): T[] {
 function parseTextParts(messages: unknown): Array<{ key: string; text: string; tool: boolean }> {
   const result: Array<{ key: string; text: string; tool: boolean }> = [];
   for (const message of parseOpenCodeData<Record<string, unknown>>(messages)) {
+    // OpenCode V1 returned { info: { role, id }, parts }; V2 returns
+    // projected messages with { type, id, content }. Support both contracts.
     const info = (message.info && typeof message.info === "object" ? message.info : {}) as Record<string, unknown>;
-    const messageId = String(info.id ?? "");
-    const role = String(info.role ?? "");
+    const messageId = String(info.id ?? message.id ?? "");
+    const role = String(info.role ?? message.role ?? message.type ?? "");
     if (role !== "assistant") continue;
-    const parts = Array.isArray(message.parts) ? message.parts as Array<Record<string, unknown>> : [];
+    const parts = Array.isArray(message.parts)
+      ? message.parts as Array<Record<string, unknown>>
+      : Array.isArray(message.content)
+        ? message.content as Array<Record<string, unknown>>
+        : [];
     for (let index = 0; index < parts.length; index++) {
       const part = parts[index];
       if (!part) continue;
       if (part.type === "text" && typeof part.text === "string" && part.text.trim()) {
         result.push({ key: `${messageId}:text:${String(part.id ?? index)}:${part.text.slice(0, 120)}`, text: part.text, tool: false });
       } else if (part.type === "tool") {
-        const state = part.state as Record<string, unknown> | undefined;
-        const toolName = String(part.tool ?? "herramienta");
-        const status = String(state?.status ?? "en ejecución");
-        const input = state?.input && typeof state.input === "object" ? JSON.stringify(safeJson(state.input)).slice(0, 700) : "";
+        const state = (part.state && typeof part.state === "object" ? part.state : part) as Record<string, unknown>;
+        const toolName = String(part.tool ?? part.name ?? "herramienta");
+        const status = String(state.status ?? "en ejecución");
+        const input = state.input && typeof state.input === "object" ? JSON.stringify(safeJson(state.input)).slice(0, 700) : "";
         result.push({ key: `${messageId}:tool:${String(part.id ?? index)}:${status}`, text: `TOOL ${toolName} · ${status}${input ? " · " + input : ""}`, tool: true });
       }
     }
@@ -357,14 +368,12 @@ async function pollOpenCodeAgent(
     const inserted = getExecutionSnapshot(state.runId)?.decisions.find((item) => item.engineRequestId === formId && item.engineSessionId === sessionId);
     if (inserted) addLog(state.runId, agent.agentId.toUpperCase(), "warning", `Pregunta pendiente: ${title}`, agent.id);
   }
-  const pending = getExecutionSnapshot(state.runId)?.decisions.length ?? 0;
+  const pending = getExecutionSnapshot(state.runId)?.decisions.filter((item) => item.status === "pending").length ?? 0;
   if (pending > 0) updateExecutionRun(state.runId, "waiting");
   else if (getExecutionSnapshot(state.runId)?.run.status === "waiting") updateExecutionRun(state.runId, "running");
-  const assistantText = parseOpenCodeData<Record<string, unknown>>(messages)
-    .filter((message) => (message.info as Record<string, unknown> | undefined)?.role === "assistant")
-    .flatMap((message) => Array.isArray(message.parts) ? message.parts as Array<Record<string, unknown>> : [])
-    .filter((part) => part.type === "text" && typeof part.text === "string")
-    .map((part) => String(part.text))
+  const assistantText = parseTextParts(messages)
+    .filter((item) => !item.tool)
+    .map((item) => item.text)
     .join("\n");
   return assistantText.slice(-9000);
 }
@@ -407,19 +416,30 @@ async function runOpenCodeAgent(
   addLog(state.runId, agent.agentId.toUpperCase(), "info", `Sesión OpenCode creada: ${sessionId}. Modelo: ${agent.modelId}.`, agent.id);
 
   runtime.serverErrors.length = 0;
-  let promptDone = false;
-  let promptError: Error | null = null;
-  // El turno del agente no tiene límite de duración: solo termina cuando el motor responde
-  // o cuando el usuario cancela explícitamente la ejecución.
-  const promptPromise = openCodeRequest<unknown>(runtime, "POST", `/api/session/${encodeURIComponent(sessionId)}/prompt`, { text: prompt }, null)
-    .then(() => { promptDone = true; })
-    .catch((error) => { promptError = error instanceof Error ? error : new Error(String(error)); promptDone = true; });
+  // In OpenCode V2, /prompt only admits and schedules the input. It does not
+  // wait for the model turn. The separate wait route resolves when the agent
+  // loop becomes idle; without it the factory can mark a healthy model failed
+  // before its first assistant message arrives.
+  await openCodeRequest<unknown>(runtime, "POST", `/api/session/${encodeURIComponent(sessionId)}/prompt`, { text: prompt }, null);
   const seenParts = new Set<string>();
   const seenForms = new Set<string>();
   let lastText = "";
-  while (!promptDone && !state.cancelled) {
+  let waitDone = false;
+  let waitError: Error | null = null;
+  const waitPromise = openCodeRequest<unknown>(
+    runtime,
+    "POST",
+    `/api/experimental/session/${encodeURIComponent(sessionId)}/wait`,
+    undefined,
+    null
+  ).then(() => { waitDone = true; })
+    .catch((error) => { waitError = error instanceof Error ? error : new Error(String(error)); waitDone = true; });
+
+  // Continue polling while OpenCode is working so tool activity and human
+  // permission requests remain visible in the Control Center.
+  while (!waitDone && !state.cancelled) {
     try {
-      lastText = await pollOpenCodeAgent(state, agent, sessionId, seenParts, seenForms);
+      lastText = await pollOpenCodeAgent(state, agent, sessionId, seenParts, seenForms) || lastText;
     } catch (error) {
       addLog(state.runId, agent.agentId.toUpperCase(), "warning", `No fue posible actualizar el flujo de eventos: ${error instanceof Error ? error.message : String(error)}`, agent.id);
     }
@@ -427,12 +447,12 @@ async function runOpenCodeAgent(
   }
   if (state.cancelled) {
     await openCodeRequest(runtime, "POST", `/api/session/${encodeURIComponent(sessionId)}/interrupt`).catch(() => undefined);
-    await promptPromise.catch(() => undefined);
+    await waitPromise.catch(() => undefined);
     throw new Error("Ejecución cancelada por el usuario.");
   }
-  await promptPromise;
-  await pollOpenCodeAgent(state, agent, sessionId, seenParts, seenForms).then((text) => { lastText = text || lastText; }).catch(() => undefined);
-  if (promptError) throw promptError;
+  await waitPromise;
+  if (waitError) throw waitError;
+  lastText = await pollOpenCodeAgent(state, agent, sessionId, seenParts, seenForms) || lastText;
   const serverFailure = runtime.serverErrors.shift();
   if (serverFailure) {
     throw new Error(`OpenCode notificó un error interno del turno: ${serverFailure.slice(0, 3000)}`);

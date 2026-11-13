@@ -1,7 +1,7 @@
 import Fastify from "fastify";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
-import { existsSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -76,6 +76,32 @@ app.get("/api/engines", async () => {
       { id: "claude", name: "Claude Code", available: claudeVersion !== null, version: claudeVersion }
     ]
   };
+});
+
+app.get("/api/mcps", async () => {
+  const configPath = join(factoryRoot, "opencode.json");
+  if (!existsSync(configPath)) return { configFound: false, servers: [] };
+
+  try {
+    const config = JSON.parse(readFileSync(configPath, "utf8")) as {
+      mcp?: { servers?: Record<string, unknown> };
+    };
+    const entries = config.mcp?.servers && typeof config.mcp.servers === "object"
+      ? Object.entries(config.mcp.servers)
+      : [];
+    const servers = entries.map(([name, value]) => {
+      const server = value && typeof value === "object" ? value as Record<string, unknown> : {};
+      return {
+        name,
+        transport: server.type === "remote" ? "Remoto" as const : "Local" as const,
+        enabled: server.enabled !== false
+      };
+    }).sort((a, b) => a.name.localeCompare(b.name));
+
+    return { configFound: true, servers };
+  } catch {
+    return { configFound: false, servers: [] };
+  }
 });
 
 app.get<{ Params: { engine: string } }>("/api/models/:engine", async (request, reply) => {
