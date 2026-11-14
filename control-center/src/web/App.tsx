@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 
 type EngineId = "opencode" | "claude";
-type ClaudeProviderId = "apmix" | "anthropic";
+type ClaudeProviderId = "apmix" | "anthropic" | "opencode-go";
 type ModelTier = "economy" | "balanced" | "premium";
 interface FavoriteModel { engine: EngineId; provider: string; modelId: string; tier: ModelTier; }
 type PermissionProfile = "read-only" | "workspace-write" | "approval-required";
@@ -24,6 +24,15 @@ interface ModelOption {
   id: string;
   label: string;
   source: "detected" | "alias";
+}
+
+interface ClaudeProviderStatus {
+  selectedProvider: ClaudeProviderId;
+  configured: boolean;
+  endpointCompatible: boolean;
+  baseUrl: string;
+  model: string;
+  credentialDetected: boolean;
 }
 
 interface McpServerInfo {
@@ -102,6 +111,18 @@ const roleNames: Record<string, string> = {
   reverse: "Ingeniería inversa"
 };
 
+function canApproveDuringRun(decision: ExecutionData["decisions"][number]): boolean {
+  if (decision.kind !== "permission" || !decision.details || typeof decision.details !== "object") return false;
+  const details = decision.details as Record<string, unknown>;
+  if (decision.engine === "claude") return typeof details.approvalKey === "string" && details.approvalKey.length > 0;
+  const action = details.action ?? details.permission;
+  const proposed = Array.isArray(details.save) && details.save.length > 0
+    ? details.save
+    : Array.isArray(details.resources) ? details.resources
+      : Array.isArray(details.patterns) ? details.patterns : [];
+  return typeof action === "string" && action.length > 0 && proposed.some((item) => typeof item === "string" && item.length > 0);
+}
+
 const permissionNames: Record<PermissionProfile, string> = {
   "read-only": "Solo lectura",
   "workspace-write": "Escritura en workspace",
@@ -137,6 +158,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [apiReady, setApiReady] = useState(false);
   const [claudeProvider, setClaudeProvider] = useState<ClaudeProviderId>("apmix");
+  const [claudeProviderStatus, setClaudeProviderStatus] = useState<ClaudeProviderStatus | null>(null);
   const [providerSaving, setProviderSaving] = useState(false);
   const [teamSaved, setTeamSaved] = useState(false);
   const [execution, setExecution] = useState<ExecutionData | null>(null);
@@ -179,7 +201,7 @@ export default function App() {
         api<{ assignments: Assignment[]; saved: boolean }>("/api/assignments"),
         api<{ models: ModelOption[] }>("/api/models/opencode"),
         api<{ models: ModelOption[] }>("/api/models/claude"),
-        api<{ selectedProvider: ClaudeProviderId }>("/api/providers/claude"),
+        api<ClaudeProviderStatus>("/api/providers/claude"),
         api<{ favorites: FavoriteModel[] }>("/api/favorites"),
         api<{ path: string; instructions: string }>("/api/project-preferences"),
         api<{ execution: ExecutionData | null }>("/api/executions/latest")
@@ -192,6 +214,7 @@ export default function App() {
       setSkills(assetResponse.skills);
       setModels({ opencode: openCodeModels.models, claude: claudeModels.models });
       setClaudeProvider(providerResponse.selectedProvider);
+      setClaudeProviderStatus(providerResponse);
       setFavorites(favoriteResponse.favorites);
       setProjectPath(projectPreferences.path);
       setProjectInstructions(projectPreferences.instructions);
@@ -407,7 +430,7 @@ export default function App() {
     }
   }
 
-  async function respondToDecision(decisionId: string, action: "allow" | "deny" | "answer") {
+  async function respondToDecision(decisionId: string, action: "allow" | "allow-run" | "deny" | "answer") {
     if (!execution) return;
     const answer = decisionAnswers[decisionId] ?? "";
     if (action === "answer" && !answer.trim()) {
@@ -423,9 +446,16 @@ export default function App() {
       );
       setExecution(result.execution);
       setDecisionAnswers((current) => ({ ...current, [decisionId]: "" }));
-      setNotice("Respuesta enviada al agente. La ejecución continuará según la decisión.");
+      setNotice(action === "allow-run"
+        ? "Aprobación temporal guardada. Se aplicará solo durante esta ejecución y se eliminará al finalizar."
+        : "Respuesta enviada al agente. La ejecución continuará según la decisión.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
+      // Refresh the run even on a 404/409: the engine may already have consumed
+      // the permission request, in which case the backend removes the stale card.
+      void api<{ execution: ExecutionData }>(`/api/executions/${execution.run.id}`)
+        .then((result) => setExecution(result.execution))
+        .catch(() => undefined);
     } finally {
       setDecisionBusyId(null);
     }
@@ -580,9 +610,9 @@ export default function App() {
               <div>
                 <div className="eyebrow">CLAUDE CODE / PROVIDER ROUTING</div>
                 <h2>Proveedor de Claude Code</h2>
-                <p>Selecciona qué proveedor deberá utilizar el adaptador de Claude Code cuando habilitemos la ejecución.</p>
+                <p>La fábrica detecta automáticamente el proveedor, endpoint y modelo definidos en ~/.claude/settings.json.</p>
               </div>
-              <span className="pending-tag">PENDIENTE DE VALIDACIÓN</span>
+              <span className="pending-tag">CONFIGURACIÓN LOCAL / API ANTHROPIC</span>
             </div>
             <div className="provider-choice-grid">
               <label className={claudeProvider === "apmix" ? "provider-choice selected" : "provider-choice"}>
@@ -594,6 +624,16 @@ export default function App() {
                   <em>API compatible con Anthropic · Usa el plan y modelos de tu cuenta APMix.</em>
                 </span>
                 <span className="provider-check">{claudeProvider === "apmix" ? "✓" : ""}</span>
+              </label>
+              <label className={claudeProvider === "opencode-go" ? "provider-choice selected" : "provider-choice"}>
+                <input type="radio" name="claude-provider" value="opencode-go" checked={claudeProvider === "opencode-go"} disabled={providerSaving}
+                  onChange={() => void saveClaudeProvider("opencode-go")} />
+                <span className="provider-choice-content">
+                  <strong>OpenCode Go</strong>
+                  <small>https://opencode.ai/inference/go/anthropic</small>
+                  <em>Usa la API Anthropic de OpenCode Go. La fábrica verifica endpoint, credencial y modelo antes de ejecutar.</em>
+                </span>
+                <span className="provider-check">{claudeProvider === "opencode-go" ? "✓" : ""}</span>
               </label>
               <label className={claudeProvider === "anthropic" ? "provider-choice selected" : "provider-choice"}>
                 <input type="radio" name="claude-provider" value="anthropic" checked={claudeProvider === "anthropic"} disabled={providerSaving}
@@ -607,7 +647,14 @@ export default function App() {
               </label>
             </div>
             <div className="provider-safety-note">
-              <strong>Modo seguro de configuración.</strong> La selección se guarda únicamente en la base SQLite del Control Center. No lee, muestra, copia, reemplaza ni modifica claves, tokens, <code>~/.claude/settings.json</code> o la sesión OAuth. Todavía no enruta ejecuciones: primero validaremos cada proveedor de forma aislada.
+              <strong>Configuración detectada automáticamente.</strong> La fábrica lee el endpoint, modelo y presencia de credenciales desde ~/.claude/settings.json; pasa las variables al proceso de Claude Code sin mostrarlas ni registrarlas. No modifica el archivo ni el token.
+              <div className="provider-config-readout">
+                <span>Endpoint: <code>{claudeProviderStatus?.baseUrl || "No detectado"}</code></span>
+                <span>Modelo: <code>{claudeProviderStatus?.model || "No detectado"}</code></span>
+                <span>Credencial: <strong>{claudeProviderStatus?.credentialDetected ? "Detectada" : "No detectada"}</strong></span>
+                <span>API Anthropic compatible: <strong>{claudeProviderStatus?.endpointCompatible ? "Sí" : "No"}</strong></span>
+                <span>Configuración lista: <strong>{claudeProviderStatus?.configured ? "Sí" : "Pendiente de corregir"}</strong></span>
+              </div>
             </div>
           </section>
 
@@ -626,7 +673,7 @@ export default function App() {
               <div className="select-field">
                 <label htmlFor="favorite-engine">MOTOR</label>
                 <select id="favorite-engine" value={favoriteEngine} onChange={(event) => changeFavoriteEngine(event.target.value as EngineId)}>
-                  <option value="opencode">OpenCode</option><option value="claude">Claude Code · {claudeProvider === "apmix" ? "APMix" : "Anthropic"}</option>
+                  <option value="opencode">OpenCode</option><option value="claude">Claude Code · {claudeProvider === "apmix" ? "APMix" : claudeProvider === "opencode-go" ? "OpenCode Go" : "Anthropic"}</option>
                 </select>
               </div>
               <div className="select-field favorite-model-select">
@@ -770,7 +817,7 @@ export default function App() {
                             <span />
                           </label>
                           <strong>{roleNames[item.agentId] ?? item.agentId}</strong>
-                          <span>{item.engine === "claude" ? "Claude Code · " + (claudeProvider === "apmix" ? "APMix" : "Anthropic") : "OpenCode"}</span>
+                          <span>{item.engine === "claude" ? "Claude Code · " + (claudeProvider === "apmix" ? "APMix" : claudeProvider === "opencode-go" ? "OpenCode Go" : "Anthropic") : "OpenCode"}</span>
                           <code>★ {item.modelId}</code>
                         </div>
                       ))}
@@ -891,12 +938,30 @@ export default function App() {
                     <pre>{JSON.stringify(item.details, null, 2)}</pre>
                   </details>
                   {item.kind === "permission" ? (
+                    <>
                     <div className="decision-actions">
                       <button className="primary-button" type="button" disabled={decisionBusyId === item.id} onClick={() => void respondToDecision(item.id, "allow")}>
                         {decisionBusyId === item.id ? "Enviando..." : "Aprobar una vez"}
                       </button>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        disabled={decisionBusyId === item.id || !canApproveDuringRun(item)}
+                        title={canApproveDuringRun(item)
+                          ? "Recordar únicamente los recursos o argumentos propuestos por el motor durante esta ejecución"
+                          : "El motor no proporcionó un patrón o una operación exacta que pueda recordarse de forma segura"}
+                        onClick={() => void respondToDecision(item.id, "allow-run")}
+                      >
+                        Aprobar durante esta ejecución
+                      </button>
                       <button className="secondary-button" type="button" disabled={decisionBusyId === item.id} onClick={() => void respondToDecision(item.id, "deny")}>Rechazar</button>
                     </div>
+                    <span className="decision-scope-note">
+                      {item.engine === "opencode"
+                        ? "La aprobación temporal no modifica permisos globales ni se conserva para futuros análisis. Solo cubre los patrones concretos propuestos por OpenCode."
+                        : "La aprobación temporal no modifica permisos globales ni se conserva para futuros análisis. Solo permite repetir exactamente esta misma operación de Claude."}
+                    </span>
+                    </>
                   ) : (
                     <div className="decision-answer">
                       <textarea value={decisionAnswers[item.id] ?? ""} onChange={(event) => setDecisionAnswers((current) => ({ ...current, [item.id]: event.target.value }))} rows={3} placeholder="Escribe la aclaración para el agente. Para formularios de varios campos de OpenCode, envía un objeto JSON con las claves del formulario." />

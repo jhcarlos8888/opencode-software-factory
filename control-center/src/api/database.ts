@@ -4,7 +4,7 @@ import { mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
 export type EngineId = "opencode" | "claude";
-export type ClaudeProviderId = "apmix" | "anthropic";
+export type ClaudeProviderId = "apmix" | "anthropic" | "opencode-go";
 export type ModelTier = "economy" | "balanced" | "premium";
 export interface FavoriteModel { engine: EngineId; provider: string; modelId: string; tier: ModelTier; }
 export type PermissionProfile = "read-only" | "workspace-write" | "approval-required";
@@ -30,7 +30,7 @@ db.exec(`
   PRAGMA foreign_keys = ON;
   CREATE TABLE IF NOT EXISTS claude_provider_preferences (
     id INTEGER PRIMARY KEY CHECK (id = 1),
-    provider TEXT NOT NULL CHECK (provider IN ('apmix', 'anthropic')),
+    provider TEXT NOT NULL CHECK (provider IN ('apmix', 'anthropic', 'opencode-go')),
     updated_at TEXT NOT NULL
   );
   INSERT INTO claude_provider_preferences (id, provider, updated_at)
@@ -114,6 +114,26 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_execution_events_run ON execution_events(run_id, id);
   CREATE INDEX IF NOT EXISTS idx_execution_decisions_pending ON execution_decisions(run_id, status);
 `);
+
+// Migrate the provider preference constraint for installations created before OpenCode Go support.
+const providerTable = db.prepare(
+  "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'claude_provider_preferences'"
+).get() as { sql: string } | undefined;
+if (providerTable && !providerTable.sql.includes("'opencode-go'")) {
+  db.exec(`
+    BEGIN IMMEDIATE;
+    ALTER TABLE claude_provider_preferences RENAME TO claude_provider_preferences_legacy;
+    CREATE TABLE claude_provider_preferences (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      provider TEXT NOT NULL CHECK (provider IN ('apmix', 'anthropic', 'opencode-go')),
+      updated_at TEXT NOT NULL
+    );
+    INSERT INTO claude_provider_preferences (id, provider, updated_at)
+      SELECT id, provider, updated_at FROM claude_provider_preferences_legacy;
+    DROP TABLE claude_provider_preferences_legacy;
+    COMMIT;
+  `);
+}
 
 export function listAssignments(): AgentAssignment[] {
   const rows = db.prepare(
@@ -217,6 +237,7 @@ export function saveFavoriteModels(models: FavoriteModel[]): void {
  * configured in ~/.claude/settings.json. Credentials are never read here.
  */
 export function synchronizeConfiguredClaudeModel(
+  provider: ClaudeProviderId,
   preferredModelId: string,
   validModelIds: string[]
 ): { assignmentsUpdated: number; favoritesUpdated: number } {
@@ -245,21 +266,25 @@ export function synchronizeConfiguredClaudeModel(
     }
 
     const favorites = db.prepare(
-      "SELECT model_id AS modelId FROM favorite_models WHERE engine = 'claude' AND provider = 'apmix'"
-    ).all() as Array<{ modelId: string }>;
+      "SELECT provider, model_id AS modelId FROM favorite_models WHERE engine = 'claude'"
+    ).all() as Array<{ provider: string; modelId: string }>;
     const hasPreferredFavorite = db.prepare(
-      "SELECT 1 AS present FROM favorite_models WHERE engine = 'claude' AND provider = 'apmix' AND model_id = ?"
+      "SELECT 1 AS present FROM favorite_models WHERE engine = 'claude' AND provider = ? AND model_id = ?"
     );
     const updateFavorite = db.prepare(
-      "UPDATE favorite_models SET model_id = ?, updated_at = ? WHERE engine = 'claude' AND provider = 'apmix' AND model_id = ?"
+      "UPDATE favorite_models SET provider = ?, model_id = ?, updated_at = ? WHERE engine = 'claude' AND provider = ? AND model_id = ?"
     );
     const deleteFavorite = db.prepare(
-      "DELETE FROM favorite_models WHERE engine = 'claude' AND provider = 'apmix' AND model_id = ?"
+      "DELETE FROM favorite_models WHERE engine = 'claude' AND provider = ? AND model_id = ?"
     );
     for (const favorite of favorites) {
-      if (valid.has(favorite.modelId)) continue;
-      if (hasPreferredFavorite.get(preferredModelId)) deleteFavorite.run(favorite.modelId);
-      else updateFavorite.run(preferredModelId, now, favorite.modelId);
+      if (favorite.provider === provider && valid.has(favorite.modelId)) continue;
+      if (hasPreferredFavorite.get(provider, preferredModelId)) {
+        deleteFavorite.run(favorite.provider, favorite.modelId);
+      } else {
+        const nextModel = valid.has(favorite.modelId) ? favorite.modelId : preferredModelId;
+        updateFavorite.run(provider, nextModel, now, favorite.provider, favorite.modelId);
+      }
       favoritesUpdated++;
     }
 
@@ -424,7 +449,7 @@ export function createExecutionDecision(decision: Omit<ExecutionDecisionRecord, 
     JSON.stringify(decision.details ?? {}), new Date().toISOString()
   );
 }
-export function resolveExecutionDecision(id: string, status: Exclude<ExecutionDecisionStatus, "pending" | "orphaned">, response: string): void {
+export function resolveExecutionDecision(id: string, status: Exclude<ExecutionDecisionStatus, "pending">, response: string): void {
   db.prepare(`
     UPDATE execution_decisions SET status = ?, response = ?, resolved_at = ?
     WHERE id = ? AND status = 'pending'
@@ -480,6 +505,11 @@ export function getLatestExecutionId(): string | null {
 export function orphanExecutionDecisions(runId: string): void {
   db.prepare("UPDATE execution_decisions SET status = 'orphaned', resolved_at = ? WHERE run_id = ? AND status = 'pending'")
     .run(new Date().toISOString(), runId);
+}
+
+export function orphanExecutionDecisionsForAgent(runId: string, agentRunId: string): void {
+  db.prepare("UPDATE execution_decisions SET status = 'orphaned', resolved_at = ? WHERE run_id = ? AND agent_run_id = ? AND status = 'pending'")
+    .run(new Date().toISOString(), runId, agentRunId);
 }
 
 export function markUnfinishedExecutionsInterrupted(): void {

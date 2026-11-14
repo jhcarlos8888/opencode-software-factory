@@ -7,7 +7,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadFactoryAssets, mergeAssignments } from "./factory.js";
 import { databaseInfo, getClaudeProviderPreference, getProjectPreferences, listAssignments, listFavoriteModels, saveAssignments, saveClaudeProviderPreference, saveFavoriteModels, saveProjectPreferences, synchronizeConfiguredClaudeModel, type AgentAssignment, type ClaudeProviderId, type EngineId, type FavoriteModel, type ModelTier, type PermissionProfile } from "./database.js";
-import { getClaudeModels, getEngineVersion, getOpenCodeModels, listModels } from "./models.js";
+import { getClaudeModels, getDetectedClaudeProvider, getEngineVersion, getOpenCodeModels, readClaudeLocalConfig, listModels } from "./models.js";
 import { analyzeProject } from "./projects.js";
 import { cancelExecution, getExecution, getLatestExecution, recoverExecutionState, respondExecutionDecision, startExecution } from "./execution.js";
 
@@ -27,19 +27,21 @@ function findNonFavoriteAssignment(assignments: AgentAssignment[]): AgentAssignm
 }
 
 async function synchronizeConfiguredClaudeModelAtStartup(): Promise<void> {
-  if (getClaudeProviderPreference() !== "apmix") return;
   try {
-    const models = await getClaudeModels("apmix");
+    const config = await readClaudeLocalConfig();
+    saveClaudeProviderPreference(config.provider);
+    if (!config.model) return;
+    const models = await getClaudeModels(config.provider);
     const configured = models.find((item) => item.source === "detected");
     if (!configured) return;
-    const result = synchronizeConfiguredClaudeModel(configured.id, models.map((item) => item.id));
+    const result = synchronizeConfiguredClaudeModel(config.provider, configured.id, models.map((item) => item.id));
     if (result.assignmentsUpdated || result.favoritesUpdated) {
       console.info(
-        `[Factory Control Center] APMix model synchronized: ${configured.id}; ${result.assignmentsUpdated} assignments and ${result.favoritesUpdated} favorites updated.`
+        `[Factory Control Center] Claude provider/model synchronized: ${config.provider} / ${configured.id}; ${result.assignmentsUpdated} assignments and ${result.favoritesUpdated} favorites updated.`
       );
     }
-  } catch (error) {
-    console.warn("[Factory Control Center] Could not synchronize configured APMix model.", error);
+  } catch {
+    // No local Claude settings file: retain the provider preference and OAuth fallback.
   }
 }
 
@@ -111,7 +113,10 @@ app.get<{ Params: { engine: string } }>("/api/models/:engine", async (request, r
   }
 
   try {
-    const models = await listModels(engine as EngineId, getClaudeProviderPreference());
+    const provider = engine === "claude"
+      ? await getDetectedClaudeProvider(getClaudeProviderPreference())
+      : getClaudeProviderPreference();
+    const models = await listModels(engine as EngineId, provider);
     return { engine, models };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -120,50 +125,50 @@ app.get<{ Params: { engine: string } }>("/api/models/:engine", async (request, r
 });
 
 app.post("/api/providers/claude/synchronize-model", async (request, reply) => {
-  if (getClaudeProviderPreference() !== "apmix") {
-    return { synchronized: false, provider: "anthropic", assignmentsUpdated: 0, favoritesUpdated: 0 };
-  }
   try {
-    const models = await getClaudeModels("apmix");
+    const config = await readClaudeLocalConfig();
+    const provider = config.provider;
+    saveClaudeProviderPreference(provider);
+    if (!config.model) {
+      return { synchronized: false, provider, assignmentsUpdated: 0, favoritesUpdated: 0 };
+    }
+    const models = await getClaudeModels(provider);
     const configured = models.find((item) => item.source === "detected");
     if (!configured) {
-      return reply.code(409).send({ error: "No se detectó un modelo APMix válido en ~/.claude/settings.json." });
+      return reply.code(409).send({ error: "No se detectó un modelo válido en ~/.claude/settings.json." });
     }
-    const result = synchronizeConfiguredClaudeModel(configured.id, models.map((item) => item.id));
-    return { synchronized: true, provider: "apmix", modelId: configured.id, ...result };
+    const result = synchronizeConfiguredClaudeModel(provider, configured.id, models.map((item) => item.id));
+    return { synchronized: true, provider, modelId: configured.id, ...result };
   } catch {
-    return reply.code(503).send({ error: "No fue posible sincronizar el modelo APMix configurado localmente." });
+    return { synchronized: false, provider: getClaudeProviderPreference(), assignmentsUpdated: 0, favoritesUpdated: 0 };
   }
 });
 
-app.get("/api/providers/claude", async () => ({
-  selectedProvider: getClaudeProviderPreference(),
-  providers: [
-    {
-      id: "apmix",
-      name: "APMix",
-      baseUrl: "https://api.apmix.ai",
-      protocol: "Anthropic Messages API",
-      validation: "pending",
-      note: "La documentación de APMix indica compatibilidad con Claude Code. La cuenta y el modelo concreto aún deben validarse."
-    },
-    {
-      id: "anthropic",
-      name: "Anthropic oficial",
-      baseUrl: "https://api.anthropic.com",
-      protocol: "Anthropic Messages API",
-      validation: "pending",
-      note: "Usará la autenticación oficial existente cuando se valide, sin reemplazarla ni reescribirla."
-    }
-  ],
-  runtimeConnected: false,
-  credentialsModified: false
-}));
+app.get("/api/providers/claude", async () => {
+  const selectedProvider = await getDetectedClaudeProvider(getClaudeProviderPreference());
+  let config: Awaited<ReturnType<typeof readClaudeLocalConfig>> | null = null;
+  try { config = await readClaudeLocalConfig(); } catch { /* Configuración local no disponible */ }
+  return {
+    selectedProvider,
+    configured: Boolean(config?.baseUrl && config?.hasCredential && config?.model && config.endpointCompatible),
+    endpointCompatible: config?.endpointCompatible ?? false,
+    baseUrl: config?.baseUrl ?? "",
+    model: config?.model ?? "",
+    credentialDetected: Boolean(config?.hasCredential),
+    providers: [
+      { id: "apmix", name: "APMix", baseUrl: "https://api.apmix.ai", protocol: "Anthropic Messages API" },
+      { id: "opencode-go", name: "OpenCode Go", baseUrl: "https://opencode.ai/inference/go/anthropic", protocol: "Anthropic Messages API" },
+      { id: "anthropic", name: "Anthropic oficial", baseUrl: "https://api.anthropic.com", protocol: "Anthropic Messages API" }
+    ],
+    runtimeConnected: false,
+    credentialsModified: false
+  };
+});
 
 app.put<{ Body: { provider?: unknown } }>("/api/providers/claude", async (request, reply) => {
   const provider = request.body?.provider;
-  if (provider !== "apmix" && provider !== "anthropic") {
-    return reply.code(400).send({ error: "Proveedor no válido. Usa 'apmix' o 'anthropic'." });
+  if (provider !== "apmix" && provider !== "anthropic" && provider !== "opencode-go") {
+    return reply.code(400).send({ error: "Proveedor no válido. Usa APMix, OpenCode Go o Anthropic." });
   }
   saveClaudeProviderPreference(provider as ClaudeProviderId);
   return {
@@ -189,7 +194,7 @@ app.put<{ Body: { favorites?: unknown } }>("/api/favorites", async (request, rep
     const modelId = String(item.modelId ?? "");
     const tier = item.tier;
     if ((engine !== "opencode" && engine !== "claude") ||
-        (engine === "claude" && provider !== "apmix" && provider !== "anthropic") ||
+        (engine === "claude" && provider !== "apmix" && provider !== "anthropic" && provider !== "opencode-go") ||
         (engine === "opencode" && provider !== "opencode") ||
         !modelId || modelId.length > 200 ||
         !["economy", "balanced", "premium"].includes(String(tier))) {
@@ -519,8 +524,8 @@ app.post<{
   Body: { action?: unknown; answer?: unknown };
 }>("/api/executions/:runId/decisions/:decisionId/respond", async (request, reply) => {
   const action = request.body?.action;
-  if (action !== "allow" && action !== "deny" && action !== "answer") {
-    return reply.code(400).send({ error: "La respuesta debe ser allow, deny o answer." });
+  if (action !== "allow" && action !== "allow-run" && action !== "deny" && action !== "answer") {
+    return reply.code(400).send({ error: "La respuesta debe ser allow, allow-run, deny o answer." });
   }
   const answer = typeof request.body?.answer === "string" ? request.body.answer.slice(0, 12000) : undefined;
   if (action === "answer" && !answer?.trim()) {

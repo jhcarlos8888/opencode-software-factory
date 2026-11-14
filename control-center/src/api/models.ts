@@ -7,11 +7,78 @@ import type { ClaudeProviderId } from "./database.js";
 import type { EngineId } from "./database.js";
 
 const execFileAsync = promisify(execFile);
+export const OPEN_CODE_GO_ANTHROPIC_BASE_URL = "https://opencode.ai/inference/go/anthropic";
+const OPEN_CODE_GO_LEGACY_BASE_URLS = new Set([
+  "https://opencode.ai/zen/go",
+  "https://opencode.ai/zen/go/anthropic"
+]);
 
 export interface ModelOption {
   id: string;
   label: string;
   source: "detected" | "alias";
+}
+
+export interface ClaudeLocalConfig {
+  provider: ClaudeProviderId;
+  baseUrl: string;
+  model: string;
+  hasCredential: boolean;
+  endpointCompatible: boolean;
+  env: Record<string, string>;
+}
+
+function normalizeClaudeModel(value: string): string {
+  const model = value.trim();
+  return model.startsWith("opencode-go/") ? model.slice("opencode-go/".length) : model;
+}
+
+export async function readClaudeLocalConfig(): Promise<ClaudeLocalConfig> {
+  const settingsPath = join(homedir(), ".claude", "settings.json");
+  const settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
+    env?: Record<string, unknown>;
+  };
+  const rawEnv = settings.env ?? {};
+  const env: Record<string, string> = {};
+  for (const [key, value] of Object.entries(rawEnv)) {
+    if ((key.startsWith("ANTHROPIC_") || key === "CLAUDE_CODE_SUBAGENT_MODEL") &&
+        typeof value === "string") env[key] = value;
+  }
+
+  const baseUrl = String(env.ANTHROPIC_BASE_URL ?? "").replace(/\/$/, "");
+  const configuredModel = String(
+    env.ANTHROPIC_MODEL ??
+    env.ANTHROPIC_DEFAULT_SONNET_MODEL ??
+    env.ANTHROPIC_DEFAULT_OPUS_MODEL ??
+    env.ANTHROPIC_DEFAULT_HAIKU_MODEL ??
+    env.CLAUDE_CODE_SUBAGENT_MODEL ??
+    ""
+  );
+  const model = normalizeClaudeModel(configuredModel);
+  const isOpenCodeGo = baseUrl === OPEN_CODE_GO_ANTHROPIC_BASE_URL ||
+    OPEN_CODE_GO_LEGACY_BASE_URLS.has(baseUrl);
+  const provider: ClaudeProviderId = isOpenCodeGo
+    ? "opencode-go"
+    : baseUrl === "https://api.apmix.ai"
+      ? "apmix"
+      : "anthropic";
+
+  return {
+    provider,
+    baseUrl,
+    model,
+    hasCredential: Boolean(env.ANTHROPIC_AUTH_TOKEN || env.ANTHROPIC_API_KEY),
+    endpointCompatible: provider !== "opencode-go" || baseUrl === OPEN_CODE_GO_ANTHROPIC_BASE_URL,
+    env
+  };
+}
+
+export async function getDetectedClaudeProvider(fallback: ClaudeProviderId): Promise<ClaudeProviderId> {
+  try {
+    return (await readClaudeLocalConfig()).provider;
+  } catch {
+    return fallback;
+  }
 }
 
 function executable(name: EngineId): string {
@@ -40,18 +107,12 @@ export async function getOpenCodeModels(): Promise<ModelOption[]> {
       timeout: 20000,
       maxBuffer: 8 * 1024 * 1024
     });
-
     const ids = [...new Set(
       stdout.split(/\r?\n/)
         .map((line) => line.trim())
         .filter((line) => /^[a-zA-Z0-9._-]+\/.+/.test(line))
     )];
-
-    return ids.map((id) => ({
-      id,
-      label: id,
-      source: "detected"
-    }));
+    return ids.map((id) => ({ id, label: id, source: "detected" }));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`No se pudo consultar el catálogo de OpenCode: ${message}`);
@@ -64,27 +125,17 @@ export async function getClaudeModels(provider: ClaudeProviderId): Promise<Model
     { id: "opus", label: "Opus (alias de Claude Code)", source: "alias" },
     { id: "haiku", label: "Haiku (alias de Claude Code)", source: "alias" }
   ];
-
-  // Solo se extraen identificadores de modelo y URL base. Nunca se devuelve ni registra el token.
-  if (provider === "apmix") {
-    try {
-      const settingsPath = join(homedir(), ".claude", "settings.json");
-      const settings = JSON.parse(await readFile(settingsPath, "utf8")) as {
-        env?: Record<string, unknown>;
-      };
-      const env = settings.env ?? {};
-      const baseUrl = typeof env.ANTHROPIC_BASE_URL === "string" ? env.ANTHROPIC_BASE_URL : "";
-      const configuredModel = typeof env.ANTHROPIC_MODEL === "string" ? env.ANTHROPIC_MODEL.trim() : "";
-      if (baseUrl.replace(/\/$/, "") === "https://api.apmix.ai" && configuredModel &&
-          /^[a-zA-Z0-9._:/-]{1,200}$/.test(configuredModel)) {
-        return [
-          { id: configuredModel, label: configuredModel + " · configurado en settings.json", source: "detected" },
-          ...aliases.filter((item) => item.id !== configuredModel)
-        ];
-      }
-    } catch {
-      // Settings ausente o inválido: se mantienen alias sin exponer detalles locales.
+  try {
+    const config = await readClaudeLocalConfig();
+    if (config.provider === provider && config.model &&
+        /^[a-zA-Z0-9._:/-]{1,200}$/.test(config.model)) {
+      return [
+        { id: config.model, label: config.model + " · configurado en settings.json", source: "detected" },
+        ...aliases.filter((item) => item.id !== config.model)
+      ];
     }
+  } catch {
+    // Configuración local ausente o inválida: no se exponen detalles ni credenciales.
   }
   return aliases;
 }
