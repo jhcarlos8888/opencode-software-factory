@@ -76,11 +76,74 @@ interface ProjectAnalysis {
 }
 
 type RunStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "interrupted";
+interface HandoffDescriptor {
+  id: string; fromAgent: string; fromAgentRunId: string; fromEngine: EngineId;
+  fromModelId: string; fromSessionId: string | null;
+  toAgent: string; toAgentRunId: string; toEngine: EngineId; toSessionId: string | null;
+  contentIdVerified: boolean; deliveredAt: string;
+  contentSha256?: string; contentLength?: number; sourceLength?: number;
+  contentTruncated?: boolean; sourceIdentityVerified?: boolean;
+}
+interface HandoffOutputMetadata {
+  sha256: string; contentLength: number; sourceLength: number;
+  truncated: boolean; sourceIdentityVerified: boolean;
+}
+interface HandoffOutputRecord extends HandoffOutputMetadata {
+  content: string;
+}
+interface ExecutionSummary {
+  verdict: "completed" | "observations" | "failed";
+  headline: string; overview: string; findings: string[]; nextSteps: string[];
+  participants: { total: number; succeeded: number; skipped: string[]; failed: string[] };
+  collaboration: {
+    handoffs: number; crossEngineHandoffs: number; verifiedCrossEngineHandoffs: number;
+    crossEngineVerified: boolean; directions: { claudeToOpenCode: boolean; openCodeToClaude: boolean };
+    concurrencyMode: "parallel" | "mixed" | "sequential" | "not-applicable";
+    concurrentCrossEngineVerified: boolean;
+  };
+  generatedBy: "cloud-arbiter" | "orchestrator"; generatedAt: string;
+}
+interface ExecutionConfigurationSnapshot {
+  capturedAt: string;
+  claudeProvider: ClaudeProviderId;
+  favorites: FavoriteModel[];
+  assignments: Assignment[];
+  roleInstructionDigests: Record<string, string>;
+  roleInstructions: Record<string, string>;
+  workflowSkillDigest: string | null;
+  workflowSkillContent: string;
+}
+interface WorkMessage {
+  id: string; threadId: string; runId: string | null; roundNumber: number;
+  role: "user" | "assistant" | "system"; kind: string; content: string; createdAt: string;
+}
 interface ExecutionData {
-  run: { id: string; projectPath: string; instructions: string; status: RunStatus; startedAt: string; updatedAt: string; finishedAt: string | null };
-  agents: Array<{ id: string; agentId: string; engine: EngineId; modelId: string; permissionProfile: PermissionProfile; status: RunStatus | "skipped"; sessionId: string | null; error: string | null; startedAt: string | null; finishedAt: string | null }>;
+  run: {
+    id: string; threadId: string | null; roundNumber: number;
+    configurationSnapshot: ExecutionConfigurationSnapshot | null; continuityContext: string;
+    projectPath: string; instructions: string; status: RunStatus; startedAt: string;
+    updatedAt: string; finishedAt: string | null; summary: ExecutionSummary | null
+  };
+  agents: Array<{
+    id: string; agentId: string; engine: EngineId; modelId: string; permissionProfile: PermissionProfile;
+    status: RunStatus | "skipped"; sessionId: string | null; error: string | null;
+    startedAt: string | null; finishedAt: string | null;
+    handoffIn: HandoffDescriptor[]; handoffOut: HandoffDescriptor[];
+    handoffOutput: HandoffOutputMetadata | null;
+  }>;
   events: Array<{ id: number; createdAt: string; area: string; kind: string; message: string; agentRunId: string | null }>;
   decisions: Array<{ id: string; agentRunId: string; engine: EngineId; engineSessionId: string | null; engineRequestId: string | null; kind: "permission" | "question"; title: string; description: string; details: unknown; status: string; createdAt: string }>;
+  decisionHistory: Array<{
+    id: string; agentRunId: string; engine: EngineId; engineSessionId: string | null;
+    engineRequestId: string | null; kind: "permission" | "question"; title: string;
+    description: string; details: unknown; status: string; response: string | null;
+    createdAt: string; resolvedAt: string | null
+  }>;
+}
+interface WorkThreadSnapshot {
+  thread: { id: string; projectPath: string; objective: string; status: "active" | "completed" | "failed"; createdAt: string; updatedAt: string };
+  messages: WorkMessage[];
+  rounds: ExecutionData[];
 }
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -102,7 +165,7 @@ async function api<T>(url: string, init?: RequestInit): Promise<T> {
 }
 
 const roleNames: Record<string, string> = {
-  build: "Coordinador",
+  build: "Build / Construcción",
   architect: "Arquitecto",
   implementer: "Implementador",
   reviewer: "Revisor",
@@ -162,6 +225,12 @@ export default function App() {
   const [providerSaving, setProviderSaving] = useState(false);
   const [teamSaved, setTeamSaved] = useState(false);
   const [execution, setExecution] = useState<ExecutionData | null>(null);
+  const [workThread, setWorkThread] = useState<WorkThreadSnapshot | null>(null);
+  const [handoffOutputContents, setHandoffOutputContents] = useState<Record<string, HandoffOutputRecord>>({});
+  const [handoffOutputLoading, setHandoffOutputLoading] = useState<Record<string, boolean>>({});
+  const [handoffOutputErrors, setHandoffOutputErrors] = useState<Record<string, string>>({});
+  const [continuationText, setContinuationText] = useState("");
+  const [continuationBusy, setContinuationBusy] = useState(false);
   const [executionStarting, setExecutionStarting] = useState(false);
   const [executionCancelling, setExecutionCancelling] = useState(false);
   const [decisionAnswers, setDecisionAnswers] = useState<Record<string, string>>({});
@@ -179,13 +248,43 @@ export default function App() {
   useEffect(() => {
     if (!execution || !["queued", "running", "waiting"].includes(execution.run.status)) return;
     const runId = execution.run.id;
+    const threadId = execution.run.threadId;
     const timer = window.setInterval(() => {
       void api<{ execution: ExecutionData }>(`/api/executions/${runId}`)
         .then((result) => setExecution(result.execution))
         .catch(() => undefined);
+      if (threadId) {
+        void api<{ workflow: WorkThreadSnapshot }>(`/api/work-threads/${threadId}`)
+          .then((result) => setWorkThread(result.workflow))
+          .catch(() => undefined);
+      }
     }, 1200);
     return () => window.clearInterval(timer);
-  }, [execution?.run.id, execution?.run.status]);
+  }, [execution?.run.id, execution?.run.status, execution?.run.threadId]);
+
+  async function loadHandoffOutput(runId: string, agentRunId: string) {
+    const key = runId + ":" + agentRunId;
+    if (handoffOutputContents[key] || handoffOutputLoading[key]) return;
+    setHandoffOutputLoading((current) => ({ ...current, [key]: true }));
+    setHandoffOutputErrors((current) => {
+      const next = { ...current };
+      delete next[key];
+      return next;
+    });
+    try {
+      const result = await api<{ handoffOutput: HandoffOutputRecord }>(
+        `/api/executions/${runId}/agents/${agentRunId}/handoff-output`
+      );
+      setHandoffOutputContents((current) => ({ ...current, [key]: result.handoffOutput }));
+    } catch (cause) {
+      setHandoffOutputErrors((current) => ({
+        ...current,
+        [key]: cause instanceof Error ? cause.message : String(cause)
+      }));
+    } finally {
+      setHandoffOutputLoading((current) => ({ ...current, [key]: false }));
+    }
+  }
 
   async function loadInitialData() {
     setBusy(true);
@@ -222,6 +321,12 @@ export default function App() {
       setAssignments(Object.fromEntries(assignmentResponse.assignments.map((item) => [item.agentId, item])));
       setTeamSaved(assignmentResponse.saved);
       setExecution(latestExecution.execution);
+      if (latestExecution.execution?.run.threadId) {
+        const workflowResponse = await api<{ workflow: WorkThreadSnapshot }>(
+          `/api/work-threads/${latestExecution.execution.run.threadId}`
+        );
+        setWorkThread(workflowResponse.workflow);
+      }
       setApiReady(true);
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -401,17 +506,52 @@ export default function App() {
     setError("");
     setNotice("");
     try {
-      const result = await api<{ started: boolean; runId: string; execution: ExecutionData | null }>("/api/executions", {
+      const result = await api<{
+        started: boolean; runId: string; threadId: string;
+        execution: ExecutionData | null; workflow: WorkThreadSnapshot
+      }>("/api/executions", {
         method: "POST",
         body: JSON.stringify({ path: projectPath, instructions: projectInstructions, taskDepth: analysis.taskPlan.depth })
       });
       setExecution(result.execution);
-      setNotice(`Ejecución ${result.runId.slice(0, 8)} iniciada. Puedes supervisar cada agente en la consola y atender sus solicitudes en el Centro de decisiones.`);
+      setWorkThread(result.workflow);
+      setContinuationText("");
+      setNotice(`Proceso ${result.threadId.slice(0, 8)} iniciado. El historial y las siguientes rondas quedarán agrupados en este proceso.`);
       recordActivity("ORCHESTRATOR", `Ejecución real iniciada: ${result.runId}.`, "success");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setExecutionStarting(false);
+    }
+  }
+
+  async function continueWork(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!workThread || !continuationText.trim()) return;
+    if (activeExecution || continuationBusy) {
+      setError("Espera a que termine la ronda actual antes de enviar otra instrucción.");
+      return;
+    }
+    setContinuationBusy(true);
+    setError("");
+    setNotice("");
+    try {
+      const result = await api<{
+        started: boolean; runId: string; threadId: string;
+        execution: ExecutionData | null; workflow: WorkThreadSnapshot
+      }>(`/api/work-threads/${workThread.thread.id}/continue`, {
+        method: "POST",
+        body: JSON.stringify({ instructions: continuationText.trim() })
+      });
+      setExecution(result.execution);
+      setWorkThread(result.workflow);
+      setContinuationText("");
+      setNotice(`Ronda ${result.execution?.run.roundNumber ?? "nueva"} iniciada. Se recuperó el objetivo original, el historial y la evidencia de rondas anteriores.`);
+      recordActivity("WORKFLOW", `Continuación de proceso ${result.threadId}; ejecución ${result.runId}.`, "success");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setContinuationBusy(false);
     }
   }
 
@@ -507,7 +647,7 @@ export default function App() {
   const statusLabels: Record<string, string> = {
     queued: "En cola", running: "Trabajando", waiting: "Esperando tu decisión",
     succeeded: "Completado", failed: "Falló", cancelled: "Cancelado",
-    interrupted: "Interrumpido", skipped: "No necesario"
+    interrupted: "Interrumpido", skipped: "Deshabilitado / omitido"
   };
   const statusClasses: Record<string, string> = {
     queued: "status-queued", running: "status-running", waiting: "status-waiting",
@@ -1122,10 +1262,240 @@ export default function App() {
                         {agentRun.sessionId && <code>SESSION {agentRun.sessionId}</code>}
                       </div>
                       <span className={`run-status-pill ${statusClasses[agentRun.status] ?? ""}`}>{statusLabels[agentRun.status] ?? agentRun.status}</span>
+                      {(agentRun.handoffIn.length > 0 || agentRun.handoffOut.length > 0) && (
+                        <small className="agent-handoff-meta">
+                          {agentRun.handoffIn.length} entregas recibidas · {agentRun.handoffOut.length} entregas distribuidas
+                          {agentRun.handoffOut[0] ? " · " + agentRun.handoffOut[0].id : ""}
+                        </small>
+                      )}
                       {agentRun.error && <p className="execution-agent-error">{agentRun.error}</p>}
                     </div>
                   ))}
                 </div>
+                {execution.run.summary ? (
+                  <div className="execution-summary">
+                    <div className="execution-summary-heading">
+                      <div>
+                        <span className="terminal-kicker">RESUMEN EJECUTIVO</span>
+                        <h4>{execution.run.summary.headline}</h4>
+                      </div>
+                      <span className={`summary-verdict summary-${execution.run.summary.verdict}`}>
+                        {execution.run.summary.verdict === "completed" ? "OBJETIVO COMPLETADO" :
+                          execution.run.summary.verdict === "observations" ? "CON OBSERVACIONES" : "OBJETIVO NO CUMPLIDO"}
+                      </span>
+                    </div>
+                    <p className="execution-summary-overview">{execution.run.summary.overview}</p>
+                    <div className="summary-metrics">
+                      <span><strong>{execution.run.summary.participants.succeeded}/{execution.run.summary.participants.total}</strong> agentes completados</span>
+                      <span><strong>{execution.run.summary.collaboration.verifiedCrossEngineHandoffs}/{execution.run.summary.collaboration.crossEngineHandoffs}</strong> handoffs entre motores verificados</span>
+                      <span><strong>{execution.run.summary.collaboration.concurrentCrossEngineVerified ? "Sí" : "No"}</strong> concurrencia real</span>
+                    </div>
+                    <div className="summary-directions">
+                      <span className={execution.run.summary.collaboration.directions.claudeToOpenCode ? "direction-verified" : "direction-missing"}>
+                        Claude Code → OpenCode: {execution.run.summary.collaboration.directions.claudeToOpenCode ? "verificado" : "sin evidencia completa"}
+                      </span>
+                      <span className={execution.run.summary.collaboration.directions.openCodeToClaude ? "direction-verified" : "direction-missing"}>
+                        OpenCode → Claude Code: {execution.run.summary.collaboration.directions.openCodeToClaude ? "verificado" : "sin evidencia completa"}
+                      </span>
+                    </div>
+                    <div className="summary-columns">
+                      <div>
+                        <strong>Hallazgos principales</strong>
+                        {execution.run.summary.findings.length ? (
+                          <ul>{execution.run.summary.findings.map((item, index) => <li key={index}>{item}</li>)}</ul>
+                        ) : <p className="summary-muted">El árbitro no separó hallazgos en una lista; consulta su informe completo en la consola.</p>}
+                      </div>
+                      <div>
+                        <strong>Próximos pasos</strong>
+                        {execution.run.summary.nextSteps.length ? (
+                          <ul>{execution.run.summary.nextSteps.map((item, index) => <li key={index}>{item}</li>)}</ul>
+                        ) : <p className="summary-muted">No se registraron pasos adicionales.</p>}
+                      </div>
+                    </div>
+                    {(execution.run.summary.participants.skipped.length > 0 || execution.run.summary.participants.failed.length > 0) && (
+                      <div className="summary-limitations">
+                        {execution.run.summary.participants.skipped.length > 0 && <span>No ejecutados: {execution.run.summary.participants.skipped.join(", ")}</span>}
+                        {execution.run.summary.participants.failed.length > 0 && <span>Fallidos: {execution.run.summary.participants.failed.join(", ")}</span>}
+                      </div>
+                    )}
+                    <small className="summary-source">Consolidado por {execution.run.summary.generatedBy === "cloud-arbiter" ? "Cloud Arbiter" : "el orquestador"} · {new Date(execution.run.summary.generatedAt).toLocaleString("es-CO")}</small>
+                  </div>
+                ) : (
+                  <div className="execution-summary-pending">
+                    <strong>{activeExecution ? "Resumen ejecutivo en preparación" : "No se generó un resumen ejecutivo"}</strong>
+                    <span>{activeExecution
+                      ? "Se publicará cuando terminen las olas de especialistas y el árbitro consolide los handoffs."
+                      : "Consulta los eventos de la consola para conocer el detalle disponible."}</span>
+                  </div>
+                )}
+                {workThread && execution.run.threadId === workThread.thread.id && (
+                  <section className="work-continuation-panel" aria-labelledby="continue-work-title">
+                    <div className="work-continuation-heading">
+                      <div>
+                        <span className="terminal-kicker">PROCESO PERSISTENTE · {workThread.thread.id.slice(0, 12)}</span>
+                        <h4 id="continue-work-title">Continuar trabajo</h4>
+                        <p>El objetivo original, los resultados y las instrucciones anteriores permanecen vinculados a este proceso.</p>
+                      </div>
+                      <span className={activeExecution ? "workflow-live-pill" : "workflow-ready-pill"}>
+                        {activeExecution ? "RONDA EN CURSO" : `${workThread.rounds.length} RONDA(S) REGISTRADA(S)`}
+                      </span>
+                    </div>
+                    <div className="work-history-list" aria-live="polite">
+                      {workThread.messages.map((message) => {
+                        const matchingRound = workThread.rounds.find((round) =>
+                          message.runId ? round.run.id === message.runId : round.run.roundNumber === message.roundNumber
+                        );
+                        return (
+                          <article className={`work-message work-message-${message.role}`} key={message.id}>
+                            <div className="work-message-meta">
+                              <strong>{message.role === "user" ? "TÚ" : message.role === "assistant" ? "FÁBRICA · RESULTADO DE RONDA" : "SISTEMA"}</strong>
+                              <span>RONDA {message.roundNumber} · {new Date(message.createdAt).toLocaleString("es-CO")}</span>
+                            </div>
+                            <p>{message.content}</p>
+                            {message.role === "assistant" && matchingRound && (
+                              <details className="work-round-evidence">
+                                <summary>Ver evidencia de la ronda · {matchingRound.agents.length} agentes · {matchingRound.events.length} eventos recientes</summary>
+                                <div className="work-round-agents">
+                                  {matchingRound.agents.map((agentRun) => (
+                                    <section key={agentRun.id}>
+                                      <strong>{roleNames[agentRun.agentId] ?? agentRun.agentId}</strong>
+                                      <span>{agentRun.engine === "claude" ? "Claude Code" : "OpenCode"} · {agentRun.modelId} · {statusLabels[agentRun.status] ?? agentRun.status}</span>
+                                      {agentRun.sessionId && <code>SESSION {agentRun.sessionId}</code>}
+                                      {agentRun.handoffIn.map((handoff) => <code key={handoff.id}>IN ← {handoff.id} · {handoff.fromEngine} → {handoff.toEngine}</code>)}
+                                      {agentRun.handoffOut.map((handoff) => <code key={handoff.id}>OUT → {handoff.id} · {handoff.fromEngine} → {handoff.toEngine}</code>)}
+                                      {agentRun.handoffOutput && (
+                                        <details
+                                          className="work-agent-output"
+                                          onToggle={(event) => {
+                                            if (event.currentTarget.open) void loadHandoffOutput(matchingRound.run.id, agentRun.id);
+                                          }}
+                                        >
+                                          <summary>
+                                            Ver informe persistido · {agentRun.handoffOutput.contentLength.toLocaleString("es-CO")} caracteres
+                                            {agentRun.handoffOutput.truncated ? " · INCOMPLETO" : " · ÍNTEGRO"}
+                                          </summary>
+                                          {handoffOutputLoading[matchingRound.run.id + ":" + agentRun.id] && (
+                                            <small>Descargando informe completo…</small>
+                                          )}
+                                          {handoffOutputErrors[matchingRound.run.id + ":" + agentRun.id] && (
+                                            <small role="alert">{handoffOutputErrors[matchingRound.run.id + ":" + agentRun.id]}</small>
+                                          )}
+                                          {handoffOutputContents[matchingRound.run.id + ":" + agentRun.id] && (
+                                            <>
+                                              <small>
+                                                SHA-256 {handoffOutputContents[matchingRound.run.id + ":" + agentRun.id]?.sha256} ·
+                                                {handoffOutputContents[matchingRound.run.id + ":" + agentRun.id]?.sourceIdentityVerified
+                                                  ? " ID emitido correctamente por el agente"
+                                                  : " ID incorporado por el orquestador"}
+                                              </small>
+                                              <pre>{handoffOutputContents[matchingRound.run.id + ":" + agentRun.id]?.content}</pre>
+                                            </>
+                                          )}
+                                          {!handoffOutputLoading[matchingRound.run.id + ":" + agentRun.id] &&
+                                            !handoffOutputErrors[matchingRound.run.id + ":" + agentRun.id] &&
+                                            !handoffOutputContents[matchingRound.run.id + ":" + agentRun.id] && (
+                                              <small>El contenido completo se descarga al abrir este apartado.</small>
+                                            )}
+                                        </details>
+                                      )}
+                                    </section>
+                                  ))}
+                                </div>
+                                {matchingRound.decisionHistory.length > 0 && (
+                                  <div className="work-round-decisions">
+                                    <strong>Decisiones y aprobaciones humanas</strong>
+                                    {matchingRound.decisionHistory.map((decision) => (
+                                      <article key={decision.id}>
+                                        <span>{decision.engine === "claude" ? "Claude Code" : "OpenCode"} · {decision.kind} · {decision.status} · {new Date(decision.createdAt).toLocaleString("es-CO")}</span>
+                                        <p>{decision.title}: {decision.description}</p>
+                                        {decision.response && <p>Respuesta del usuario: {decision.response}</p>}
+                                      </article>
+                                    ))}
+                                  </div>
+                                )}
+                                <div className="work-round-events">
+                                  {matchingRound.events.map((item) => (
+                                    <article key={item.id}>
+                                      <span>{item.area} · {new Date(item.createdAt).toLocaleTimeString("es-CO", { hour12: false })} · {item.kind}</span>
+                                      <p>{item.message}</p>
+                                    </article>
+                                  ))}
+                                </div>
+                              </details>
+                            )}
+                            {message.role === "assistant" && matchingRound && !matchingRound.run.configurationSnapshot && (
+                              <div className="work-legacy-note">
+                                Esta ejecución es anterior a la captura detallada de configuración. Se conservaron el objetivo, agentes, motores, modelos registrados, eventos, handoffs y resumen originales; las instrucciones de agente y la Skill de aquella fecha no pueden reconstruirse retroactivamente.
+                              </div>
+                            )}
+                            {message.role === "assistant" && matchingRound?.run.configurationSnapshot && (
+                              <details className="work-config-snapshot">
+                                <summary>Configuración utilizada en esta ronda</summary>
+                                <div>
+                                  {matchingRound.run.configurationSnapshot.assignments.map((assignment) => (
+                                    <span key={assignment.agentId}>
+                                      <strong>{roleNames[assignment.agentId] ?? assignment.agentId}</strong>
+                                      {assignment.enabled ? " · " : " · OMITIDO · "}
+                                      {assignment.engine === "claude" ? "Claude Code" : "OpenCode"} · {assignment.modelId}
+                                      {" · "}{assignment.permissionProfile}
+                                    </span>
+                                  ))}
+                                  <small>
+                                    Instrucciones de {Object.keys(matchingRound.run.configurationSnapshot.roleInstructionDigests).length} agentes guardadas completas y verificadas mediante SHA-256.
+                                    Skill compartida: {matchingRound.run.configurationSnapshot.workflowSkillDigest
+                                      ? matchingRound.run.configurationSnapshot.workflowSkillDigest.slice(0, 16) + "…"
+                                      : "no disponible"}
+                                  </small>
+                                  <details className="work-config-instructions">
+                                    <summary>Consultar instrucciones históricas exactas</summary>
+                                    {Object.entries(matchingRound.run.configurationSnapshot.roleInstructions).map(([agentId, content]) => (
+                                      <section key={agentId}>
+                                        <strong>{roleNames[agentId] ?? agentId}</strong>
+                                        <pre>{content}</pre>
+                                        <code>SHA-256 · {matchingRound.run.configurationSnapshot!.roleInstructionDigests[agentId]}</code>
+                                      </section>
+                                    ))}
+                                    {matchingRound.run.configurationSnapshot.workflowSkillContent && (
+                                      <section>
+                                        <strong>Skill continuous-workflow</strong>
+                                        <pre>{matchingRound.run.configurationSnapshot.workflowSkillContent}</pre>
+                                      </section>
+                                    )}
+                                  </details>
+                                </div>
+                              </details>
+                            )}
+                          </article>
+                        );
+                      })}
+                      {activeExecution && (
+                        <div className="work-live-indicator">
+                          <span className="pulse-dot" />
+                          Los agentes están trabajando en la ronda {execution.run.roundNumber}. La respuesta se añadirá aquí al finalizar.
+                        </div>
+                      )}
+                    </div>
+                    <form className="work-continuation-composer" onSubmit={(event) => void continueWork(event)}>
+                      <label htmlFor="continuation-instructions">Nueva instrucción para continuar el mismo proceso</label>
+                      <textarea
+                        id="continuation-instructions"
+                        value={continuationText}
+                        onChange={(event) => setContinuationText(event.target.value)}
+                        placeholder="Ej.: Revisemos ahora el hallazgo número 2, contrastemos las alternativas y propongamos una solución..."
+                        rows={4}
+                        maxLength={12000}
+                        disabled={activeExecution || continuationBusy}
+                      />
+                      <div className="work-composer-footer">
+                        <span>La siguiente ronda vuelve a leer las instrucciones y Skills vigentes, y usa agentes, modelos favoritos y permisos guardados. Las rondas anteriores no cambian.</span>
+                        <button className="primary-button" type="submit" disabled={!continuationText.trim() || activeExecution || continuationBusy}>
+                          {continuationBusy ? "Preparando ronda..." : "Continuar proceso"}
+                          <span>↗</span>
+                        </button>
+                      </div>
+                    </form>
+                  </section>
+                )}
                 <div className="execution-run-meta">
                   <span>Inicio: {new Date(execution.run.startedAt).toLocaleString("es-CO")}</span>
                   <span>Última actualización: {new Date(execution.run.updatedAt).toLocaleString("es-CO")}</span>
@@ -1150,12 +1520,12 @@ export default function App() {
 
             <div className="section-block compact-block" id="roadmap">
               <div className="eyebrow">04 / ORCHESTRATION</div>
-              <h2>Próxima capacidad</h2>
+              <h2>Colaboración entre motores</h2>
               <div className="next-step">
                 <div className="next-step-icon">⇄</div>
-                <div><strong>Colaboración entre motores</strong><p>Claude y OpenCode recibirán el mismo objetivo, compartirán respuestas y debatirán mediante el orquestador.</p></div>
+                <div><strong>Coordinación por handoffs</strong><p>Claude Code y OpenCode reciben el mismo objetivo, trabajan en olas paralelas cuando los permisos lo permiten, intercambian entregas identificadas y terminan con una consolidación del Cloud Arbiter.</p></div>
               </div>
-              <div className="next-step-status"><span className="status-pending" /> Pendiente · Adaptadores, sesiones, aprobaciones y streaming</div>
+              <div className="next-step-status"><span className="status-integrated" /> Integración implementada · sesiones, handoffs, aprobaciones y resumen ejecutivo</div>
             </div>
           </section>
 

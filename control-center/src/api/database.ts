@@ -1,7 +1,9 @@
 import { homedir } from "node:os";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
+import type { ExecutionSummary, HandoffDescriptor, HandoffOutputMetadata, HandoffOutputRecord } from "./orchestration.js";
 
 export type EngineId = "opencode" | "claude";
 export type ClaudeProviderId = "apmix" | "anthropic" | "opencode-go";
@@ -63,6 +65,14 @@ db.exec(`
     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     updated_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS work_threads (
+    id TEXT PRIMARY KEY,
+    project_path TEXT NOT NULL,
+    objective TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
   CREATE TABLE IF NOT EXISTS execution_runs (
     id TEXT PRIMARY KEY,
     project_path TEXT NOT NULL,
@@ -70,7 +80,8 @@ db.exec(`
     status TEXT NOT NULL,
     started_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    finished_at TEXT
+    finished_at TEXT,
+    summary_json TEXT
   );
   CREATE TABLE IF NOT EXISTS execution_agents (
     id TEXT PRIMARY KEY,
@@ -84,7 +95,10 @@ db.exec(`
     process_id INTEGER,
     error TEXT,
     started_at TEXT,
-    finished_at TEXT
+    finished_at TEXT,
+    handoff_in_json TEXT NOT NULL DEFAULT '[]',
+    handoff_out_json TEXT,
+    handoff_output_json TEXT
   );
   CREATE TABLE IF NOT EXISTS execution_events (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -111,9 +125,75 @@ db.exec(`
     created_at TEXT NOT NULL,
     resolved_at TEXT
   );
+  CREATE TABLE IF NOT EXISTS work_messages (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES work_threads(id) ON DELETE CASCADE,
+    run_id TEXT REFERENCES execution_runs(id) ON DELETE SET NULL,
+    round_number INTEGER NOT NULL DEFAULT 1,
+    role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
+    kind TEXT NOT NULL DEFAULT 'message',
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_work_messages_thread ON work_messages(thread_id, id);
   CREATE INDEX IF NOT EXISTS idx_execution_events_run ON execution_events(run_id, id);
   CREATE INDEX IF NOT EXISTS idx_execution_decisions_pending ON execution_decisions(run_id, status);
 `);
+
+// Additive migrations for structured orchestration metadata.
+function ensureColumn(table: string, column: string, definition: string): void {
+  const columns = db.prepare("PRAGMA table_info(" + table + ")").all() as Array<{ name: string }>;
+  if (!columns.some((item) => item.name === column)) {
+    db.exec("ALTER TABLE " + table + " ADD COLUMN " + column + " " + definition);
+  }
+}
+ensureColumn("execution_runs", "summary_json", "TEXT");
+ensureColumn("execution_runs", "thread_id", "TEXT REFERENCES work_threads(id) ON DELETE SET NULL");
+ensureColumn("execution_runs", "round_number", "INTEGER NOT NULL DEFAULT 1");
+ensureColumn("execution_runs", "configuration_snapshot_json", "TEXT");
+ensureColumn("execution_runs", "continuity_context", "TEXT");
+db.exec("CREATE INDEX IF NOT EXISTS idx_execution_runs_thread ON execution_runs(thread_id, round_number)");
+
+// Attach pre-existing standalone executions to a durable thread without changing
+// their IDs, instructions, events, summaries, agents or terminal states.
+const legacyRuns = db.prepare("SELECT id, project_path AS projectPath, instructions, status, started_at AS startedAt, updated_at AS updatedAt, summary_json AS summaryJson FROM execution_runs WHERE thread_id IS NULL ORDER BY started_at").all() as Array<{
+  id: string; projectPath: string; instructions: string; status: string;
+  startedAt: string; updatedAt: string; summaryJson: string | null;
+}>;
+if (legacyRuns.length) {
+  const insertThread = db.prepare("INSERT OR IGNORE INTO work_threads (id, project_path, objective, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)");
+  const linkRun = db.prepare("UPDATE execution_runs SET thread_id = ?, round_number = 1 WHERE id = ? AND thread_id IS NULL");
+  const insertMessage = db.prepare("INSERT INTO work_messages (id, thread_id, run_id, round_number, role, kind, content, created_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?)");
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    for (const legacy of legacyRuns) {
+      const threadId = "legacy-" + legacy.id;
+      const terminal = legacy.status === "succeeded" ? "completed"
+        : ["queued", "running", "waiting"].includes(legacy.status) ? "active" : "failed";
+      insertThread.run(threadId, legacy.projectPath, legacy.instructions, terminal, legacy.startedAt, legacy.updatedAt);
+      linkRun.run(threadId, legacy.id);
+      insertMessage.run(randomUUID(), threadId, null, "user", "initial-instruction", legacy.instructions, legacy.startedAt);
+      if (legacy.summaryJson) {
+        const summary = JSON.parse(legacy.summaryJson) as { headline?: string; overview?: string; findings?: string[]; nextSteps?: string[] };
+        const content = [
+          summary.headline ?? "Resumen de la ejecución histórica",
+          summary.overview ?? "",
+          summary.findings?.length ? "Hallazgos: " + summary.findings.join(" | ") : "",
+          summary.nextSteps?.length ? "Próximos pasos: " + summary.nextSteps.join(" | ") : ""
+        ].filter(Boolean).join("\n\n");
+        insertMessage.run(randomUUID(), threadId, legacy.id, "assistant", "round-summary", content, legacy.updatedAt);
+      }
+    }
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+ensureColumn("execution_agents", "handoff_in_json", "TEXT NOT NULL DEFAULT '[]'");
+ensureColumn("execution_agents", "handoff_out_json", "TEXT");
+ensureColumn("execution_agents", "handoff_output_json", "TEXT");
+ensureColumn("execution_agents", "handoff_output_meta_json", "TEXT");
 
 // Migrate the provider preference constraint for installations created before OpenCode Go support.
 const providerTable = db.prepare(
@@ -318,14 +398,47 @@ export type ExecutionStatus = "queued" | "running" | "waiting" | "succeeded" | "
 export type ExecutionAgentStatus = ExecutionStatus | "skipped";
 export type ExecutionDecisionStatus = "pending" | "approved" | "rejected" | "answered" | "orphaned";
 
+export interface ExecutionConfigurationSnapshot {
+  capturedAt: string;
+  claudeProvider: ClaudeProviderId;
+  favorites: FavoriteModel[];
+  assignments: AgentAssignment[];
+  roleInstructionDigests: Record<string, string>;
+  roleInstructions: Record<string, string>;
+  workflowSkillDigest: string | null;
+  workflowSkillContent: string;
+}
+export interface WorkThreadRecord {
+  id: string;
+  projectPath: string;
+  objective: string;
+  status: "active" | "completed" | "failed";
+  createdAt: string;
+  updatedAt: string;
+}
+export interface WorkMessageRecord {
+  id: string;
+  threadId: string;
+  runId: string | null;
+  roundNumber: number;
+  role: "user" | "assistant" | "system";
+  kind: string;
+  content: string;
+  createdAt: string;
+}
 export interface ExecutionRunRecord {
   id: string;
+  threadId: string | null;
+  roundNumber: number;
+  configurationSnapshot: ExecutionConfigurationSnapshot | null;
+  continuityContext: string;
   projectPath: string;
   instructions: string;
   status: ExecutionStatus;
   startedAt: string;
   updatedAt: string;
   finishedAt: string | null;
+  summary: ExecutionSummary | null;
 }
 export interface ExecutionAgentRecord {
   id: string;
@@ -340,6 +453,9 @@ export interface ExecutionAgentRecord {
   error: string | null;
   startedAt: string | null;
   finishedAt: string | null;
+  handoffIn: HandoffDescriptor[];
+  handoffOut: HandoffDescriptor[];
+  handoffOutput: HandoffOutputMetadata | null;
 }
 export interface ExecutionEventRecord {
   id: number;
@@ -371,31 +487,47 @@ export interface ExecutionSnapshot {
   agents: ExecutionAgentRecord[];
   events: ExecutionEventRecord[];
   decisions: ExecutionDecisionRecord[];
+  decisionHistory: ExecutionDecisionRecord[];
 }
 
 export function createExecutionRecords(
-  run: Omit<ExecutionRunRecord, "updatedAt" | "finishedAt">,
-  agents: Array<Omit<ExecutionAgentRecord, "runId" | "sessionId" | "processId" | "error" | "startedAt" | "finishedAt">>
+  run: Omit<ExecutionRunRecord, "updatedAt" | "finishedAt" | "summary">,
+  agents: Array<Omit<ExecutionAgentRecord, "runId" | "sessionId" | "processId" | "error" | "startedAt" | "finishedAt" | "handoffIn" | "handoffOut" | "handoffOutput"> & { error?: string | null; finishedAt?: string | null }>
 ): void {
   const now = new Date().toISOString();
   db.exec("BEGIN IMMEDIATE");
   try {
     db.prepare(`
-      INSERT INTO execution_runs (id, project_path, instructions, status, started_at, updated_at, finished_at)
-      VALUES (?, ?, ?, ?, ?, ?, NULL)
-    `).run(run.id, run.projectPath, run.instructions, run.status, run.startedAt, now);
+      INSERT INTO execution_runs
+        (id, project_path, instructions, status, started_at, updated_at, finished_at,
+         thread_id, round_number, configuration_snapshot_json, continuity_context)
+      VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)
+    `).run(
+      run.id, run.projectPath, run.instructions, run.status, run.startedAt, now,
+      run.threadId, run.roundNumber, run.configurationSnapshot ? JSON.stringify(run.configurationSnapshot) : null,
+      run.continuityContext ?? ""
+    );
     const insertAgent = db.prepare(`
-      INSERT INTO execution_agents (id, run_id, agent_id, engine, model_id, permission_profile, status)
-      VALUES (?, ?, ?, ?, ?, ?, ?)
+      INSERT INTO execution_agents
+        (id, run_id, agent_id, engine, model_id, permission_profile, status, error, finished_at)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
     `);
     for (const agent of agents) {
-      insertAgent.run(agent.id, run.id, agent.agentId, agent.engine, agent.modelId, agent.permissionProfile, agent.status);
+      insertAgent.run(
+        agent.id, run.id, agent.agentId, agent.engine, agent.modelId, agent.permissionProfile,
+        agent.status, agent.error ?? null, agent.status === "skipped" ? null : agent.finishedAt ?? null
+      );
     }
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
     throw error;
   }
+}
+
+export function updateExecutionSummary(id: string, summary: ExecutionSummary): void {
+  db.prepare("UPDATE execution_runs SET summary_json = ?, updated_at = ? WHERE id = ?")
+    .run(JSON.stringify(summary), new Date().toISOString(), id);
 }
 
 export function updateExecutionRun(id: string, status: ExecutionStatus, finished = false): void {
@@ -407,18 +539,36 @@ export function updateExecutionRun(id: string, status: ExecutionStatus, finished
 }
 export function updateExecutionAgent(
   id: string,
-  patch: Partial<Pick<ExecutionAgentRecord, "status" | "sessionId" | "processId" | "error" | "startedAt" | "finishedAt">>
+  patch: Partial<Pick<ExecutionAgentRecord, "status" | "sessionId" | "processId" | "error" | "startedAt" | "finishedAt" | "handoffIn" | "handoffOut">> & {
+    handoffOutput?: HandoffOutputRecord | null;
+  }
 ): void {
   const fields: string[] = [];
   const values: unknown[] = [];
   const mapping: Record<string, string> = {
     status: "status", sessionId: "session_id", processId: "process_id", error: "error",
-    startedAt: "started_at", finishedAt: "finished_at"
+    startedAt: "started_at", finishedAt: "finished_at",
+    handoffIn: "handoff_in_json", handoffOut: "handoff_out_json"
   };
   for (const [key, column] of Object.entries(mapping)) {
     if (Object.prototype.hasOwnProperty.call(patch, key)) {
       fields.push(`${column} = ?`);
-      values.push((patch as Record<string, unknown>)[key]);
+      const value = (patch as Record<string, unknown>)[key];
+      values.push(key === "handoffIn" || key === "handoffOut"
+        ? JSON.stringify(value ?? (key === "handoffIn" ? [] : null))
+        : value);
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, "handoffOutput")) {
+    const output = patch.handoffOutput ?? null;
+    fields.push("handoff_output_json = ?");
+    values.push(output ? JSON.stringify(output) : null);
+    fields.push("handoff_output_meta_json = ?");
+    if (output) {
+      const { content: _content, ...metadata } = output;
+      values.push(JSON.stringify(metadata));
+    } else {
+      values.push(null);
     }
   }
   if (!fields.length) return;
@@ -469,35 +619,76 @@ export function getExecutionDecision(id: string): ExecutionDecisionRecord | null
 export function getExecutionSnapshot(runId: string): ExecutionSnapshot | null {
   const runRow = db.prepare(`
     SELECT id, project_path AS projectPath, instructions, status,
-      started_at AS startedAt, updated_at AS updatedAt, finished_at AS finishedAt
+      started_at AS startedAt, updated_at AS updatedAt, finished_at AS finishedAt,
+      summary_json AS summaryJson, thread_id AS threadId, round_number AS roundNumber,
+      configuration_snapshot_json AS configurationSnapshotJson,
+      continuity_context AS continuityContext
     FROM execution_runs WHERE id = ?
-  `).get(runId) as ExecutionRunRecord | undefined;
+  `).get(runId) as (Omit<ExecutionRunRecord, "summary" | "configurationSnapshot"> & {
+    summaryJson: string | null; configurationSnapshotJson: string | null
+  }) | undefined;
   if (!runRow) return null;
+  const run: ExecutionRunRecord = {
+    id: runRow.id, threadId: runRow.threadId ?? null, roundNumber: runRow.roundNumber ?? 1,
+    configurationSnapshot: runRow.configurationSnapshotJson
+      ? JSON.parse(runRow.configurationSnapshotJson) as ExecutionConfigurationSnapshot : null,
+    continuityContext: runRow.continuityContext ?? "",
+    projectPath: runRow.projectPath, instructions: runRow.instructions, status: runRow.status,
+    startedAt: runRow.startedAt, updatedAt: runRow.updatedAt, finishedAt: runRow.finishedAt,
+    summary: runRow.summaryJson ? JSON.parse(runRow.summaryJson) as ExecutionSummary : null
+  };
   const agents = db.prepare(`
     SELECT id, run_id AS runId, agent_id AS agentId, engine, model_id AS modelId,
       permission_profile AS permissionProfile, status, session_id AS sessionId,
-      process_id AS processId, error, started_at AS startedAt, finished_at AS finishedAt
+      process_id AS processId, error, started_at AS startedAt, finished_at AS finishedAt,
+      handoff_in_json AS handoffInJson, handoff_out_json AS handoffOutJson,
+      handoff_output_meta_json AS handoffOutputMetaJson
     FROM execution_agents WHERE run_id = ? ORDER BY rowid
-  `).all(runId) as unknown as ExecutionAgentRecord[];
+  `).all(runId) as Array<Record<string, unknown> & { handoffInJson: string | null; handoffOutJson: string | null; handoffOutputMetaJson: string | null }>;
+  const normalizedAgents = agents.map((row) => ({
+    id: String(row.id), runId: String(row.runId), agentId: String(row.agentId), engine: row.engine as EngineId,
+    modelId: String(row.modelId), permissionProfile: row.permissionProfile as PermissionProfile,
+    status: row.status as ExecutionAgentStatus, sessionId: row.sessionId as string | null,
+    processId: row.processId as number | null, error: row.error as string | null,
+    startedAt: row.startedAt as string | null, finishedAt: row.finishedAt as string | null,
+    handoffIn: row.handoffInJson ? JSON.parse(row.handoffInJson) as HandoffDescriptor[] : [],
+    handoffOut: row.handoffOutJson ? JSON.parse(row.handoffOutJson) as HandoffDescriptor[] : [],
+    handoffOutput: row.handoffOutputMetaJson
+      ? JSON.parse(row.handoffOutputMetaJson) as HandoffOutputMetadata
+      : null
+  }));
   const events = db.prepare(`
     SELECT id, run_id AS runId, agent_run_id AS agentRunId, created_at AS createdAt,
       area, kind, message
     FROM execution_events WHERE run_id = ? ORDER BY id DESC LIMIT 300
   `).all(runId).reverse() as unknown as ExecutionEventRecord[];
-  const decisions = db.prepare(`
+  const decisionRows = db.prepare(`
     SELECT id, run_id AS runId, agent_run_id AS agentRunId, engine,
       engine_session_id AS engineSessionId, engine_request_id AS engineRequestId,
       kind, title, description, details_json AS detailsJson, status, response,
       created_at AS createdAt, resolved_at AS resolvedAt
-    FROM execution_decisions WHERE run_id = ? AND status = 'pending' ORDER BY created_at
+    FROM execution_decisions WHERE run_id = ? ORDER BY created_at
   `).all(runId) as Array<Record<string, unknown> & { detailsJson: string }>;
+  const decisionHistory = decisionRows.map((row) => ({
+    ...row, details: JSON.parse(row.detailsJson)
+  })) as unknown as ExecutionDecisionRecord[];
   return {
-    run: runRow,
-    agents,
+    run,
+    agents: normalizedAgents,
     events,
-    decisions: decisions.map((row) => ({ ...row, details: JSON.parse(row.detailsJson) })) as unknown as ExecutionDecisionRecord[]
+    decisions: decisionHistory.filter((item) => item.status === "pending"),
+    decisionHistory
   };
 }
+export function getExecutionAgentHandoffOutput(runId: string, agentRunId: string): HandoffOutputRecord | null {
+  const row = db.prepare(
+    "SELECT handoff_output_json AS handoffOutputJson FROM execution_agents WHERE run_id = ? AND id = ?"
+  ).get(runId, agentRunId) as { handoffOutputJson: string | null } | undefined;
+  return row?.handoffOutputJson
+    ? JSON.parse(row.handoffOutputJson) as HandoffOutputRecord
+    : null;
+}
+
 export function getLatestExecutionId(): string | null {
   const row = db.prepare("SELECT id FROM execution_runs ORDER BY started_at DESC LIMIT 1").get() as { id: string } | undefined;
   return row?.id ?? null;
@@ -523,4 +714,81 @@ export function markUnfinishedExecutionsInterrupted(): void {
     WHERE status IN ('queued', 'running', 'waiting')
   `).run();
   db.prepare("UPDATE execution_decisions SET status = 'orphaned' WHERE status = 'pending'").run();
+}
+
+
+export interface WorkThreadSnapshot {
+  thread: WorkThreadRecord;
+  messages: WorkMessageRecord[];
+  rounds: ExecutionSnapshot[];
+}
+
+export function createWorkThread(thread: Pick<WorkThreadRecord, "id" | "projectPath" | "objective">): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO work_threads (id, project_path, objective, status, created_at, updated_at)
+    VALUES (?, ?, ?, 'active', ?, ?)
+  `).run(thread.id, thread.projectPath, thread.objective.slice(0, 12000), now, now);
+}
+
+export function addWorkMessage(
+  threadId: string,
+  runId: string | null,
+  roundNumber: number,
+  role: WorkMessageRecord["role"],
+  content: string,
+  kind = "message"
+): WorkMessageRecord {
+  const message: WorkMessageRecord = {
+    id: randomWorkMessageId(), threadId, runId, roundNumber, role, kind,
+    content: content.slice(0, 30000), createdAt: new Date().toISOString()
+  };
+  db.prepare(`
+    INSERT INTO work_messages (id, thread_id, run_id, round_number, role, kind, content, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(message.id, message.threadId, message.runId, message.roundNumber,
+    message.role, message.kind, message.content, message.createdAt);
+  db.prepare("UPDATE work_threads SET updated_at = ? WHERE id = ?")
+    .run(message.createdAt, threadId);
+  return message;
+}
+
+function randomWorkMessageId(): string {
+  return randomUUID();
+}
+
+export function updateWorkThreadStatus(
+  threadId: string,
+  status: WorkThreadRecord["status"]
+): void {
+  db.prepare("UPDATE work_threads SET status = ?, updated_at = ? WHERE id = ?")
+    .run(status, new Date().toISOString(), threadId);
+}
+
+export function getWorkThreadSnapshot(threadId: string): WorkThreadSnapshot | null {
+  const row = db.prepare(`
+    SELECT id, project_path AS projectPath, objective, status,
+      created_at AS createdAt, updated_at AS updatedAt
+    FROM work_threads WHERE id = ?
+  `).get(threadId) as WorkThreadRecord | undefined;
+  if (!row) return null;
+  const messages = db.prepare(`
+    SELECT id, thread_id AS threadId, run_id AS runId, round_number AS roundNumber,
+      role, kind, content, created_at AS createdAt
+    FROM work_messages WHERE thread_id = ? ORDER BY created_at, rowid
+  `).all(threadId) as unknown as WorkMessageRecord[];
+  const runIds = db.prepare(
+    "SELECT id FROM execution_runs WHERE thread_id = ? ORDER BY round_number"
+  ).all(threadId) as Array<{ id: string }>;
+  const rounds = runIds.map((item) => getExecutionSnapshot(item.id)).filter(
+    (item): item is ExecutionSnapshot => item !== null
+  );
+  return { thread: row, messages, rounds };
+}
+
+export function getLatestWorkThreadId(): string | null {
+  const row = db.prepare(`
+    SELECT id FROM work_threads ORDER BY updated_at DESC, created_at DESC LIMIT 1
+  `).get() as { id: string } | undefined;
+  return row?.id ?? null;
 }

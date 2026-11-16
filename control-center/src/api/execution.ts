@@ -8,10 +8,12 @@ import { basename, delimiter, dirname, join, resolve, relative, isAbsolute, sep 
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { readClaudeLocalConfig } from "./models.js";
 import { planTask, type ResearchDepth } from "./task-planner.js";
+import { buildExecutionSummary, createHandoffDescriptor, createHandoffId, prepareHandoffOutput, type AgentResult, type HandoffDescriptor } from "./orchestration.js";
 import {
-  addExecutionEvent, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
-  getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, markUnfinishedExecutionsInterrupted, orphanExecutionDecisions, orphanExecutionDecisionsForAgent,
-  resolveExecutionDecision, updateExecutionAgent, updateExecutionRun,
+  addExecutionEvent, addWorkMessage, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
+  getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, listFavoriteModels,
+  markUnfinishedExecutionsInterrupted, orphanExecutionDecisions, orphanExecutionDecisionsForAgent,
+  resolveExecutionDecision, updateExecutionAgent, updateExecutionRun, updateExecutionSummary, updateWorkThreadStatus,
   type AgentAssignment, type EngineId, type ExecutionAgentRecord, type ExecutionDecisionRecord,
   type ExecutionSnapshot, type ExecutionStatus
 } from "./database.js";
@@ -45,6 +47,7 @@ type AgentInput = {
   engine: EngineId;
   modelId: string;
   permissionProfile: AgentAssignment["permissionProfile"];
+  enabled: boolean;
 };
 type OpenCodePermission = {
   id?: string;
@@ -574,7 +577,7 @@ async function pollOpenCodeAgent(
     .filter((item) => !item.tool)
     .map((item) => item.text)
     .join("\n");
-  return assistantText.slice(-9000);
+  return assistantText;
 }
 
 async function runOpenCodeAgent(
@@ -669,38 +672,81 @@ async function loadRoleInstructions(factoryRoot: string, agentId: string): Promi
   }
 }
 function makeAgentPrompt(
-  agentId: string,
+  agent: AgentInput,
   instructions: string,
   roleInstructions: string,
   projectContext: string,
-  previousResults: string[]
+  previousResults: AgentResult[],
+  handoffId: string,
+  taskChangesExpected: boolean
 ): string {
-  const previous = previousResults.slice(-3).map((item) => item.slice(-5000)).join("\n\n--- RESULTADO DEL AGENTE ANTERIOR ---\n\n");
-  const roleOverrides: Record<string, string> = {
-    architect: "Tu entrega en esta fase es un plan breve, priorizado y respaldado por evidencia. No modifiques archivos.",
-    build: "Actúas como coordinador de cierre. La fábrica ya ejecutó las fases de especialistas por separado: NO invoques subagentes ni delegues. Consolida los resultados, señala riesgos y pendientes.",
-    implementer: "Implementa el objetivo usando el plan/contexto anterior. Respeta estrictamente el perfil de permisos de tu sesión. No hagas commits ni pushes.",
-    reviewer: "Revisa el estado actual y los cambios realizados. No modifiques archivos. Informa defectos demostrables y discrepancias que requieran arbitraje.",
-    tester: "Ejecuta las pruebas y verificaciones pertinentes si tus permisos lo permiten. No ocultes fallos. Informa comandos y resultados reales.",
-    reverse: "Solo realiza ingeniería inversa cuando existan binarios o el objetivo la requiera. Utiliza únicamente herramientas que estén realmente disponibles.",
-    "cloud-arbiter": "Resuelve exclusivamente discrepancias técnicas concretas entre los informes anteriores. No modifiques archivos."
+  const nl = String.fromCharCode(10);
+  const roleNames: Record<string, string> = {
+    architect: "Architect / arquitectura y planificación",
+    build: "Build / configuración de construcción, dependencias y empaquetado",
+    implementer: "Implementer / implementación o propuesta técnica",
+    reviewer: "Reviewer / revisión independiente de calidad y seguridad",
+    tester: "Tester / verificación y pruebas",
+    reverse: "Reverse / reconstrucción de flujos, dependencias y arquitectura desde el código",
+    "cloud-arbiter": "Cloud Arbiter / consolidación y arbitraje final entre motores"
   };
+  const roleOverrides: Record<string, string> = {
+    architect: "Analiza la arquitectura, módulos, límites, dependencias y riesgos. Entrega un mapa técnico comprobable. No implementes.",
+    build: "Analiza exclusivamente el sistema de construcción: Gradle/Maven, wrapper, plugins, dependencias, tareas, empaquetado y CI/CD. No eres coordinador ni árbitro final. No implementes cambios.",
+    implementer: taskChangesExpected
+      ? "Implementa únicamente los cambios solicitados por el usuario y permitidos por tu perfil. Si el objetivo prohíbe modificaciones, no escribas: presenta una propuesta."
+      : "En esta tarea no se esperan modificaciones. Revisa la viabilidad de las mejoras y entrega una propuesta priorizada; no escribas ni alteres archivos.",
+    reviewer: "Revisa independientemente los resultados previos. Contrasta rutas y afirmaciones, señala defectos demostrables y separa hechos de hipótesis. No implementes.",
+    tester: "Verifica afirmaciones y ejecuta únicamente pruebas permitidas. Distingue pruebas reales de inspecciones estáticas. No inventes resultados y respeta autorizaciones humanas.",
+    reverse: "Reconstruye flujos, dependencias, entrada/salida, integraciones y relaciones entre módulos desde el código fuente. Usa análisis binario solo si existen binarios y herramientas disponibles.",
+    "cloud-arbiter": "Eres el árbitro final. Lee TODOS los handoffs de ambos motores, compáralos, resuelve discrepancias y entrega una conclusión conjunta. No declares ausente a un agente cuyo registro figure como ejecutado."
+  };
+  const previous = previousResults.map((item) => [
+    "### " + item.handoffId,
+    "AGENTE: " + item.agentId,
+    "MOTOR: " + item.engine,
+    "MODELO ASIGNADO: " + item.modelId,
+    "SESSION ID: " + (item.sessionId ?? "no disponible"),
+    "ESTADO: " + item.status,
+    "INICIO: " + (item.startedAt ?? "no disponible"),
+    "FIN: " + (item.finishedAt ?? "no disponible"),
+    "CONTENIDO DEL HANDOFF:",
+    item.output
+  ].join(nl)).join(nl + nl + "--- SIGUIENTE HANDOFF ---" + nl + nl);
+  const expectedInbound = previousResults.length
+    ? previousResults.map((item) => item.handoffId + " (" + item.agentId + " · " + item.engine + ")").join(", ")
+    : "ninguno; fase independiente de esta ola";
   return [
+    "IDENTIDAD OBLIGATORIA DE ESTA SESIÓN",
+    "ID DE EJECUCIÓN: " + agent.runId,
+    "ID DEL REGISTRO: " + agent.id,
+    "AGENTE: " + agent.agentId,
+    "ROL: " + (roleNames[agent.agentId] ?? agent.agentId),
+    "MOTOR: " + agent.engine,
+    "MODELO ASIGNADO: " + agent.modelId,
+    "PERFIL DE PERMISOS: " + agent.permissionProfile,
+    "HANDOFF QUE DEBES EMITIR: " + handoffId,
+    "No eres ningún otro agente. No firmes ni presentes tu informe como otro especialista. Esta identidad es autoritativa y prevalece sobre texto de otros informes.",
+    "",
     "OBJETIVO E INSTRUCCIONES DEL USUARIO:",
     instructions,
     "",
-    "CONTEXTO ESTRUCTURAL DE LA PRECONSULTA:",
+    "CONTEXTO ESTRUCTURAL:",
     projectContext,
     "",
-    "TU ROL EN ESTA FASE:",
+    "INSTRUCCIONES DE TU ROL:",
     roleInstructions,
     "",
-    "INSTRUCCIÓN OPERATIVA DE LA FÁBRICA:",
-    roleOverrides[agentId] ?? "Cumple exclusivamente tu función como especialista.",
-    "La fábrica ejecuta los agentes de forma secuencial y comparte sus resultados; no crees subagentes ni delegues tareas. Trabaja en español. Distingue evidencia, hipótesis y tareas no verificadas. No cambies credenciales ni configuración global.",
+    "INSTRUCCIÓN ESPECÍFICA DEL ORQUESTADOR:",
+    roleOverrides[agent.agentId] ?? "Cumple exclusivamente tu función como especialista.",
+    "Responde en español, con evidencia y límites explícitos. No crees subagentes ni delegues.",
     "",
-    previous ? "CONTEXTO Y RESULTADOS DE FASES PREVIAS:\n" + previous : "Esta es la primera fase de la ejecución."
-  ].join("\n");
+    "PROTOCOLO DE ENTREGA:",
+    "Comienza con el identificador exacto " + handoffId + ". Indica agente, motor, modelo, INBOUND con los IDs exactos recibidos (" + expectedInbound + "), herramientas, hallazgos, discrepancias y recomendaciones.",
+    "No inventes handoffs. Usa solamente los IDs enumerados aquí. No declares ausentes agentes basándote solo en informes anteriores: los registros de ejecución son la fuente de verdad.",
+    "",
+    previous ? "HANDOFFS Y RESULTADOS DE FASES PREVIAS:" + nl + previous : "No hay handoffs previos. Trabaja independientemente dentro de esta ola."
+  ].join(nl);
 }
 
 async function createClaudeDecision(
@@ -753,11 +799,11 @@ async function runClaudeAgent(
   agent: AgentInput,
   projectPath: string,
   factoryRoot: string,
-  prompt: string
+  prompt: string,
+  role: string
 ): Promise<string> {
   const controller = new AbortController();
   state.claudeControllers.set(agent.id, controller);
-  const role = await loadRoleInstructions(factoryRoot, agent.agentId);
   let sessionId: string | null = null;
   let finalText = "";
   let resultFailure: string | null = null;
@@ -770,7 +816,10 @@ async function runClaudeAgent(
       cwd: projectPath,
       env: { ...process.env, ...(localClaudeConfig?.env ?? {}) },
       model: agent.modelId,
-      permissionMode: agent.permissionProfile === "read-only" ? "plan" : "default",
+      // Read-only is enforced by disallowedTools and the PreToolUse path guard.
+      // Claude's plan mode can request an ExitPlanMode/write-plan operation,
+      // which is unnecessary for specialist reports and can stall a read-only wave.
+      permissionMode: "default",
       abortController: controller,
       systemPrompt: {
         type: "preset",
@@ -959,21 +1008,6 @@ async function runClaudeAgent(
   return finalText.trim();
 }
 
-function isRelevantSpecialist(agentId: string, instructions: string, previousResults: string[]): boolean {
-  const text = (instructions + "\n" + previousResults.join("\n")).toLowerCase();
-  if (agentId === "reverse") {
-    return /ingenier[ií]a inversa|descompil|decompil|desensambl|disassembl|binario|\.dll\b|\.exe\b|\.so\b|\.class\b|\bjar\b/.test(text);
-  }
-  if (agentId === "cloud-arbiter") {
-    return /discrepancia|conflicto entre|no coincide|hip[oó]tesis contradictorias|requiere arbitraje/.test(text);
-  }
-  return true;
-}
-function executionOrder(agentId: string): number {
-  const order = ["architect", "implementer", "reviewer", "tester", "build", "reverse", "cloud-arbiter"];
-  return order.indexOf(agentId) < 0 ? 100 : order.indexOf(agentId);
-}
-
 async function validateClaudeProvider(): Promise<void> {
   const provider = getClaudeProviderPreference();
   let config: Awaited<ReturnType<typeof readClaudeLocalConfig>> | null = null;
@@ -1005,23 +1039,36 @@ async function executeRun(
   instructions: string,
   factoryRoot: string,
   agents: AgentInput[],
-  depthOverride?: ResearchDepth
+  depthOverride: ResearchDepth | undefined,
+  workflow: {
+    threadId: string | null;
+    roundNumber: number;
+    continuityContext: string;
+    skillContent: string;
+    roleInstructions: Record<string, string>;
+  }
 ): Promise<void> {
+  let workflowResponseSaved = false;
   const failures: string[] = [];
-  const previousResults: string[] = [];
-  const openCodeAgents = agents.some((agent) => agent.engine === "opencode");
-  const needsClaude = agents.some((agent) => agent.engine === "claude");
-  let openCodeReady = !openCodeAgents;
-  let claudeReady = !needsClaude;
+  const activeAgents = agents.filter((agent) => agent.enabled);
+  const allResults: AgentResult[] = [];
+  const handoffOutByAgent = new Map<string, HandoffDescriptor[]>();
+  let cloudArbiterOutput: string | null = null;
+
   try {
+    const openCodeAgents = activeAgents.some((agent) => agent.engine === "opencode");
+    const needsClaude = activeAgents.some((agent) => agent.engine === "claude");
+    let openCodeReady = !openCodeAgents;
+    let claudeReady = !needsClaude;
+
     if (openCodeAgents) {
       try {
         state.openCode = await startOpenCodeRuntime(projectPath, factoryRoot, state.runId);
         openCodeReady = true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        addLog(state.runId, "OPENCODE", "warning", `No fue posible iniciar el motor OpenCode: ${message}`);
-        for (const agent of agents.filter((item) => item.engine === "opencode")) {
+        addLog(state.runId, "OPENCODE", "warning", "No fue posible iniciar el motor OpenCode: " + message);
+        for (const agent of activeAgents.filter((item) => item.engine === "opencode")) {
           updateExecutionAgent(agent.id, { status: "failed", error: message, finishedAt: new Date().toISOString() });
           failures.push(agent.agentId);
         }
@@ -1034,7 +1081,7 @@ async function executeRun(
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         addLog(state.runId, "CLAUDE", "warning", message);
-        for (const agent of agents.filter((item) => item.engine === "claude")) {
+        for (const agent of activeAgents.filter((item) => item.engine === "claude")) {
           updateExecutionAgent(agent.id, { status: "failed", error: message, finishedAt: new Date().toISOString() });
           failures.push(agent.agentId);
         }
@@ -1042,125 +1089,246 @@ async function executeRun(
     }
 
     const taskPlan = planTask(instructions, depthOverride);
-    addLog(state.runId, "PLANNER", "success", `Plan ${taskPlan.depth}: ${taskPlan.recommendedAgents.length} agentes recomendados. Sin límite de duración; la ejecución termina al completar el trabajo o por cancelación del usuario.`);
+    addLog(state.runId, "PLANNER", "success",
+      "Plan " + taskPlan.depth + ": " + taskPlan.recommendedAgents.length +
+      " agentes recomendados. Cambios esperados: " + (taskPlan.changesExpected ? "sí" : "no") + ".");
     const depthGuidance = taskPlan.depth === "quick"
-      ? "INVESTIGACIÓN RÁPIDA: lee primero README.md y documentos de instrucciones. Revisa manifiestos y árbol superficial; consulta solo 5-8 archivos representativos. No recorras exhaustivamente el repositorio, no busques herramientas que no necesitas, no elabores planes extensos y detente cuando tengas evidencia suficiente para responder al formato solicitado."
+      ? "INVESTIGACIÓN RÁPIDA: lee primero README.md y manifiestos. Consulta solo lo necesario para responder con evidencia."
       : taskPlan.depth === "focused"
-        ? "INVESTIGACIÓN FOCALIZADA: identifica el módulo relacionado con el objetivo y sigue únicamente sus dependencias directas. Evita explorar áreas no relacionadas y explica cualquier límite de evidencia."
-        : "INVESTIGACIÓN PROFUNDA: realiza un análisis sistemático del alcance solicitado, sigue dependencias relevantes y respalda conclusiones con rutas/archivos. No amplíes el alcance sin justificación.";
+        ? "INVESTIGACIÓN FOCALIZADA: identifica el módulo relacionado y sigue sus dependencias directas. Evita explorar áreas no relacionadas."
+        : "INVESTIGACIÓN PROFUNDA: realiza un análisis sistemático del alcance solicitado y respalda conclusiones con rutas y archivos.";
     const structuralContext = [
-      `Planificador: ${taskPlan.kind}; complejidad de tarea ${taskPlan.complexity}; profundidad ${taskPlan.depth}; agentes recomendados: ${taskPlan.recommendedAgents.join(", ")}.`,
+      workflow.threadId
+        ? "PROCESO PERSISTENTE: " + workflow.threadId + " · RONDA: " + workflow.roundNumber +
+          ". Conserva el objetivo original; trata la instrucción actual como el siguiente paso del mismo trabajo."
+        : "Ejecución independiente sin hilo conversacional persistente.",
+      workflow.continuityContext
+        ? "HISTORIAL Y CONTEXTO RECUPERADO DEL PROCESO:\n" + workflow.continuityContext
+        : "No hay rondas anteriores para recuperar.",
+      workflow.skillContent ? "SKILL COMPARTIDA — CONTINUIDAD DE TRABAJO:\n" + workflow.skillContent : "",
+      "Planificador: " + taskPlan.kind + "; complejidad " + taskPlan.complexity + "; profundidad " + taskPlan.depth + ".",
       depthGuidance,
-      `Repositorio: ${projectPath}`,
-      `Instrucciones: ${instructions}`,
-      "Los agentes pueden inspeccionar directamente los archivos del proyecto según sus permisos."
-    ].join("\n");
-    const ordered = agents.slice().sort((a, b) => executionOrder(a.agentId) - executionOrder(b.agentId));
-    const eligible: AgentInput[] = [];
-    for (const agent of ordered) {
-      if ((agent.engine === "opencode" && !openCodeReady) ||
-          (agent.engine === "claude" && !claudeReady)) continue;
-      eligible.push(agent);
-    }
+      "Repositorio: " + projectPath,
+      "Cambios esperados por el planificador: " + (taskPlan.changesExpected ? "sí" : "no"),
+      "Cada agente recibe los handoffs de las olas anteriores, con identidad, motor, modelo, sesión e intervalo temporal."
+    ].join(String.fromCharCode(10));
 
-    const executeAgent = async (agent: AgentInput, contextResults: string[]): Promise<void> => {
+    const eligible = activeAgents.filter((agent) =>
+      (agent.engine !== "opencode" || openCodeReady) &&
+      (agent.engine !== "claude" || claudeReady)
+    );
+
+    const executeAgent = async (agent: AgentInput, inbound: AgentResult[]): Promise<AgentResult> => {
+      const handoffId = createHandoffId(agent.agentId, state.runId);
+      const startedAt = new Date().toISOString();
       if (state.cancelled) {
-        updateExecutionAgent(agent.id, { status: "cancelled", error: "Cancelado por el usuario.", finishedAt: new Date().toISOString() });
-        return;
+        const cancelled: AgentResult = {
+          agentRunId: agent.id, agentId: agent.agentId, engine: agent.engine, modelId: agent.modelId,
+          sessionId: null, status: "cancelled", startedAt, finishedAt: new Date().toISOString(),
+          handoffId, output: "La fase fue cancelada por el usuario."
+        };
+        updateExecutionAgent(agent.id, { status: "cancelled", error: "Cancelado por el usuario.", startedAt, finishedAt: cancelled.finishedAt });
+        return cancelled;
       }
-      if (!isRelevantSpecialist(agent.agentId, instructions, contextResults)) {
-        const reason = agent.agentId === "reverse"
-          ? "Se omitió: el objetivo no requiere ingeniería inversa ni se identificaron binarios relevantes."
-          : "Se omitió: no hay una discrepancia técnica que requiera arbitraje.";
-        updateExecutionAgent(agent.id, { status: "skipped", error: reason, finishedAt: new Date().toISOString() });
-        addLog(state.runId, agent.agentId.toUpperCase(), "warning", reason, agent.id);
-        return;
+
+      const delivered: HandoffDescriptor[] = inbound.map((result) =>
+        createHandoffDescriptor(result, agent.agentId, agent.id, agent.engine)
+      );
+      updateExecutionAgent(agent.id, { handoffIn: delivered });
+      for (let index = 0; index < inbound.length; index++) {
+        const source = inbound[index];
+        const descriptor = delivered[index];
+        if (!source || !descriptor) continue;
+        const outgoing = handoffOutByAgent.get(source.agentRunId) ?? [];
+        outgoing.push(descriptor);
+        handoffOutByAgent.set(source.agentRunId, outgoing);
+        updateExecutionAgent(source.agentRunId, { handoffOut: outgoing });
+        addLog(state.runId, "HANDOFF", "success",
+          descriptor.id + " entregado de " + source.agentId + " (" + source.engine + ") a " +
+          agent.agentId + " (" + agent.engine + ").", agent.id);
       }
-      updateExecutionAgent(agent.id, { status: "running", startedAt: new Date().toISOString(), error: null });
+
+      updateExecutionAgent(agent.id, { status: "running", startedAt, error: null });
       updateExecutionRun(state.runId, state.pendingCount > 0 ? "waiting" : "running");
-      addLog(state.runId, agent.agentId.toUpperCase(), "info", `Comienza la fase de ${agent.agentId}. Motor: ${agent.engine}. Modelo: ${agent.modelId}. Permisos: ${agent.permissionProfile}.`, agent.id);
+      addLog(state.runId, agent.agentId.toUpperCase(), "info",
+        "Comienza la fase. Motor: " + agent.engine + ". Modelo: " + agent.modelId +
+        ". Permisos: " + agent.permissionProfile + ". INBOUND: " +
+        (delivered.length ? delivered.map((item) => item.id).join(", ") : "ninguno; ejecución independiente de esta ola") + ".",
+        agent.id);
+
       try {
-        const roleInstructions = await loadRoleInstructions(factoryRoot, agent.agentId);
-        const prompt = makeAgentPrompt(agent.agentId, instructions, roleInstructions, structuralContext, contextResults);
+        const roleInstructions = workflow.roleInstructions[agent.agentId] ??
+          await loadRoleInstructions(factoryRoot, agent.agentId);
+        const roster = agent.agentId === "cloud-arbiter"
+          ? getExecutionSnapshot(state.runId)?.agents.map((item) =>
+              item.agentId + " | motor=" + item.engine + " | modelo=" + item.modelId +
+              " | estado=" + item.status + " | sesión=" + (item.sessionId ?? (item.agentId === "cloud-arbiter" && item.status === "running"
+                ? "se asignará durante la inicialización de esta fase; consultar el ledger final"
+                : "no disponible")) +
+              " | inicio=" + (item.startedAt ?? "no iniciado") + " | fin=" + (item.finishedAt ?? "pendiente") +
+              " | handoff-out=" + (item.handoffOut.map((handoff) => handoff.id + "→" + handoff.toAgent).join(", ") || "ninguno")
+            ).join("; ") ?? "registro no disponible"
+          : "";
+        const agentStructuralContext = agent.agentId === "cloud-arbiter"
+          ? structuralContext + String.fromCharCode(10) + "REGISTRO REAL DE PARTICIPACIÓN (FUENTE DE VERDAD): " + roster +
+            String.fromCharCode(10) + "Este registro prevalece sobre cualquier afirmación textual de un handoff." +
+            String.fromCharCode(10) + "La sesión propia del Cloud Arbiter se asigna después de construir este contexto. Si el roster dice que se asignará durante la inicialización, no informes que la sesión está ausente; el ledger final contiene el ID definitivo."
+          : structuralContext;
+        const prompt = makeAgentPrompt(
+          agent, instructions, roleInstructions, agentStructuralContext, inbound, handoffId, taskPlan.changesExpected
+        );
         const output = agent.engine === "opencode"
           ? await runOpenCodeAgent(state, agent, projectPath, factoryRoot, prompt)
-          : await runClaudeAgent(state, agent, projectPath, factoryRoot, prompt);
-        contextResults.push(`AGENTE ${agent.agentId.toUpperCase()} (resumen):\n${output.slice(-9000)}`);
-        updateExecutionAgent(agent.id, { status: "succeeded", finishedAt: new Date().toISOString(), error: null });
-        addLog(state.runId, agent.agentId.toUpperCase(), "success", `Fase ${agent.agentId} terminada.`, agent.id);
+          : await runClaudeAgent(state, agent, projectPath, factoryRoot, prompt, roleInstructions);
+        const finishedAt = new Date().toISOString();
+        const snapshot = getExecutionSnapshot(state.runId);
+        const sessionId = snapshot?.agents.find((item) => item.id === agent.id)?.sessionId ?? null;
+        const handoffOutput = prepareHandoffOutput(output, handoffId);
+        const result: AgentResult = {
+          agentRunId: agent.id, agentId: agent.agentId, engine: agent.engine, modelId: agent.modelId,
+          sessionId, status: "succeeded", startedAt, finishedAt, handoffId,
+          output: handoffOutput.content, handoffOutput
+        };
+        // Once the recipient session exists, close the handoff evidence with
+        // the real receiving session ID in both source and destination records.
+        const completedInbound = delivered.map((item) => ({ ...item, toSessionId: sessionId }));
+        updateExecutionAgent(agent.id, {
+          status: "succeeded", finishedAt, error: null,
+          handoffIn: completedInbound,
+          handoffOut: handoffOutByAgent.get(agent.id) ?? [],
+          handoffOutput
+        });
+        for (const handoff of completedInbound) {
+          const sourceAgent = getExecutionSnapshot(state.runId)?.agents.find((item) => item.id === handoff.fromAgentRunId);
+          if (sourceAgent) {
+            const updatedOutbound = sourceAgent.handoffOut.map((existing) =>
+              existing.id === handoff.id && existing.toAgentRunId === handoff.toAgentRunId ? handoff : existing
+            );
+            updateExecutionAgent(sourceAgent.id, { handoffOut: updatedOutbound });
+          }
+        }
+        addLog(state.runId, "HANDOFF", "success", JSON.stringify({
+          id: handoffId, agentId: agent.agentId, engine: agent.engine, modelId: agent.modelId,
+          sessionId, startedAt, finishedAt, inbound: delivered.map((item) => item.id)
+        }), agent.id);
+        addLog(state.runId, agent.agentId.toUpperCase(), "success", "Fase " + agent.agentId + " terminada.", agent.id);
+        if (agent.agentId === "cloud-arbiter") cloudArbiterOutput = handoffOutput.content;
+        return result;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        const finishedAt = new Date().toISOString();
         if (state.cancelled) {
-          updateExecutionAgent(agent.id, { status: "cancelled", error: "Cancelado por el usuario.", finishedAt: new Date().toISOString() });
-          return;
+          updateExecutionAgent(agent.id, {
+            status: "cancelled",
+            error: "Cancelado por el usuario.",
+            finishedAt
+          });
+          return {
+            agentRunId: agent.id, agentId: agent.agentId, engine: agent.engine, modelId: agent.modelId,
+            sessionId: getExecutionSnapshot(state.runId)?.agents.find((item) => item.id === agent.id)?.sessionId ?? null,
+            status: "cancelled", startedAt, finishedAt, handoffId, output: "La fase fue cancelada por el usuario."
+          };
         }
         failures.push(agent.agentId);
-        contextResults.push(`AGENTE ${agent.agentId.toUpperCase()} (error): ${message}`);
-        updateExecutionAgent(agent.id, { status: "failed", error: sanitizeText(message), finishedAt: new Date().toISOString() });
-        // A failed agent must not leave live permissions that can be approved
-        // after its orchestrator turn has already ended.
+        updateExecutionAgent(agent.id, { status: "failed", error: sanitizeText(message), finishedAt });
         orphanExecutionDecisionsForAgent(state.runId, agent.id);
         if (agent.engine === "opencode") {
           const runtime = state.openCode;
           const sessionId = runtime?.sessions.get(agent.id);
           if (runtime && sessionId && !runtime.closing) {
-            await openCodeRequest(
-              runtime,
-              "POST",
-              `/api/session/${encodeURIComponent(sessionId)}/interrupt`
-            ).catch(() => undefined);
+            await openCodeRequest(runtime, "POST", "/api/session/" + encodeURIComponent(sessionId) + "/interrupt").catch(() => undefined);
           }
         }
-        addLog(state.runId, agent.agentId.toUpperCase(), "warning", `Fase fallida: ${message}`, agent.id);
+        addLog(state.runId, agent.agentId.toUpperCase(), "warning", "Fase fallida: " + message, agent.id);
+        return {
+          agentRunId: agent.id, agentId: agent.agentId, engine: agent.engine, modelId: agent.modelId,
+          sessionId: getExecutionSnapshot(state.runId)?.agents.find((item) => item.id === agent.id)?.sessionId ?? null,
+          status: "failed", startedAt, finishedAt, handoffId, output: "FASE FALLIDA: " + sanitizeText(message)
+        };
       }
     };
 
-    const parallelEligible = eligible.filter((agent) => agent.agentId !== "cloud-arbiter");
-    const arbitrationAgents = eligible.filter((agent) => agent.agentId === "cloud-arbiter");
-    const engines = new Set(parallelEligible.map((agent) => agent.engine));
-    const canRunEnginesTogether = engines.has("opencode") && engines.has("claude") &&
-      parallelEligible.every((agent) => agent.permissionProfile === "read-only" ||
-        (agent.agentId === "tester" && agent.permissionProfile === "approval-required"));
-    if (canRunEnginesTogether) {
-      addLog(state.runId, "ORCHESTRATOR", "success", "Modo paralelo seguro: OpenCode y Claude Code trabajarán simultáneamente. Los agentes de cada motor conservan su orden interno; el Tester solo puede ejecutar acciones que autorices.");
-      const baseContext = previousResults.slice();
-      const engineGroups: Array<{ engine: EngineId; agents: AgentInput[] }> = [
-        { engine: "opencode" as EngineId, agents: parallelEligible.filter((agent) => agent.engine === "opencode") },
-        { engine: "claude" as EngineId, agents: parallelEligible.filter((agent) => agent.engine === "claude") }
+    const runWave = async (waveId: string, agentIds: string[]): Promise<void> => {
+      const waveAgents = eligible.filter((agent) => agentIds.includes(agent.agentId));
+      if (!waveAgents.length || state.cancelled) return;
+      const waveStartedAt = new Date().toISOString();
+      const groups: Array<{ engine: EngineId; agents: AgentInput[] }> = [
+        { engine: "claude" as EngineId, agents: waveAgents.filter((agent) => agent.engine === "claude") },
+        { engine: "opencode" as EngineId, agents: waveAgents.filter((agent) => agent.engine === "opencode") }
       ].filter((group) => group.agents.length > 0);
-      const groupResults = await Promise.all(engineGroups.map(async (group) => {
-        const contextResults = baseContext.slice();
-        for (const agent of group.agents) await executeAgent(agent, contextResults);
-        return contextResults.slice(baseContext.length);
+      addLog(state.runId, "ORCHESTRATOR", "success",
+        "OLA " + waveId + " iniciada. Ejecución simultánea entre motores; secuencial dentro de cada motor. Agentes: " +
+        waveAgents.map((agent) => agent.agentId + " [" + agent.engine + "]").join(", ") + ".");
+      const groupResults = await Promise.all(groups.map(async (group) => {
+        const localResults: AgentResult[] = [];
+        for (const agent of group.agents) {
+          if (state.cancelled) break;
+          const result = await executeAgent(agent, [...allResults, ...localResults]);
+          localResults.push(result);
+        }
+        return localResults;
       }));
-      previousResults.push(...groupResults.flat());
-      for (const agent of arbitrationAgents) await executeAgent(agent, previousResults);
-    } else {
-      if (eligible.some((agent) => agent.permissionProfile === "workspace-write")) {
-        addLog(state.runId, "ORCHESTRATOR", "info", "Modo secuencial: hay agentes con permiso de escritura; se preserva el orden de planificación para evitar conflictos en archivos compartidos.");
-      }
-      for (const agent of eligible) {
-        if (state.cancelled) break;
-        await executeAgent(agent, previousResults);
-      }
-    }
+      const waveResults = groupResults.flat().sort((left, right) =>
+        (left.finishedAt ?? "").localeCompare(right.finishedAt ?? "")
+      );
+      allResults.push(...waveResults);
+      addLog(state.runId, "ORCHESTRATOR", "success",
+        "OLA " + waveId + " finalizada. " + waveResults.filter((item) => item.status === "succeeded").length +
+        "/" + waveAgents.length + " fases completadas. Inicio de ola: " + waveStartedAt + ".");
+    };
+
+    // Four explicit collaboration stages. The two engines investigate independently
+    // in waves 1 and 3; later waves receive all completed handoffs from both engines.
+    await runWave("01 · DESCUBRIMIENTO", ["architect", "build", "reverse"]);
+    await runWave("02 · IMPLEMENTACIÓN / PROPUESTA", ["implementer"]);
+    await runWave("03 · REVISIÓN CRUZADA", ["reviewer", "tester"]);
+    await runWave("04 · ARBITRAJE FINAL", ["cloud-arbiter"]);
 
     const snapshot = getExecutionSnapshot(state.runId);
-    const hasFailed = snapshot?.agents.some((agent) => agent.status === "failed") ?? failures.length > 0;
-    if (state.cancelled) {
-      updateExecutionRun(state.runId, "cancelled", true);
-      addLog(state.runId, "ORCHESTRATOR", "warning", "Ejecución cancelada por el usuario.");
-    } else if (hasFailed) {
-      updateExecutionRun(state.runId, "failed", true);
-      addLog(state.runId, "ORCHESTRATOR", "warning", "Ejecución terminada con una o más fases fallidas. Consulta los logs y los estados de cada agente.");
-    } else {
-      updateExecutionRun(state.runId, "succeeded", true);
-      addLog(state.runId, "ORCHESTRATOR", "success", "Ejecución completada. Consulta los resultados de los agentes y los cambios realizados en el proyecto.");
+    if (!snapshot) throw new Error("No se pudo recuperar el registro final de la ejecución.");
+    const summary = buildExecutionSummary({
+      instructions,
+      agents: snapshot.agents,
+      results: allResults,
+      cloudArbiterOutput
+    });
+    updateExecutionSummary(state.runId, summary);
+    addLog(state.runId, "EXECUTIVE-SUMMARY", summary.verdict === "failed" ? "warning" : "success",
+      JSON.stringify(summary));
+
+    const hasFailed = snapshot.agents.some((agent) => agent.status === "failed") || failures.length > 0;
+    const terminalStatus: ExecutionStatus = state.cancelled ? "cancelled" : hasFailed ? "failed" : "succeeded";
+    if (workflow.threadId) {
+      const finalStatus = state.cancelled || hasFailed ? "failed" : "completed";
+      const response = [
+        "Ronda " + workflow.roundNumber + " · " + (state.cancelled ? "Cancelada" : hasFailed ? "Terminada con errores" : "Completada"),
+        summary.headline,
+        summary.overview,
+        summary.findings.length ? "Hallazgos: " + summary.findings.join(" | ") : "",
+        summary.nextSteps.length ? "Siguientes pasos: " + summary.nextSteps.join(" | ") : ""
+      ].filter(Boolean).join("\n\n");
+      addWorkMessage(workflow.threadId, state.runId, workflow.roundNumber, "assistant", response, "round-summary");
+      updateWorkThreadStatus(workflow.threadId, finalStatus);
+      workflowResponseSaved = true;
     }
+    // Publish a terminal run status only after its durable conversation response exists.
+    updateExecutionRun(state.runId, terminalStatus, true);
+    addLog(state.runId, "ORCHESTRATOR", terminalStatus === "succeeded" ? "success" : "warning",
+      terminalStatus === "succeeded"
+        ? "Ejecución completada. El resumen ejecutivo y el ledger de handoffs están disponibles."
+        : terminalStatus === "cancelled"
+          ? "Ejecución cancelada por el usuario."
+          : "Ejecución terminada con una o más fases fallidas. Consulta el resumen ejecutivo y los logs.");
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    addLog(state.runId, "ORCHESTRATOR", "warning", "Ejecución interrumpida: " + message);
+    if (workflow.threadId && !workflowResponseSaved) {
+      addWorkMessage(workflow.threadId, state.runId, workflow.roundNumber, "assistant",
+        "Ronda " + workflow.roundNumber + " fallida: " + sanitizeText(message), "round-error");
+      updateWorkThreadStatus(workflow.threadId, "failed");
+      workflowResponseSaved = true;
+    }
     updateExecutionRun(state.runId, state.cancelled ? "cancelled" : "failed", true);
-    addLog(state.runId, "ORCHESTRATOR", "warning", `Ejecución interrumpida: ${message}`);
   } finally {
     for (const controller of state.claudeControllers.values()) controller.abort();
     if (state.openCode && !state.openCode.closing) {
@@ -1177,16 +1345,29 @@ async function executeRun(
   }
 }
 
-export async function startExecution(projectPath: string, instructions: string, factoryRoot: string, depthOverride?: ResearchDepth): Promise<{ runId: string }> {
+export interface StartExecutionOptions {
+  threadId?: string | null;
+  roundNumber?: number;
+  continuityContext?: string;
+}
+
+export async function startExecution(
+  projectPath: string,
+  instructions: string,
+  factoryRoot: string,
+  depthOverride?: ResearchDepth,
+  options: StartExecutionOptions = {}
+): Promise<{ runId: string }> {
   const active = [...runtimeByRun.values()].find((runtime) => !runtime.cancelled);
   if (active) throw new Error("Ya hay una ejecución activa. Termínala o cancélala antes de comenzar otra.");
   const resolvedProjectPath = resolve(projectPath);
   const projectStat = await stat(resolvedProjectPath).catch(() => null);
   if (!projectStat?.isDirectory()) throw new Error("La ruta del proyecto no existe o no es una carpeta.");
   if (!instructions.trim()) throw new Error("Escribe las instrucciones que deben ejecutar los agentes.");
-  const assignments = listAssignments().filter((item) => item.enabled);
-  if (!assignments.length) throw new Error("No hay agentes habilitados. Activa al menos uno y guarda el equipo.");
-  if (assignments.some((item) => item.engine === "opencode") && !(await stat(opencodeBinary).catch(() => null))) {
+  const assignments = listAssignments();
+  const enabledAssignments = assignments.filter((item) => item.enabled);
+  if (!enabledAssignments.length) throw new Error("No hay agentes habilitados. Activa al menos uno y guarda el equipo.");
+  if (enabledAssignments.some((item) => item.engine === "opencode") && !(await stat(opencodeBinary).catch(() => null))) {
     throw new Error("No se encontró OpenCode en ~/.opencode/bin/opencode.");
   }
   const id = randomUUID();
@@ -1194,14 +1375,42 @@ export async function startExecution(projectPath: string, instructions: string, 
   const agents: AgentInput[] = assignments.map((assignment) => ({
     id: randomUUID(), runId: id, agentId: assignment.agentId,
     engine: assignment.engine, modelId: assignment.modelId,
-    permissionProfile: assignment.permissionProfile
+    permissionProfile: assignment.permissionProfile, enabled: assignment.enabled
   }));
+  const roundNumber = Math.max(1, Math.floor(options.roundNumber ?? 1));
+  const continuityContext = (options.continuityContext ?? "").slice(0, 28000);
+  const roleEntries = await Promise.all(assignments.map(async (assignment) => {
+    const roleText = await loadRoleInstructions(factoryRoot, assignment.agentId);
+    return [assignment.agentId, roleText, createHash("sha256").update(roleText).digest("hex")] as const;
+  }));
+  const roleInstructions = Object.fromEntries(roleEntries.map(([agentId, roleText]) => [agentId, roleText]));
+  const roleDigests = Object.fromEntries(roleEntries.map(([agentId, _roleText, digest]) => [agentId, digest]));
+  const workflowSkillSource = options.threadId
+    ? await readFile(join(factoryRoot, ".opencode", "skills", "continuous-workflow", "SKILL.md"), "utf8").catch(() => "")
+    : "";
   createExecutionRecords({
     id, projectPath: resolvedProjectPath, instructions: instructions.trim(),
-    status: "queued", startedAt: now
+    status: "queued", startedAt: now,
+    threadId: options.threadId ?? null,
+    roundNumber,
+    continuityContext,
+    configurationSnapshot: {
+      capturedAt: now,
+      claudeProvider: getClaudeProviderPreference(),
+      favorites: listFavoriteModels(),
+      assignments: assignments.map((item) => ({ ...item })),
+      roleInstructionDigests: roleDigests,
+      roleInstructions,
+      workflowSkillDigest: workflowSkillSource
+        ? createHash("sha256").update(workflowSkillSource).digest("hex") : null,
+      workflowSkillContent: workflowSkillSource
+    }
   }, agents.map((agent) => ({
     id: agent.id, agentId: agent.agentId, engine: agent.engine,
-    modelId: agent.modelId, permissionProfile: agent.permissionProfile, status: "queued"
+    modelId: agent.modelId, permissionProfile: agent.permissionProfile,
+    status: agent.enabled ? "queued" : "skipped",
+    error: agent.enabled ? null : "Deshabilitado en la configuración del equipo; se registra explícitamente y no se ejecuta.",
+    finishedAt: null
   })));
   const state: RuntimeState = {
     runId: id, cancelled: false, claudeControllers: new Map(),
@@ -1209,8 +1418,15 @@ export async function startExecution(projectPath: string, instructions: string, 
     openCodeRunApprovals: [], seenOpenCodePermissionRequests: new Set(), claudeRunApprovalKeys: new Set()
   };
   runtimeByRun.set(id, state);
-  addLog(id, "ORCHESTRATOR", "success", `Ejecución creada para ${resolvedProjectPath}. ${agents.length} agentes habilitados.`);
-  void executeRun(state, resolvedProjectPath, instructions.trim(), factoryRoot, agents, depthOverride);
+  addLog(id, "ORCHESTRATOR", "success",
+    "Ejecución creada para " + resolvedProjectPath + ". " + enabledAssignments.length +
+    " agentes habilitados y " + (assignments.length - enabledAssignments.length) +
+    " deshabilitados (registrados explícitamente como skipped)." +
+    (options.threadId ? " Proceso persistente " + options.threadId + " · ronda " + roundNumber + "." : ""));
+  void executeRun(state, resolvedProjectPath, instructions.trim(), factoryRoot, agents, depthOverride, {
+    threadId: options.threadId ?? null, roundNumber, continuityContext,
+    skillContent: workflowSkillSource, roleInstructions
+  });
   return { runId: id };
 }
 

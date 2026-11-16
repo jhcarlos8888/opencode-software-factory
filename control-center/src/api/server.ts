@@ -3,10 +3,17 @@ import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadFactoryAssets, mergeAssignments } from "./factory.js";
-import { databaseInfo, getClaudeProviderPreference, getProjectPreferences, listAssignments, listFavoriteModels, saveAssignments, saveClaudeProviderPreference, saveFavoriteModels, saveProjectPreferences, synchronizeConfiguredClaudeModel, type AgentAssignment, type ClaudeProviderId, type EngineId, type FavoriteModel, type ModelTier, type PermissionProfile } from "./database.js";
+import {
+  addWorkMessage, createWorkThread, databaseInfo, getClaudeProviderPreference, getExecutionAgentHandoffOutput, getProjectPreferences,
+  getWorkThreadSnapshot, listAssignments, listFavoriteModels, saveAssignments, saveClaudeProviderPreference,
+  saveFavoriteModels, saveProjectPreferences, synchronizeConfiguredClaudeModel, updateWorkThreadStatus,
+  type AgentAssignment, type ClaudeProviderId, type EngineId, type FavoriteModel, type ModelTier, type PermissionProfile,
+  type WorkThreadSnapshot
+} from "./database.js";
 import { getClaudeModels, getDetectedClaudeProvider, getEngineVersion, getOpenCodeModels, readClaudeLocalConfig, listModels } from "./models.js";
 import { analyzeProject } from "./projects.js";
 import { cancelExecution, getExecution, getLatestExecution, recoverExecutionState, respondExecutionDecision, startExecution } from "./execution.js";
@@ -467,9 +474,126 @@ app.post<{ Body: { path?: string; instructions?: string } }>("/api/projects/anal
   }
 });
 
+function buildContinuityContext(workflow: WorkThreadSnapshot): string {
+  const sections: string[] = [
+    "PROCESO PRINCIPAL: " + workflow.thread.id,
+    "PROYECTO: " + workflow.thread.projectPath,
+    "OBJETIVO ORIGINAL (no reemplazar):",
+    workflow.thread.objective,
+    "",
+    "HISTORIAL CONVERSACIONAL PERSISTIDO:"
+  ];
+  const messages = workflow.messages.slice(-24);
+  for (const message of messages) {
+    sections.push(
+      "[" + message.createdAt + " · ronda " + message.roundNumber + " · " + message.role + " · " + message.kind + "]",
+      message.content
+    );
+  }
+  sections.push("", "RESULTADOS DE RONDAS ANTERIORES:");
+  for (const round of workflow.rounds.slice(-4)) {
+    sections.push(
+      "RONDA " + round.run.roundNumber + " · " + round.run.status +
+      " · ejecución " + round.run.id,
+      "Instrucción: " + round.run.instructions
+    );
+    if (round.run.summary) {
+      sections.push(
+        "Resumen: " + round.run.summary.headline,
+        round.run.summary.overview,
+        "Hallazgos: " + round.run.summary.findings.join(" | "),
+        "Próximos pasos: " + round.run.summary.nextSteps.join(" | ")
+      );
+    }
+    sections.push("CONFIGURACIÓN HISTÓRICA DE ESTA RONDA:");
+    if (round.run.configurationSnapshot) {
+      sections.push(
+        "Capturada: " + round.run.configurationSnapshot.capturedAt,
+        "Proveedor Claude: " + round.run.configurationSnapshot.claudeProvider,
+        "Favoritos: " + round.run.configurationSnapshot.favorites.map((item) =>
+          item.engine + "/" + item.modelId + " (" + item.tier + ")"
+        ).join(", "),
+        "Huella Skill: " + (round.run.configurationSnapshot.workflowSkillDigest ?? "no disponible"),
+        "Huellas SHA-256 de instrucciones usadas: " + Object.entries(round.run.configurationSnapshot.roleInstructionDigests)
+          .map(([agentId, digest]) => agentId + "=" + digest).join(", "),
+        "Asignaciones efectivas: " + round.run.configurationSnapshot.assignments.map((item) =>
+          item.agentId + "=" + (item.enabled ? item.engine + "/" + item.modelId : "disabled") +
+          "/" + item.permissionProfile
+        ).join(", ")
+      );
+    }
+    sections.push("DECISIONES Y APROBACIONES REGISTRADAS:");
+    for (const decision of round.decisionHistory) {
+      sections.push(
+        decision.createdAt + " · " + decision.engine + " · " + decision.kind +
+        " · " + decision.status + " · " + decision.title +
+        (decision.response ? " · respuesta: " + decision.response : "")
+      );
+    }
+    sections.push("Participación y configuración histórica:");
+    for (const agent of round.agents) {
+      sections.push(
+        agent.agentId + " · " + agent.engine + " · " + agent.modelId + " · " + agent.status +
+        " · permisos " + agent.permissionProfile +
+        " · sesión " + (agent.sessionId ?? "no disponible") +
+        " · handoffs recibidos " + agent.handoffIn.map((item) => item.id).join(", ") +
+        " · handoffs emitidos " + agent.handoffOut.map((item) => item.id).join(", ")
+      );
+    }
+    const relevantEvents = round.events.filter((event) =>
+      event.kind === "success" &&
+      !["ORCHESTRATOR", "HANDOFF", "EXECUTIVE-SUMMARY", "PLANNER"].includes(event.area)
+    );
+    const perAgent = new Map<string, string[]>();
+    for (const event of relevantEvents) {
+      const items = perAgent.get(event.area) ?? [];
+      items.push(event.message);
+      perAgent.set(event.area, items);
+    }
+    for (const [agent, outputs] of perAgent) {
+      sections.push("EVIDENCIA DEL AGENTE " + agent + ":");
+      for (const output of outputs.slice(-2)) sections.push(output.slice(0, 1800));
+    }
+    sections.push("---");
+  }
+  const full = sections.join("\n");
+  // Keep the most recent conversation and evidence while retaining the original objective.
+  if (full.length <= 26000) return full;
+  const header = sections.slice(0, 5).join("\n") + "\n[Se conserva el objetivo original; parte del historial antiguo queda disponible en el registro persistente.]\n";
+  return header + full.slice(-(26000 - header.length));
+}
+
+function presentWorkThread(workflow: WorkThreadSnapshot): WorkThreadSnapshot {
+  return {
+    thread: workflow.thread,
+    messages: workflow.messages,
+    rounds: workflow.rounds.map((round) => ({
+      ...round,
+      run: { ...round.run, continuityContext: "" },
+      events: round.events.slice(-60).map((event) => ({ ...event, message: event.message.slice(0, 2200) })),
+      decisions: []
+    }))
+  };
+}
+
+app.get<{ Params: { threadId: string } }>("/api/work-threads/:threadId", async (request, reply) => {
+  const workflow = getWorkThreadSnapshot(request.params.threadId);
+  if (!workflow) return reply.code(404).send({ error: "Proceso de trabajo no encontrado." });
+  return { workflow: presentWorkThread(workflow) };
+});
+
 app.get("/api/executions/latest", async () => ({
   execution: getLatestExecution()
 }));
+
+app.get<{ Params: { runId: string; agentRunId: string } }>(
+  "/api/executions/:runId/agents/:agentRunId/handoff-output",
+  async (request, reply) => {
+    const handoffOutput = getExecutionAgentHandoffOutput(request.params.runId, request.params.agentRunId);
+    if (!handoffOutput) return reply.code(404).send({ error: "El informe del agente no está disponible." });
+    return { handoffOutput };
+  }
+);
 
 app.get<{ Params: { runId: string } }>("/api/executions/:runId", async (request, reply) => {
   const execution = getExecution(request.params.runId);
@@ -498,13 +622,83 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; taskDepth?: unknown }
       error: `No se puede iniciar: el agente ${nonFavorite.agentId} tiene asignado ${nonFavorite.modelId}, que no está marcado como favorito.`
     });
   }
+  let createdThreadId: string | null = null;
   try {
     await analyzeProject(projectPath, instructions);
     saveProjectPreferences(projectPath, instructions);
-    const result = await startExecution(projectPath, instructions, factoryRoot, taskDepth as "quick" | "focused" | "deep" | undefined);
-    return reply.code(202).send({ started: true, runId: result.runId, execution: getExecution(result.runId) });
+    const threadId = randomUUID();
+    createdThreadId = threadId;
+    createWorkThread({ id: threadId, projectPath, objective: instructions });
+    addWorkMessage(threadId, null, 1, "user", instructions, "initial-instruction");
+    const result = await startExecution(projectPath, instructions, factoryRoot, taskDepth as "quick" | "focused" | "deep" | undefined, {
+      threadId, roundNumber: 1
+    });
+    return reply.code(202).send({
+      started: true, runId: result.runId, threadId, execution: getExecution(result.runId),
+      workflow: presentWorkThread(getWorkThreadSnapshot(threadId)!)
+    });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (createdThreadId) {
+      addWorkMessage(createdThreadId, null, 1, "assistant", "No se pudo iniciar la ejecución: " + message, "start-error");
+      updateWorkThreadStatus(createdThreadId, "failed");
+    }
+    return reply.code(409).send({ error: message });
+  }
+});
+
+app.post<{
+  Params: { threadId: string };
+  Body: { instructions?: unknown; taskDepth?: unknown };
+}>("/api/work-threads/:threadId/continue", async (request, reply) => {
+  const workflow = getWorkThreadSnapshot(request.params.threadId);
+  if (!workflow) return reply.code(404).send({ error: "Proceso de trabajo no encontrado." });
+  const instructions = typeof request.body?.instructions === "string"
+    ? request.body.instructions.trim().slice(0, 12000) : "";
+  if (!instructions) return reply.code(400).send({ error: "Escribe la siguiente instrucción para continuar el proceso." });
+  const latestRound = workflow.rounds.at(-1);
+  if (latestRound && ["queued", "running", "waiting"].includes(latestRound.run.status)) {
+    return reply.code(409).send({ error: "La ronda actual todavía está activa. Puedes continuar cuando termine." });
+  }
+  const taskDepth = request.body?.taskDepth;
+  if (taskDepth !== undefined && !["quick", "focused", "deep"].includes(String(taskDepth))) {
+    return reply.code(400).send({ error: "Profundidad de tarea inválida." });
+  }
+  const nonFavorite = findNonFavoriteAssignment(listAssignments().filter((item) => item.enabled));
+  if (nonFavorite) {
+    return reply.code(409).send({
+      error: `No se puede continuar: el agente ${nonFavorite.agentId} tiene asignado ${nonFavorite.modelId}, que no está marcado como favorito.`
+    });
+  }
+  const latestRecordedNumber = Math.max(
+    latestRound?.run.roundNumber ?? 0,
+    ...workflow.messages.map((message) => message.roundNumber)
+  );
+  const roundNumber = latestRecordedNumber + 1;
+  const continuityContext = buildContinuityContext(workflow);
+  try {
+    if (!existsSync(workflow.thread.projectPath) || !statSync(workflow.thread.projectPath).isDirectory()) {
+      return reply.code(409).send({ error: "El proyecto original ya no está disponible en esa ruta." });
+    }
+    addWorkMessage(request.params.threadId, null, roundNumber, "user", instructions, "continuation-instruction");
+    updateWorkThreadStatus(request.params.threadId, "active");
+    const result = await startExecution(
+      workflow.thread.projectPath,
+      instructions,
+      factoryRoot,
+      taskDepth as "quick" | "focused" | "deep" | undefined,
+      { threadId: request.params.threadId, roundNumber, continuityContext }
+    );
+    return reply.code(202).send({
+      started: true, runId: result.runId, threadId: request.params.threadId,
+      execution: getExecution(result.runId),
+      workflow: presentWorkThread(getWorkThreadSnapshot(request.params.threadId)!)
+    });
+  } catch (error) {
+    updateWorkThreadStatus(request.params.threadId, "failed");
+    const message = error instanceof Error ? error.message : String(error);
+    addWorkMessage(request.params.threadId, null, roundNumber, "assistant",
+      "No se pudo iniciar esta ronda: " + message, "start-error");
     return reply.code(409).send({ error: message });
   }
 });
