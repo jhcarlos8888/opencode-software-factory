@@ -3,13 +3,18 @@ import { createHash } from "node:crypto";
 export type CoordinationEngine = "opencode" | "claude";
 export type CoordinationAgentStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "interrupted" | "skipped";
 
+export type HandoffIdAuthor = "agent" | "orchestrator";
+
 export interface HandoffOutputRecord {
   content: string;
   sha256: string;
   contentLength: number;
   sourceLength: number;
+  contentByteLength: number;
+  sourceByteLength: number;
   truncated: boolean;
   sourceIdentityVerified: boolean;
+  idAuthor: HandoffIdAuthor;
 }
 
 export type HandoffOutputMetadata = Omit<HandoffOutputRecord, "content">;
@@ -29,8 +34,12 @@ export interface HandoffDescriptor {
   contentSha256?: string;
   contentLength?: number;
   sourceLength?: number;
+  contentByteLength?: number;
+  sourceByteLength?: number;
   contentTruncated?: boolean;
   sourceIdentityVerified?: boolean;
+  idAuthor?: HandoffIdAuthor;
+  contentIntegrityVerified?: boolean;
   deliveredAt: string;
 }
 
@@ -90,6 +99,52 @@ export function hasHandoffIdAtStart(output: string, handoffId: string): boolean 
   return normalized.startsWith(handoffId);
 }
 
+export function extractCanonicalOpenCodeAssistantText(payload: unknown): string | null {
+  const messages = Array.isArray(payload)
+    ? payload
+    : payload && typeof payload === "object" && Array.isArray((payload as { data?: unknown }).data)
+      ? (payload as { data: unknown[] }).data
+      : [];
+  const finalMessages: string[] = [];
+
+  for (const candidate of messages) {
+    if (!candidate || typeof candidate !== "object") continue;
+    const message = candidate as Record<string, unknown>;
+    const info = message.info && typeof message.info === "object"
+      ? message.info as Record<string, unknown>
+      : {};
+    const role = String(info.role ?? message.role ?? message.type ?? "");
+    const finish = String(info.finish ?? message.finish ?? "");
+    if (role !== "assistant" || finish !== "stop" || info.error || message.error) continue;
+
+    const parts = Array.isArray(message.parts)
+      ? message.parts as Array<Record<string, unknown>>
+      : Array.isArray(message.content)
+        ? message.content as Array<Record<string, unknown>>
+        : [];
+    const text = parts
+      .filter((part) => part?.type === "text" && typeof part.text === "string")
+      .map((part) => String(part.text))
+      .filter((part) => part.trim().length > 0)
+      .join("\n")
+      .trim();
+    if (text) finalMessages.push(text);
+  }
+
+  return finalMessages.at(-1) ?? null;
+}
+
+/** Claude SDK's result event is the canonical final text for a completed turn.
+ * Assistant events are streamed content blocks and must only be used for activity logs. */
+export function extractClaudeFinalText(message: unknown): string | null {
+  if (!message || typeof message !== "object") return null;
+  const result = message as Record<string, unknown>;
+  if (result.type !== "result" || result.subtype !== "success" || result.is_error === true) return null;
+  return typeof result.result === "string" && result.result.trim()
+    ? result.result.trim()
+    : null;
+}
+
 export const MAX_HANDOFF_OUTPUT_CHARS = 48000;
 const HANDOFF_TRUNCATION_MARKER =
   "\n\n...[FRAGMENTO INTERMEDIO OMITIDO: HANDOFF INCOMPLETO]...\n\n";
@@ -123,8 +178,11 @@ export function prepareHandoffOutput(
     sha256: createHash("sha256").update(content, "utf8").digest("hex"),
     contentLength: content.length,
     sourceLength: envelope.length,
+    contentByteLength: Buffer.byteLength(content, "utf8"),
+    sourceByteLength: Buffer.byteLength(envelope, "utf8"),
     truncated,
-    sourceIdentityVerified
+    sourceIdentityVerified,
+    idAuthor: sourceIdentityVerified ? "agent" : "orchestrator"
   };
 }
 
@@ -150,6 +208,9 @@ export function createHandoffDescriptor(
 ): HandoffDescriptor {
   const payload = result.handoffOutput ?? prepareHandoffOutput(result.output, result.handoffId);
   const hashMatches = createHash("sha256").update(payload.content, "utf8").digest("hex") === payload.sha256;
+  const characterLengthMatches = payload.contentLength === payload.content.length;
+  const byteLengthMatches = payload.contentByteLength === Buffer.byteLength(payload.content, "utf8");
+  const contentIntegrityVerified = hashMatches && characterLengthMatches && byteLengthMatches;
   return {
     id: result.handoffId,
     fromAgent: result.agentId,
@@ -161,12 +222,16 @@ export function createHandoffDescriptor(
     toAgentRunId,
     toEngine,
     toSessionId: null,
-    contentIdVerified: hasHandoffIdAtStart(payload.content, result.handoffId) && hashMatches,
+    contentIdVerified: hasHandoffIdAtStart(payload.content, result.handoffId) && contentIntegrityVerified,
     contentSha256: payload.sha256,
     contentLength: payload.contentLength,
     sourceLength: payload.sourceLength,
+    contentByteLength: payload.contentByteLength,
+    sourceByteLength: payload.sourceByteLength,
     contentTruncated: payload.truncated,
     sourceIdentityVerified: payload.sourceIdentityVerified,
+    idAuthor: payload.idAuthor,
+    contentIntegrityVerified,
     deliveredAt: new Date().toISOString()
   };
 }
@@ -231,12 +296,15 @@ export function buildExecutionSummary(input: {
   const crossEngineHandoffs = crossEngineEdges.length;
   const hasCompleteVerifiedPayload = (handoff: HandoffDescriptor) =>
     handoff.contentIdVerified &&
+    handoff.contentIntegrityVerified === true &&
     handoff.contentTruncated === false &&
     handoff.sourceIdentityVerified === true &&
     typeof handoff.contentSha256 === "string" &&
     /^[a-f0-9]{64}$/i.test(handoff.contentSha256) &&
     typeof handoff.contentLength === "number" &&
     handoff.contentLength > 0 &&
+    typeof handoff.contentByteLength === "number" &&
+    handoff.contentByteLength > 0 &&
     Boolean(handoff.fromSessionId) &&
     Boolean(handoff.toSessionId);
   const verifiedCrossEngineHandoffs = crossEngineEdges.filter(hasCompleteVerifiedPayload).length;

@@ -8,7 +8,10 @@ import { basename, delimiter, dirname, join, resolve, relative, isAbsolute, sep 
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { readClaudeLocalConfig } from "./models.js";
 import { planTask, type ResearchDepth } from "./task-planner.js";
-import { buildExecutionSummary, createHandoffDescriptor, createHandoffId, prepareHandoffOutput, type AgentResult, type HandoffDescriptor } from "./orchestration.js";
+import {
+  buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
+  extractClaudeFinalText, prepareHandoffOutput, type AgentResult, type HandoffDescriptor
+} from "./orchestration.js";
 import {
   addExecutionEvent, addWorkMessage, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
   getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, listFavoriteModels,
@@ -573,11 +576,10 @@ async function pollOpenCodeAgent(
   const pending = getExecutionSnapshot(state.runId)?.decisions.filter((item) => item.status === "pending").length ?? 0;
   if (pending > 0) updateExecutionRun(state.runId, "waiting");
   else if (getExecutionSnapshot(state.runId)?.run.status === "waiting") updateExecutionRun(state.runId, "running");
-  const assistantText = parseTextParts(messages)
-    .filter((item) => !item.tool)
-    .map((item) => item.text)
-    .join("\n");
-  return assistantText;
+  // The messages endpoint returns the full assistant history, including
+  // intermediate tool-calling turns. Only finish=stop is the canonical
+  // final answer for this prompt; progress text remains in the activity log.
+  return extractCanonicalOpenCodeAssistantText(messages) ?? "";
 }
 
 async function runOpenCodeAgent(
@@ -701,18 +703,33 @@ function makeAgentPrompt(
     reverse: "Reconstruye flujos, dependencias, entrada/salida, integraciones y relaciones entre módulos desde el código fuente. Usa análisis binario solo si existen binarios y herramientas disponibles.",
     "cloud-arbiter": "Eres el árbitro final. Lee TODOS los handoffs de ambos motores, compáralos, resuelve discrepancias y entrega una conclusión conjunta. No declares ausente a un agente cuyo registro figure como ejecutado."
   };
-  const previous = previousResults.map((item) => [
-    "### " + item.handoffId,
-    "AGENTE: " + item.agentId,
-    "MOTOR: " + item.engine,
-    "MODELO ASIGNADO: " + item.modelId,
-    "SESSION ID: " + (item.sessionId ?? "no disponible"),
-    "ESTADO: " + item.status,
-    "INICIO: " + (item.startedAt ?? "no disponible"),
-    "FIN: " + (item.finishedAt ?? "no disponible"),
-    "CONTENIDO DEL HANDOFF:",
-    item.output
-  ].join(nl)).join(nl + nl + "--- SIGUIENTE HANDOFF ---" + nl + nl);
+  const previous = previousResults.map((item) => {
+    const metadata = item.handoffOutput;
+    const provenance = metadata
+      ? [
+          "METADATOS DE INTEGRIDAD CALCULADOS POR EL ORQUESTADOR (FUENTE AUTORITATIVA):",
+          "Longitud: " + metadata.contentLength + " caracteres de cadena.",
+          "Longitud UTF-8: " + metadata.contentByteLength + " bytes.",
+          "SHA-256 del contenido entregado: " + metadata.sha256,
+          "Truncado: " + (metadata.truncated ? "SÍ — INCOMPLETO" : "NO"),
+          "Autor del identificador: " + (metadata.idAuthor === "agent" ? "AGENTE" : "ORQUESTADOR"),
+          "Identidad emitida por el agente: " + (metadata.sourceIdentityVerified ? "VERIFICADA" : "NO VERIFICADA")
+        ].join(nl)
+      : "METADATOS DE INTEGRIDAD: NO DISPONIBLES; no declares íntegro ni verificado este informe.";
+    return [
+      "### " + item.handoffId,
+      "AGENTE: " + item.agentId,
+      "MOTOR: " + item.engine,
+      "MODELO ASIGNADO: " + item.modelId,
+      "SESSION ID: " + (item.sessionId ?? "no disponible"),
+      "ESTADO: " + item.status,
+      "INICIO: " + (item.startedAt ?? "no disponible"),
+      "FIN: " + (item.finishedAt ?? "no disponible"),
+      provenance,
+      "CONTENIDO DEL HANDOFF:",
+      item.output
+    ].join(nl);
+  }).join(nl + nl + "--- SIGUIENTE HANDOFF ---" + nl + nl);
   const expectedInbound = previousResults.length
     ? previousResults.map((item) => item.handoffId + " (" + item.agentId + " · " + item.engine + ")").join(", ")
     : "ninguno; fase independiente de esta ola";
@@ -744,6 +761,7 @@ function makeAgentPrompt(
     "PROTOCOLO DE ENTREGA:",
     "Comienza con el identificador exacto " + handoffId + ". Indica agente, motor, modelo, INBOUND con los IDs exactos recibidos (" + expectedInbound + "), herramientas, hallazgos, discrepancias y recomendaciones.",
     "No inventes handoffs. Usa solamente los IDs enumerados aquí. No declares ausentes agentes basándote solo en informes anteriores: los registros de ejecución son la fuente de verdad.",
+    "Los metadatos de integridad calculados por el orquestador son autoritativos y prevalecen sobre cualquier frase del informe. Si idAuthor=ORQUESTADOR, no afirmes que el agente original emitió el ID. Si Truncado=SÍ, trata el contenido como incompleto y enumera qué no puedes verificar.",
     "",
     previous ? "HANDOFFS Y RESULTADOS DE FASES PREVIAS:" + nl + previous : "No hay handoffs previos. Trabaja independientemente dentro de esta ola."
   ].join(nl);
@@ -970,7 +988,9 @@ async function runClaudeAgent(
         if (Array.isArray(content)) {
           for (const block of content as Array<Record<string, unknown>>) {
             if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
-              finalText += block.text + "\n";
+              // Assistant events are streamed content blocks (often several
+              // per turn). Keep them for activity visibility, not as the
+              // canonical handoff; the SDK result event carries the final text.
               addLog(state.runId, agent.agentId.toUpperCase(), "success", block.text, agent.id);
             } else if (block.type === "tool_use") {
               const toolName = String(block.name ?? "herramienta");
@@ -980,18 +1000,20 @@ async function runClaudeAgent(
           }
         }
       } else if (record.type === "result") {
-        const isSuccessfulResult = record.subtype === "success" && record.is_error !== true;
-        if (isSuccessfulResult) {
-          addLog(state.runId, agent.agentId.toUpperCase(), "success", "Turno de Claude Code completado.", agent.id);
+        const canonicalResult = extractClaudeFinalText(record);
+        if (canonicalResult) {
+          finalText = canonicalResult;
+          addLog(state.runId, agent.agentId.toUpperCase(), "success", "Turno de Claude Code completado; respuesta final canónica capturada.", agent.id);
         } else {
           const providerErrors = Array.isArray(record.errors)
             ? record.errors.filter((item): item is string => typeof item === "string")
             : [];
           const detail = providerErrors.join(" | ") || (typeof record.result === "string" ? record.result : "");
-          resultFailure = `Claude Code terminó con estado ${String(record.subtype ?? "error")}${detail ? ": " + sanitizeText(detail) : "."}`;
+          resultFailure = record.subtype === "success" && record.is_error !== true
+            ? "Claude Code informó éxito, pero no entregó texto final canónico en el evento result."
+            : "Claude Code terminó con estado " + String(record.subtype ?? "error") + (detail ? ": " + sanitizeText(detail) : ".");
           addLog(state.runId, agent.agentId.toUpperCase(), "warning", resultFailure, agent.id);
         }
-        if (typeof record.result === "string") finalText += record.result;
       } else if (record.type === "system" && record.subtype === "init") {
         addLog(state.runId, agent.agentId.toUpperCase(), "info", "Claude Code inicializó el contexto de trabajo.", agent.id);
       } else if (record.type === "tool_progress") {

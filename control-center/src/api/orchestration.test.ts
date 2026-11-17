@@ -1,6 +1,73 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { buildExecutionSummary, createHandoffDescriptor, createHandoffId, hasConcurrentCrossEngineRun, hasHandoffIdAtStart, prepareHandoffOutput, type SummaryAgent } from "./orchestration.js";
+import {
+  buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
+  extractClaudeFinalText, hasConcurrentCrossEngineRun, hasHandoffIdAtStart, prepareHandoffOutput,
+  type SummaryAgent
+} from "./orchestration.js";
+
+test("OpenCode handoff capture selects only the terminal assistant message", () => {
+  const messages = {
+    data: [
+      {
+        info: { id: "assistant-progress", role: "assistant", finish: "tool-calls" },
+        parts: [
+          { id: "p1", type: "text", text: "Estoy comprobando el proyecto." },
+          { id: "t1", type: "tool", tool: "read" }
+        ]
+      },
+      {
+        info: { id: "assistant-progress-2", role: "assistant", finish: "tool-calls" },
+        parts: [{ id: "p2", type: "text", text: "Ya casi termino." }]
+      },
+      {
+        info: { id: "assistant-final", role: "assistant", finish: "stop" },
+        parts: [{ id: "p3", type: "text", text: "HANDOFF-TESTER-12345678\n\nInforme final completo." }]
+      }
+    ]
+  };
+  assert.equal(
+    extractCanonicalOpenCodeAssistantText(messages),
+    "HANDOFF-TESTER-12345678\n\nInforme final completo."
+  );
+});
+
+test("OpenCode does not promote an intermediate tool-calling message to a final handoff", () => {
+  const messages = [{
+    info: { id: "assistant-progress", role: "assistant", finish: "tool-calls" },
+    parts: [{ type: "text", text: "Esto es solo progreso, no el informe final." }]
+  }];
+  assert.equal(extractCanonicalOpenCodeAssistantText(messages), null);
+});
+
+test("Claude handoff capture uses the SDK result text, not streamed assistant blocks", () => {
+  const streamedAssistantBlock = {
+    type: "assistant",
+    message: { content: [{ type: "text", text: "Estoy revisando los archivos." }] }
+  };
+  const finalResult = {
+    type: "result",
+    subtype: "success",
+    is_error: false,
+    result: "HANDOFF-ARCHITECT-12345678\n\nInforme final de Claude."
+  };
+  assert.equal(extractClaudeFinalText(streamedAssistantBlock), null);
+  assert.equal(extractClaudeFinalText(finalResult), "HANDOFF-ARCHITECT-12345678\n\nInforme final de Claude.");
+  assert.equal(extractClaudeFinalText({ ...finalResult, is_error: true }), null);
+  assert.equal(extractClaudeFinalText({ ...finalResult, subtype: "error" }), null);
+});
+
+test("handoff metadata records exact UTF-8 byte lengths and structured ID authorship", () => {
+  const id = "HANDOFF-TESTER-12345678";
+  const source = id + "\nResultado verificado ✓ — información completa.";
+  const prepared = prepareHandoffOutput(source, id);
+  assert.equal(prepared.contentLength, source.length);
+  assert.equal(prepared.contentByteLength, Buffer.byteLength(source, "utf8"));
+  assert.equal(prepared.sourceByteLength, Buffer.byteLength(source, "utf8"));
+  assert.equal(prepared.idAuthor, "agent");
+  assert.equal(prepared.sourceIdentityVerified, true);
+  assert.match(prepared.sha256, /^[a-f0-9]{64}$/);
+});
 
 test("handoff identifiers are deterministic, unique by agent and tied to the run", () => {
   assert.equal(createHandoffId("cloud-arbiter", "12345678-aaaa"), "HANDOFF-CLOUD-ARBITER-12345678");
@@ -71,6 +138,9 @@ test("handoff descriptors identify both agent runs and validate the exact conten
   assert.equal(descriptor.contentLength, "HANDOFF-ARCHITECT-12345678\nHallazgos".length);
   assert.match(descriptor.contentSha256 ?? "", /^[a-f0-9]{64}$/);
   assert.equal(descriptor.sourceIdentityVerified, true);
+  assert.equal(descriptor.idAuthor, "agent");
+  assert.equal(descriptor.contentByteLength, Buffer.byteLength("HANDOFF-ARCHITECT-12345678\nHallazgos", "utf8"));
+  assert.equal(descriptor.contentIntegrityVerified, true);
   assert.equal(descriptor.toSessionId, null);
 });
 
@@ -80,14 +150,18 @@ test("cross-engine collaboration requires verified handoffs in both directions",
     fromAgent: "architect", fromAgentRunId: "agent-architect", fromEngine: "claude",
     fromModelId: "deepseek-v4.1-flash", fromSessionId: "session-claude",
     toAgent: "implementer", toAgentRunId: "agent-implementer", toEngine: "opencode",
-    toSessionId: "session-opencode", contentIdVerified: true, contentSha256: "a".repeat(64), contentLength: 150, contentTruncated: false, sourceIdentityVerified: true, deliveredAt: "2026-01-01T10:01:00Z"
+    toSessionId: "session-opencode", contentIdVerified: true, contentIntegrityVerified: true,
+    contentSha256: "a".repeat(64), contentLength: 150, contentByteLength: 150,
+    contentTruncated: false, sourceIdentityVerified: true, idAuthor: "agent", deliveredAt: "2026-01-01T10:01:00Z"
   } as const;
   const openCodeToClaude = {
     id: "HANDOFF-IMPLEMENTER-12345678",
     fromAgent: "implementer", fromAgentRunId: "agent-implementer", fromEngine: "opencode",
     fromModelId: "opencode-go/glm-5.3-flash", fromSessionId: "session-opencode",
     toAgent: "reviewer", toAgentRunId: "agent-reviewer", toEngine: "claude",
-    toSessionId: "session-reviewer", contentIdVerified: true, contentSha256: "b".repeat(64), contentLength: 170, contentTruncated: false, sourceIdentityVerified: true, deliveredAt: "2026-01-01T10:04:00Z"
+    toSessionId: "session-reviewer", contentIdVerified: true, contentIntegrityVerified: true,
+    contentSha256: "b".repeat(64), contentLength: 170, contentByteLength: 170,
+    contentTruncated: false, sourceIdentityVerified: true, idAuthor: "agent", deliveredAt: "2026-01-01T10:04:00Z"
   } as const;
   const summary = buildExecutionSummary({
     instructions: "Prueba de colaboración entre motores Claude y OpenCode.",
@@ -157,6 +231,8 @@ test("a missing source ID is wrapped without dropping the original report", () =
   }, "reviewer", "target-run", "claude");
   assert.equal(descriptor.contentIdVerified, true);
   assert.equal(descriptor.sourceIdentityVerified, false);
+  assert.equal(descriptor.idAuthor, "orchestrator");
+  assert.equal(descriptor.contentIntegrityVerified, true);
   const summary = buildExecutionSummary({
     instructions: "Prueba de colaboración entre motores Claude y OpenCode.",
     agents: [
