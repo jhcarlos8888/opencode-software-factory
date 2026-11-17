@@ -69,6 +69,144 @@ test("handoff metadata records exact UTF-8 byte lengths and structured ID author
   assert.match(prepared.sha256, /^[a-f0-9]{64}$/);
 });
 
+test("Arbiter summary parser preserves nested findings tables and bold priority steps", () => {
+  const report = [
+    "## RESUMEN EJECUTIVO",
+    "La ronda terminó con cinco informes de especialistas recibidos y contrastados.",
+    "## VEREDICTO",
+    "Ejecución técnica completada con observaciones.",
+    "## HALLAZGOS CLAVE",
+    "### Defectos de la FÁBRICA",
+    "| # | Hallazgo | Evidencia | Fuente | Severidad |",
+    "|---|---|---|---|---|",
+    "| **CF1** | **Informes duplicados** | El texto final se concatenó dos veces en el payload. | reviewer | **Mayor** |",
+    "### Defectos del PROYECTO",
+    "| **CP1** | **Credenciales versionadas** | Hay valores sensibles en archivos YAML versionados. | tester | **Bloqueante** |",
+    "## DISCREPANCIAS RESUELTAS",
+    "El árbitro contrastó las posiciones.",
+    "## PRÓXIMOS PASOS",
+    "**P0 — Capturar solo la respuesta final.** No concatenar bloques de progreso ni el evento final dos veces.",
+    "",
+    "**P1 — Entregar metadatos al receptor.** Incluir SHA-256, bytes UTF-8, truncamiento y autoría.",
+    "## PRUEBAS QUE TODAVÍA FALTAN",
+    "Pruebas de timeout."
+  ].join("\n");
+
+  const summary = buildExecutionSummary({
+    instructions: "Revisión general del proyecto.",
+    agents: [{ agentId: "cloud-arbiter", engine: "claude", status: "succeeded", startedAt: "2026-01-01T10:00:00Z", finishedAt: "2026-01-01T10:05:00Z", handoffIn: [] }],
+    results: [],
+    cloudArbiterOutput: report
+  });
+
+  assert.equal(summary.overview, "La ronda terminó con cinco informes de especialistas recibidos y contrastados.");
+  assert.equal(summary.findings.length, 2);
+  assert.match(summary.findings[0] ?? "", /CF1.*Informes duplicados/);
+  assert.match(summary.findings[1] ?? "", /CP1.*Credenciales versionadas/);
+  assert.equal(summary.nextSteps.length, 2);
+  assert.match(summary.nextSteps[0] ?? "", /Capturar solo la respuesta final/);
+  assert.match(summary.nextSteps[1] ?? "", /Entregar metadatos al receptor/);
+});
+
+test("summary integrity verifies hashes and reports IDs added by the orchestrator", () => {
+  const id = "HANDOFF-ARCHITECT-12345678";
+  const reviewerId = "HANDOFF-REVIEWER-12345678";
+  const agentAuthored = prepareHandoffOutput(id + "\nInforme completo ✓.", id);
+  const orchestratorAuthored = prepareHandoffOutput("Preambulo del agente.\nInforme completo.", reviewerId);
+  const makeResult = (agentId: string, handoffId: string, output: ReturnType<typeof prepareHandoffOutput>) => ({
+    agentRunId: agentId + "-run",
+    agentId,
+    engine: "claude" as const,
+    modelId: "deepseek-v4.1-flash",
+    sessionId: agentId + "-session",
+    status: "succeeded" as const,
+    startedAt: "2026-01-01T10:00:00Z",
+    finishedAt: "2026-01-01T10:01:00Z",
+    handoffId,
+    output: output.content,
+    handoffOutput: output
+  });
+  const summary = buildExecutionSummary({
+    instructions: "Analiza el proyecto.",
+    agents: [
+      { agentId: "architect", engine: "claude", status: "succeeded", startedAt: "2026-01-01T10:00:00Z", finishedAt: "2026-01-01T10:01:00Z", handoffIn: [] },
+      { agentId: "reviewer", engine: "claude", status: "succeeded", startedAt: "2026-01-01T10:01:00Z", finishedAt: "2026-01-01T10:02:00Z", handoffIn: [] }
+    ],
+    results: [
+      makeResult("architect", id, agentAuthored),
+      makeResult("reviewer", reviewerId, orchestratorAuthored)
+    ]
+  });
+
+  assert.equal(summary.integrity.status, "observations");
+  assert.equal(summary.integrity.expectedReports, 2);
+  assert.equal(summary.integrity.reportsReceived, 2);
+  assert.equal(summary.integrity.reportsVerified, 2);
+  assert.deepEqual(summary.integrity.orchestratorIdentifiedReports, ["reviewer"]);
+  assert.deepEqual(summary.integrity.missingReports, []);
+  assert.equal(summary.verdict, "observations");
+});
+
+test("summary integrity distinguishes legacy metadata from corrupted reports", () => {
+  const id = "HANDOFF-ARCHITECT-12345678";
+  const output = id + "\nInforme histórico íntegro.";
+  const current = prepareHandoffOutput(output, id);
+  const legacy = {
+    content: current.content,
+    sha256: current.sha256,
+    contentLength: current.contentLength,
+    sourceLength: current.sourceLength,
+    truncated: false,
+    sourceIdentityVerified: true
+  };
+  const agent = {
+    agentRunId: "architect-run", agentId: "architect", engine: "claude" as const,
+    modelId: "deepseek-v4.1-flash", sessionId: "architect-session",
+    status: "succeeded" as const, startedAt: "2026-01-01T10:00:00Z",
+    finishedAt: "2026-01-01T10:01:00Z", handoffId: id,
+    output: legacy.content, handoffOutput: legacy
+  };
+  const summary = buildExecutionSummary({
+    instructions: "Auditoría histórica.",
+    agents: [{ agentId: "architect", engine: "claude", status: "succeeded", startedAt: agent.startedAt, finishedAt: agent.finishedAt, handoffIn: [] }],
+    results: [agent]
+  });
+  assert.equal(summary.integrity.reportsReceived, 1);
+  assert.equal(summary.integrity.reportsVerified, 0);
+  assert.deepEqual(summary.integrity.legacyReports, ["architect"]);
+  assert.deepEqual(summary.integrity.invalidReports, []);
+  assert.equal(summary.integrity.status, "observations");
+});
+
+test("summary integrity marks missing, truncated and hash-mismatched reports", () => {
+  const truncatedId = "HANDOFF-ARCHITECT-12345678";
+  const truncated = prepareHandoffOutput(truncatedId + "\n" + "dato. ".repeat(1800), truncatedId, 5000);
+  const tampered = prepareHandoffOutput("HANDOFF-BUILD-12345678\nBuild.", "HANDOFF-BUILD-12345678");
+  const corrupted = { ...tampered, sha256: "0".repeat(64) };
+  const baseResult = (agentId: string, handoffId: string, output: ReturnType<typeof prepareHandoffOutput>) => ({
+    agentRunId: agentId + "-run", agentId, engine: "opencode" as const,
+    modelId: "opencode-go/glm-5.3-flash", sessionId: agentId + "-session",
+    status: "succeeded" as const, startedAt: "2026-01-01T10:00:00Z",
+    finishedAt: "2026-01-01T10:01:00Z", handoffId, output: output.content, handoffOutput: output
+  });
+  const summary = buildExecutionSummary({
+    instructions: "Diagnóstico.",
+    agents: ["architect", "build", "tester"].map((agentId) => ({
+      agentId, engine: "opencode" as const, status: "succeeded" as const,
+      startedAt: "2026-01-01T10:00:00Z", finishedAt: "2026-01-01T10:01:00Z", handoffIn: []
+    })),
+    results: [
+      baseResult("architect", truncatedId, truncated),
+      baseResult("build", "HANDOFF-BUILD-12345678", corrupted)
+    ]
+  });
+  assert.deepEqual(summary.integrity.truncatedReports, ["architect"]);
+  assert.deepEqual(summary.integrity.invalidReports, ["build"]);
+  assert.deepEqual(summary.integrity.missingReports, ["tester"]);
+  assert.equal(summary.integrity.status, "observations");
+  assert.equal(summary.verdict, "observations");
+});
+
 test("handoff identifiers are deterministic, unique by agent and tied to the run", () => {
   assert.equal(createHandoffId("cloud-arbiter", "12345678-aaaa"), "HANDOFF-CLOUD-ARBITER-12345678");
   assert.notEqual(createHandoffId("architect", "12345678-aaaa"), createHandoffId("reviewer", "12345678-aaaa"));
@@ -151,7 +289,7 @@ test("cross-engine collaboration requires verified handoffs in both directions",
     fromModelId: "deepseek-v4.1-flash", fromSessionId: "session-claude",
     toAgent: "implementer", toAgentRunId: "agent-implementer", toEngine: "opencode",
     toSessionId: "session-opencode", contentIdVerified: true, contentIntegrityVerified: true,
-    contentSha256: "a".repeat(64), contentLength: 150, contentByteLength: 150,
+    contentSha256: "a".repeat(64), contentLength: 150, contentByteLength: 150, sourceByteLength: 150,
     contentTruncated: false, sourceIdentityVerified: true, idAuthor: "agent", deliveredAt: "2026-01-01T10:01:00Z"
   } as const;
   const openCodeToClaude = {
@@ -160,7 +298,7 @@ test("cross-engine collaboration requires verified handoffs in both directions",
     fromModelId: "opencode-go/glm-5.3-flash", fromSessionId: "session-opencode",
     toAgent: "reviewer", toAgentRunId: "agent-reviewer", toEngine: "claude",
     toSessionId: "session-reviewer", contentIdVerified: true, contentIntegrityVerified: true,
-    contentSha256: "b".repeat(64), contentLength: 170, contentByteLength: 170,
+    contentSha256: "b".repeat(64), contentLength: 170, contentByteLength: 170, sourceByteLength: 170,
     contentTruncated: false, sourceIdentityVerified: true, idAuthor: "agent", deliveredAt: "2026-01-01T10:04:00Z"
   } as const;
   const summary = buildExecutionSummary({

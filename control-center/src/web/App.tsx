@@ -82,10 +82,13 @@ interface HandoffDescriptor {
   toAgent: string; toAgentRunId: string; toEngine: EngineId; toSessionId: string | null;
   contentIdVerified: boolean; deliveredAt: string;
   contentSha256?: string; contentLength?: number; sourceLength?: number;
+  contentByteLength?: number; sourceByteLength?: number;
   contentTruncated?: boolean; sourceIdentityVerified?: boolean;
+  idAuthor?: "agent" | "orchestrator"; contentIntegrityVerified?: boolean;
 }
 interface HandoffOutputMetadata {
   sha256: string; contentLength: number; sourceLength: number;
+  contentByteLength?: number; sourceByteLength?: number; idAuthor?: "agent" | "orchestrator";
   truncated: boolean; sourceIdentityVerified: boolean;
 }
 interface HandoffOutputRecord extends HandoffOutputMetadata {
@@ -94,6 +97,12 @@ interface HandoffOutputRecord extends HandoffOutputMetadata {
 interface ExecutionSummary {
   verdict: "completed" | "observations" | "failed";
   headline: string; overview: string; findings: string[]; nextSteps: string[];
+  integrity?: {
+    status: "verified" | "observations" | "not-assessed";
+    expectedReports: number; reportsReceived: number; reportsVerified: number;
+    missingReports: string[]; truncatedReports: string[]; invalidReports: string[];
+    legacyReports: string[]; orchestratorIdentifiedReports: string[];
+  };
   participants: { total: number; succeeded: number; skipped: string[]; failed: string[] };
   collaboration: {
     handoffs: number; crossEngineHandoffs: number; verifiedCrossEngineHandoffs: number;
@@ -1297,6 +1306,33 @@ export default function App() {
                       <span><strong>{execution.run.summary.collaboration.verifiedCrossEngineHandoffs}/{execution.run.summary.collaboration.crossEngineHandoffs}</strong> handoffs entre motores verificados</span>
                       <span><strong>{execution.run.summary.collaboration.concurrentCrossEngineVerified ? "Sí" : "No"}</strong> concurrencia real</span>
                     </div>
+                    {execution.run.summary.integrity && execution.run.summary.integrity.status !== "not-assessed" && (
+                      <div className="summary-integrity">
+                        <div className="summary-integrity-heading">
+                          <strong>Integridad de informes</strong>
+                          <span>{execution.run.summary.integrity.status === "verified" ? "VERIFICADA" : "CON OBSERVACIONES"}</span>
+                        </div>
+                        <div className="summary-integrity-metrics">
+                          <span>{execution.run.summary.integrity.reportsReceived}/{execution.run.summary.integrity.expectedReports} informes recibidos</span>
+                          <span>{execution.run.summary.integrity.reportsVerified}/{execution.run.summary.integrity.expectedReports} con hash, longitud e ID comprobados</span>
+                        </div>
+                        {execution.run.summary.integrity.truncatedReports.length > 0 && (
+                          <p><strong>Truncados:</strong> {execution.run.summary.integrity.truncatedReports.join(", ")}</p>
+                        )}
+                        {execution.run.summary.integrity.missingReports.length > 0 && (
+                          <p><strong>Sin informe:</strong> {execution.run.summary.integrity.missingReports.join(", ")}</p>
+                        )}
+                        {execution.run.summary.integrity.invalidReports.length > 0 && (
+                          <p><strong>Integridad no válida:</strong> {execution.run.summary.integrity.invalidReports.join(", ")}</p>
+                        )}
+                        {execution.run.summary.integrity.legacyReports.length > 0 && (
+                          <p><strong>Metadatos históricos incompletos:</strong> {execution.run.summary.integrity.legacyReports.join(", ")}. Estos informes son anteriores al registro de bytes UTF-8 y autoría estructurada; no se consideran corruptos por esa ausencia.</p>
+                        )}
+                        {execution.run.summary.integrity.orchestratorIdentifiedReports.length > 0 && (
+                          <p><strong>ID incorporado por el orquestador:</strong> {execution.run.summary.integrity.orchestratorIdentifiedReports.join(", ")}</p>
+                        )}
+                      </div>
+                    )}
                     <div className="summary-directions">
                       <span className={execution.run.summary.collaboration.directions.claudeToOpenCode ? "direction-verified" : "direction-missing"}>
                         Claude Code → OpenCode: {execution.run.summary.collaboration.directions.claudeToOpenCode ? "verificado" : "sin evidencia completa"}
@@ -1391,9 +1427,14 @@ export default function App() {
                                             <>
                                               <small>
                                                 SHA-256 {handoffOutputContents[matchingRound.run.id + ":" + agentRun.id]?.sha256} ·
-                                                {handoffOutputContents[matchingRound.run.id + ":" + agentRun.id]?.sourceIdentityVerified
-                                                  ? " ID emitido correctamente por el agente"
-                                                  : " ID incorporado por el orquestador"}
+                                                UTF-8 {handoffOutputContents[matchingRound.run.id + ":" + agentRun.id]?.contentByteLength?.toLocaleString("es-CO") ?? "no disponible"} bytes ·
+                                                ID: {handoffOutputContents[matchingRound.run.id + ":" + agentRun.id]?.idAuthor === "agent"
+                                                  ? "emitido por el agente"
+                                                  : handoffOutputContents[matchingRound.run.id + ":" + agentRun.id]?.idAuthor === "orchestrator"
+                                                    ? "incorporado por el orquestador"
+                                                    : handoffOutputContents[matchingRound.run.id + ":" + agentRun.id]?.sourceIdentityVerified
+                                                      ? "identidad del agente verificada (formato histórico)"
+                                                      : "autoría no disponible (formato histórico)"}
                                               </small>
                                               <pre>{handoffOutputContents[matchingRound.run.id + ":" + agentRun.id]?.content}</pre>
                                             </>

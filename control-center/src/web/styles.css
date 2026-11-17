@@ -730,3 +730,30 @@ body { font-size: 16px; }
   .decision-card > p, .execution-summary-overview,
   .work-message p { font-size: 13px; }
 }
+
+/* Handoff integrity diagnostics in the executive summary. */
+.summary-integrity {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid #dfe7ee;
+  border-radius: 8px;
+  background: #fff;
+  color: #68798c;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.summary-integrity-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.summary-integrity-heading strong { color: #344b62; font-size: 13px; }
+.summary-integrity-heading span { color: #56708a; font-size: 10px; font-weight: 800; letter-spacing: .5px; }
+.summary-integrity-metrics { display: flex; flex-wrap: wrap; gap: 8px 18px; }
+.summary-integrity p { margin: 0; overflow-wrap: anywhere; }
+.summary-integrity p strong { color: #465c72; }
+@media (max-width: 560px) {
+  .summary-integrity-heading { align-items: flex-start; flex-direction: column; }
+}

@@ -10,11 +10,11 @@ export interface HandoffOutputRecord {
   sha256: string;
   contentLength: number;
   sourceLength: number;
-  contentByteLength: number;
-  sourceByteLength: number;
+  contentByteLength?: number;
+  sourceByteLength?: number;
   truncated: boolean;
   sourceIdentityVerified: boolean;
-  idAuthor: HandoffIdAuthor;
+  idAuthor?: HandoffIdAuthor;
 }
 
 export type HandoffOutputMetadata = Omit<HandoffOutputRecord, "content">;
@@ -66,12 +66,25 @@ export interface SummaryAgent {
   handoffIn: HandoffDescriptor[];
 }
 
+export interface HandoffIntegritySummary {
+  status: "verified" | "observations" | "not-assessed";
+  expectedReports: number;
+  reportsReceived: number;
+  reportsVerified: number;
+  missingReports: string[];
+  truncatedReports: string[];
+  invalidReports: string[];
+  legacyReports: string[];
+  orchestratorIdentifiedReports: string[];
+}
+
 export interface ExecutionSummary {
   verdict: "completed" | "observations" | "failed";
   headline: string;
   overview: string;
   findings: string[];
   nextSteps: string[];
+  integrity: HandoffIntegritySummary;
   participants: {
     total: number;
     succeeded: number;
@@ -209,8 +222,12 @@ export function createHandoffDescriptor(
   const payload = result.handoffOutput ?? prepareHandoffOutput(result.output, result.handoffId);
   const hashMatches = createHash("sha256").update(payload.content, "utf8").digest("hex") === payload.sha256;
   const characterLengthMatches = payload.contentLength === payload.content.length;
-  const byteLengthMatches = payload.contentByteLength === Buffer.byteLength(payload.content, "utf8");
-  const contentIntegrityVerified = hashMatches && characterLengthMatches && byteLengthMatches;
+  const byteLengthMatches = typeof payload.contentByteLength === "number" &&
+    payload.contentByteLength === Buffer.byteLength(payload.content, "utf8");
+  const metadataComplete = byteLengthMatches &&
+    typeof payload.sourceByteLength === "number" &&
+    (payload.idAuthor === "agent" || payload.idAuthor === "orchestrator");
+  const contentIntegrityVerified = hashMatches && characterLengthMatches && metadataComplete;
   return {
     id: result.handoffId,
     fromAgent: result.agentId,
@@ -256,28 +273,172 @@ export function hasConcurrentCrossEngineRun(agents: Array<Pick<SummaryAgent, "en
   return false;
 }
 
+function normalizeHeadingLine(line: string): string {
+  return line.replace(/[*#_]/g, "").trim().replace(/:$/, "").trim();
+}
+
+function markdownHeading(line: string): { level: number; title: string } | null {
+  const match = line.match(/^\s{0,3}(#{1,6})\s+(.+?)\s*#*\s*$/);
+  return match ? { level: match[1]!.length, title: normalizeHeadingLine(match[2]!) } : null;
+}
+
 function extractSection(source: string, heading: RegExp): string {
   const lines = source.split(/\r?\n/);
-  const start = lines.findIndex((line) => heading.test(line.replace(/[*#_]/g, "").trim()));
+  const start = lines.findIndex((line) => heading.test(normalizeHeadingLine(line)));
   if (start < 0) return "";
+  const startLevel = markdownHeading(lines[start] ?? "")?.level ?? 2;
   const collected: string[] = [];
+  const plainSectionBoundary = /^\s*(?:VEREDICTO|RESUMEN EJECUTIVO|EXECUTIVE SUMMARY|HALLAZGOS(?: CLAVE)?|KEY FINDINGS|COMUNICACIÓN ENTRE MOTORES|CONCURRENCIA|INCIDENCIAS|PRÓXIMOS PASOS|PROXIMOS PASOS|SIGUIENTE ACCIÓN|NEXT STEPS|PRUEBAS QUE TODAVÍA FALTAN|PRUEBAS PENDIENTES)\s*:?[ \t]*$/i;
+
   for (let index = start + 1; index < lines.length; index++) {
     const line = lines[index] ?? "";
-    if (
-      /^\s{0,3}#{1,4}\s/.test(line) ||
-      /^\s{0,3}\*\*[^*]{2,80}\*\*\s*$/.test(line) ||
-      /^\s*(?:VEREDICTO|HALLAZGOS(?: CLAVE)?|COMUNICACIÓN ENTRE MOTORES|CONCURRENCIA|INCIDENCIAS|PRÓXIMOS PASOS|PROXIMOS PASOS|SIGUIENTE ACCIÓN)\s*:?[ \t]*$/i.test(line)
-    ) break;
+    const nextHeading = markdownHeading(line);
+    if (nextHeading && nextHeading.level <= startLevel) break;
+    if (!nextHeading && plainSectionBoundary.test(normalizeHeadingLine(line))) break;
     collected.push(line);
   }
   return collected.join("\n").trim();
 }
 
-function extractBullets(section: string, limit = 6): string[] {
-  return section.split(/\r?\n/)
-    .map((line) => line.trim().replace(/^[-*•]\s+/, "").replace(/^\d+[.)]\s+/, "").trim())
-    .filter((line) => line.length > 12)
-    .slice(0, limit);
+function stripInlineMarkdown(value: string): string {
+  return value
+    .replace(/\\\|/g, "|")
+    .replace(/\*\*/g, "")
+    .replace(/__(.*?)__/g, "$1")
+    .replace(/[*_~]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function markdownTableCells(line: string): string[] | null {
+  const trimmed = line.trim();
+  if (!trimmed.startsWith("|") || !trimmed.endsWith("|")) return null;
+  return trimmed.slice(1, -1).split("|").map(stripInlineMarkdown);
+}
+
+function extractFindings(section: string, limit = 8): string[] {
+  const tableFindings: string[] = [];
+  for (const line of section.split(/\r?\n/)) {
+    const cells = markdownTableCells(line);
+    if (!cells || cells.length < 2) continue;
+    if (cells.every((cell) => /^:?-{3,}:?$/.test(cell))) continue;
+    if (/^(?:#|n[úu]mero)$/i.test(cells[0] ?? "") || /hallazgo/i.test(cells[1] ?? "")) continue;
+    const id = cells[0] ?? "";
+    const title = cells[1] ?? "";
+    if (!title || title.length < 8) continue;
+    const evidence = cells[2] ?? "";
+    const severity = cells.length >= 5 ? cells[4] ?? "" : "";
+    const summary = [
+      (id ? id + " — " : "") + title,
+      severity ? "Severidad: " + severity : "",
+      evidence ? "Evidencia: " + evidence.slice(0, 220) : ""
+    ].filter(Boolean).join(" · ");
+    tableFindings.push(summary);
+  }
+  if (tableFindings.length) return [...new Set(tableFindings)].slice(0, limit);
+
+  const bulletFindings = section.split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => /^[-*•]\s+/.test(line) || /^\d+[.)]\s+/.test(line))
+    .map(stripInlineMarkdown)
+    .filter((line) => line.length > 12);
+  return [...new Set(bulletFindings)].slice(0, limit);
+}
+
+function extractNextSteps(section: string, limit = 8): string[] {
+  const items: string[] = [];
+  let current = "";
+  const flush = () => {
+    if (current.trim().length > 12) items.push(stripInlineMarkdown(current));
+    current = "";
+  };
+
+  for (const rawLine of section.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line) {
+      if (current) flush();
+      continue;
+    }
+    if (/^\*\*P\d+\s*[—-]/i.test(line)) {
+      flush();
+      current = line;
+      continue;
+    }
+    if (/^[-*•]\s+/.test(line) || /^\d+[.)]\s+/.test(line)) {
+      flush();
+      items.push(stripInlineMarkdown(line.replace(/^[-*•]\s+/, "").replace(/^\d+[.)]\s+/, "")));
+      continue;
+    }
+    if (current) current += " " + line;
+  }
+  flush();
+  if (!items.length) {
+    return section.split(/\r?\n/)
+      .map((line) => line.trim())
+      .filter((line) => /^\*\*P\d+\s*[—-]/i.test(line))
+      .map(stripInlineMarkdown)
+      .filter((line) => line.length > 12)
+      .slice(0, limit);
+  }
+  return [...new Set(items)].slice(0, limit);
+}
+
+function assessHandoffIntegrity(
+  agents: SummaryAgent[],
+  results: AgentResult[]
+): HandoffIntegritySummary {
+  const successfulAgents = agents.filter((agent) => agent.status === "succeeded");
+  const summary: HandoffIntegritySummary = {
+    status: results.length ? "verified" : "not-assessed",
+    expectedReports: successfulAgents.length,
+    reportsReceived: 0,
+    reportsVerified: 0,
+    missingReports: [],
+    truncatedReports: [],
+    invalidReports: [],
+    legacyReports: [],
+    orchestratorIdentifiedReports: []
+  };
+  if (!results.length) return summary;
+
+  const resultsByAgent = new Map(results.map((result) => [result.agentId, result]));
+  for (const agent of successfulAgents) {
+    const result = resultsByAgent.get(agent.agentId);
+    const report = result?.handoffOutput;
+    if (!result || result.status !== "succeeded" || !report) {
+      summary.missingReports.push(agent.agentId);
+      continue;
+    }
+    summary.reportsReceived++;
+
+    const hashMatches = createHash("sha256").update(report.content, "utf8").digest("hex") === report.sha256;
+    const characterLengthMatches = report.contentLength === report.content.length;
+    const byteLengthAvailable = typeof report.contentByteLength === "number";
+    const byteLengthMatches = !byteLengthAvailable ||
+      report.contentByteLength === Buffer.byteLength(report.content, "utf8");
+    const sourceByteLengthAvailable = typeof report.sourceByteLength === "number";
+    const idAuthorAvailable = report.idAuthor === "agent" || report.idAuthor === "orchestrator";
+    const metadataIsLegacy = !byteLengthAvailable || !sourceByteLengthAvailable || !idAuthorAvailable;
+    const idMatches = hasHandoffIdAtStart(report.content, result.handoffId);
+    const contentValid = hashMatches && characterLengthMatches && byteLengthMatches && idMatches;
+
+    if (report.truncated) summary.truncatedReports.push(agent.agentId);
+    if (!contentValid) summary.invalidReports.push(agent.agentId);
+    if (metadataIsLegacy) summary.legacyReports.push(agent.agentId);
+    if (report.sourceIdentityVerified === false || report.idAuthor === "orchestrator") {
+      summary.orchestratorIdentifiedReports.push(agent.agentId);
+    }
+    if (contentValid && !report.truncated && !metadataIsLegacy) summary.reportsVerified++;
+  }
+
+  const hasIntegrityObservations =
+    summary.missingReports.length > 0 ||
+    summary.truncatedReports.length > 0 ||
+    summary.invalidReports.length > 0 ||
+    summary.legacyReports.length > 0 ||
+    summary.orchestratorIdentifiedReports.length > 0;
+  summary.status = hasIntegrityObservations ? "observations" : "verified";
+  return summary;
 }
 
 export function buildExecutionSummary(input: {
@@ -288,6 +449,7 @@ export function buildExecutionSummary(input: {
   generatedAt?: string;
 }): ExecutionSummary {
   const agents = input.agents;
+  const integrity = assessHandoffIntegrity(agents, input.results);
   const succeeded = agents.filter((agent) => agent.status === "succeeded").length;
   const skipped = agents.filter((agent) => agent.status === "skipped").map((agent) => agent.agentId);
   const failed = agents.filter((agent) => agent.status === "failed").map((agent) => agent.agentId);
@@ -305,6 +467,8 @@ export function buildExecutionSummary(input: {
     handoff.contentLength > 0 &&
     typeof handoff.contentByteLength === "number" &&
     handoff.contentByteLength > 0 &&
+    typeof handoff.sourceByteLength === "number" &&
+    (handoff.idAuthor === "agent" || handoff.idAuthor === "orchestrator") &&
     Boolean(handoff.fromSessionId) &&
     Boolean(handoff.toSessionId);
   const verifiedCrossEngineHandoffs = crossEngineEdges.filter(hasCompleteVerifiedPayload).length;
@@ -330,13 +494,13 @@ export function buildExecutionSummary(input: {
   const executive = extractSection(cloudOutput, /^(?:RESUMEN EJECUTIVO|EXECUTIVE SUMMARY)\b/i);
   const findingsSection = extractSection(cloudOutput, /^(?:HALLAZGOS CLAVE|HALLAZGOS|KEY FINDINGS)\b/i);
   const nextStepsSection = extractSection(cloudOutput, /^(?:PRÓXIMOS PASOS|PROXIMOS PASOS|SIGUIENTE ACCIÓN|NEXT STEPS)\b/i);
-  const findings = extractBullets(findingsSection);
-  const nextSteps = extractBullets(nextStepsSection);
+  const findings = extractFindings(findingsSection);
+  const nextSteps = extractNextSteps(nextStepsSection);
   const failedPipeline = failed.length > 0;
   const collaborationIncomplete = collaborationExpected && (!collaborationVerified || !concurrentCrossEngineVerified);
   const verdict: ExecutionSummary["verdict"] =
     failedPipeline || mandatoryUnavailable ? "failed" :
-      skipped.length > 0 || collaborationIncomplete ? "observations" : "completed";
+      skipped.length > 0 || collaborationIncomplete || integrity.status === "observations" ? "observations" : "completed";
   const skippedText = skipped.length ? ` Agentes deshabilitados u omitidos: ${skipped.join(", ")}.` : "";
   const missingText = missingExpected.length ? ` No hay registro de: ${missingExpected.join(", ")}.` : "";
   const fallback = `Se completaron ${succeeded} de ${agents.length} agentes registrados. Se entregaron ${handoffs.length} handoffs, de los cuales ${verifiedCrossEngineHandoffs} cruces entre motores están verificados de extremo a extremo. ${concurrentCrossEngineVerified ? "Se verificó solapamiento temporal real entre Claude Code y OpenCode." : "No se verificó solapamiento temporal entre motores."}${skippedText}${missingText}`;
@@ -348,6 +512,7 @@ export function buildExecutionSummary(input: {
     overview: executive || fallback,
     findings,
     nextSteps,
+    integrity,
     participants: { total: agents.length, succeeded, skipped, failed },
     collaboration: {
       handoffs: handoffs.length,
