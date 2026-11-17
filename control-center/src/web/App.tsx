@@ -656,6 +656,118 @@ export default function App() {
   };
   const terminalEvents = execution?.events ?? [];
 
+  const executionMonitoringPanels = (
+    <>
+          <section className="section-block activity-section" id="activity">
+            <div className="section-title-row">
+              <div>
+                <div className="eyebrow">SYSTEM TRACE / LIVE ENGINE STREAMS</div>
+                <h2>Consola de actividad</h2>
+                <p>Eventos reales de las sesiones: inicio de agentes, herramientas ejecutadas, fragmentos de respuesta y resultado de cada fase. Las credenciales se filtran antes de guardar los registros.</p>
+              </div>
+              <span className="terminal-status"><span /> {activeExecution ? "LIVE EXECUTION" : "LOCAL JOURNAL"}</span>
+            </div>
+            <div className="terminal-window" role="log" aria-live="polite" aria-label="Registro de actividad de motores y agentes">
+              <div className="terminal-bar"><span /><span /><span /><small>factory://engine-streams/{execution?.run.id.slice(0, 8) ?? "idle"}</small></div>
+              <div className="terminal-lines">
+                {terminalEvents.length === 0 && activityLogs.length === 0 && (
+                  <div className="terminal-empty">
+                    <span>FACTORY CONTROL CENTER :: MONITOR READY</span>
+                    <span>Esperando el comienzo de una ejecución...</span>
+                    <span className="terminal-dim">ENGINE STREAMS: STANDBY</span>
+                  </div>
+                )}
+                {terminalEvents.length > 0 ? terminalEvents.map((item) => (
+                  <div className={`terminal-line terminal-${item.kind === "success" ? "success" : item.kind === "warning" ? "warning" : "info"}`} key={item.id}>
+                    <time>{new Date(item.createdAt).toLocaleTimeString("es-CO", { hour12: false })}</time>
+                    <b>[{item.area}]</b><span>{item.message}</span>
+                  </div>
+                )) : activityLogs.map((item, index) => (
+                  <div className={`terminal-line terminal-${item.kind}`} key={`${item.time}-${index}`}>
+                    <time>{item.time}</time><b>[{item.area}]</b><span>{item.message}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="terminal-footer">
+                <span>{execution ? `RUN ${execution.run.id.slice(0, 8)} · ${statusLabels[execution.run.status] ?? execution.run.status}` : "LOCAL EVENT JOURNAL"}</span>
+                <span>{terminalEvents.length || activityLogs.length} EVENTOS</span>
+              </div>
+            </div>
+            <div className="terminal-disclaimer">La consola conserva eventos y actividad de herramientas; no muestra cadenas de pensamiento privadas ni credenciales.</div>
+          </section>
+
+          <section className="section-block decision-section" id="decisions">
+            <div className="section-title-row">
+              <div>
+                <div className="eyebrow">HUMAN IN THE LOOP / APPROVAL QUEUE</div>
+                <h2>Centro de decisiones</h2>
+                <p>Las sesiones se pausan cuando un agente necesita autorización o una aclaración. Tu respuesta se envía a la sesión que generó la solicitud.</p>
+              </div>
+              <span className={execution?.decisions.length ? "pending-tag decision-count" : "read-only-tag"}>
+                {execution?.decisions.length ?? 0} PENDIENTES
+              </span>
+            </div>
+            {(!execution || execution.decisions.length === 0) && (
+              <div className="decision-empty">
+                <strong>No hay solicitudes pendientes.</strong>
+                <span>Cuando OpenCode o Claude necesiten tu intervención, aparecerá aquí la solicitud con el agente, la acción y su contexto.</span>
+              </div>
+            )}
+            <div className="decision-list">
+              {execution?.decisions.map((item) => (
+                <article className="decision-card" key={item.id}>
+                  <div className="decision-card-head">
+                    <div>
+                      <span className="terminal-kicker">{item.engine === "claude" ? "CLAUDE CODE" : "OPENCODE"} · {item.kind === "permission" ? "AUTORIZACIÓN" : "ACLARACIÓN"}</span>
+                      <h3>{item.title}</h3>
+                    </div>
+                    <span className="pending-tag">{roleNames[execution.agents.find((runAgent) => runAgent.id === item.agentRunId)?.agentId ?? ""] ?? "Agente"}</span>
+                  </div>
+                  <p>{item.description}</p>
+                  <details className="decision-details">
+                    <summary>Ver contexto técnico</summary>
+                    <pre>{JSON.stringify(item.details, null, 2)}</pre>
+                  </details>
+                  {item.kind === "permission" ? (
+                    <>
+                    <div className="decision-actions">
+                      <button className="primary-button" type="button" disabled={decisionBusyId === item.id} onClick={() => void respondToDecision(item.id, "allow")}>
+                        {decisionBusyId === item.id ? "Enviando..." : "Aprobar una vez"}
+                      </button>
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        disabled={decisionBusyId === item.id || !canApproveDuringRun(item)}
+                        title={canApproveDuringRun(item)
+                          ? "Recordar únicamente los recursos o argumentos propuestos por el motor durante esta ejecución"
+                          : "El motor no proporcionó un patrón o una operación exacta que pueda recordarse de forma segura"}
+                        onClick={() => void respondToDecision(item.id, "allow-run")}
+                      >
+                        Aprobar durante esta ejecución
+                      </button>
+                      <button className="secondary-button" type="button" disabled={decisionBusyId === item.id} onClick={() => void respondToDecision(item.id, "deny")}>Rechazar</button>
+                    </div>
+                    <span className="decision-scope-note">
+                      {item.engine === "opencode"
+                        ? "La aprobación temporal no modifica permisos globales ni se conserva para futuros análisis. Solo cubre los patrones concretos propuestos por OpenCode."
+                        : "La aprobación temporal no modifica permisos globales ni se conserva para futuros análisis. Solo permite repetir exactamente esta misma operación de Claude."}
+                    </span>
+                    </>
+                  ) : (
+                    <div className="decision-answer">
+                      <textarea value={decisionAnswers[item.id] ?? ""} onChange={(event) => setDecisionAnswers((current) => ({ ...current, [item.id]: event.target.value }))} rows={3} placeholder="Escribe la aclaración para el agente. Para formularios de varios campos de OpenCode, envía un objeto JSON con las claves del formulario." />
+                      <button className="primary-button" type="button" disabled={decisionBusyId === item.id || !(decisionAnswers[item.id] ?? "").trim()} onClick={() => void respondToDecision(item.id, "answer")}>
+                        {decisionBusyId === item.id ? "Enviando..." : "Enviar respuesta"}
+                      </button>
+                    </div>
+                  )}
+                </article>
+              ))}
+            </div>
+          </section>
+    </>
+  );
+
   return (
     <div className="app-shell">
       <aside className="sidebar">
@@ -673,8 +785,8 @@ export default function App() {
           <a className="nav-item" href="#project"><span>⌘</span> Proyectos</a>
           <a className="nav-item" href="#team"><span>◇</span> Equipo de agentes</a>
           <a className="nav-item" href="#skills"><span>▤</span> Skills</a>
-          <a className="nav-item" href="#decisions"><span>⚑</span> Centro de decisiones</a>
           <a className="nav-item" href="#activity"><span>▣</span> Consola de actividad</a>
+          <a className="nav-item" href="#decisions"><span>⚑</span> Centro de decisiones</a>
           <a className="nav-item" href="#roadmap"><span>⌁</span> Orquestación</a>
         </nav>
 
@@ -1007,113 +1119,7 @@ export default function App() {
             )}
           </section>
 
-          <section className="section-block activity-section" id="activity">
-            <div className="section-title-row">
-              <div>
-                <div className="eyebrow">SYSTEM TRACE / LIVE ENGINE STREAMS</div>
-                <h2>Consola de actividad</h2>
-                <p>Eventos reales de las sesiones: inicio de agentes, herramientas ejecutadas, fragmentos de respuesta y resultado de cada fase. Las credenciales se filtran antes de guardar los registros.</p>
-              </div>
-              <span className="terminal-status"><span /> {activeExecution ? "LIVE EXECUTION" : "LOCAL JOURNAL"}</span>
-            </div>
-            <div className="terminal-window" role="log" aria-live="polite" aria-label="Registro de actividad de motores y agentes">
-              <div className="terminal-bar"><span /><span /><span /><small>factory://engine-streams/{execution?.run.id.slice(0, 8) ?? "idle"}</small></div>
-              <div className="terminal-lines">
-                {terminalEvents.length === 0 && activityLogs.length === 0 && (
-                  <div className="terminal-empty">
-                    <span>FACTORY CONTROL CENTER :: MONITOR READY</span>
-                    <span>Esperando el comienzo de una ejecución...</span>
-                    <span className="terminal-dim">ENGINE STREAMS: STANDBY</span>
-                  </div>
-                )}
-                {terminalEvents.length > 0 ? terminalEvents.map((item) => (
-                  <div className={`terminal-line terminal-${item.kind === "success" ? "success" : item.kind === "warning" ? "warning" : "info"}`} key={item.id}>
-                    <time>{new Date(item.createdAt).toLocaleTimeString("es-CO", { hour12: false })}</time>
-                    <b>[{item.area}]</b><span>{item.message}</span>
-                  </div>
-                )) : activityLogs.map((item, index) => (
-                  <div className={`terminal-line terminal-${item.kind}`} key={`${item.time}-${index}`}>
-                    <time>{item.time}</time><b>[{item.area}]</b><span>{item.message}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="terminal-footer">
-                <span>{execution ? `RUN ${execution.run.id.slice(0, 8)} · ${statusLabels[execution.run.status] ?? execution.run.status}` : "LOCAL EVENT JOURNAL"}</span>
-                <span>{terminalEvents.length || activityLogs.length} EVENTOS</span>
-              </div>
-            </div>
-            <div className="terminal-disclaimer">La consola conserva eventos y actividad de herramientas; no muestra cadenas de pensamiento privadas ni credenciales.</div>
-          </section>
-
-          <section className="section-block decision-section" id="decisions">
-            <div className="section-title-row">
-              <div>
-                <div className="eyebrow">HUMAN IN THE LOOP / APPROVAL QUEUE</div>
-                <h2>Centro de decisiones</h2>
-                <p>Las sesiones se pausan cuando un agente necesita autorización o una aclaración. Tu respuesta se envía a la sesión que generó la solicitud.</p>
-              </div>
-              <span className={execution?.decisions.length ? "pending-tag decision-count" : "read-only-tag"}>
-                {execution?.decisions.length ?? 0} PENDIENTES
-              </span>
-            </div>
-            {(!execution || execution.decisions.length === 0) && (
-              <div className="decision-empty">
-                <strong>No hay solicitudes pendientes.</strong>
-                <span>Cuando OpenCode o Claude necesiten tu intervención, aparecerá aquí la solicitud con el agente, la acción y su contexto.</span>
-              </div>
-            )}
-            <div className="decision-list">
-              {execution?.decisions.map((item) => (
-                <article className="decision-card" key={item.id}>
-                  <div className="decision-card-head">
-                    <div>
-                      <span className="terminal-kicker">{item.engine === "claude" ? "CLAUDE CODE" : "OPENCODE"} · {item.kind === "permission" ? "AUTORIZACIÓN" : "ACLARACIÓN"}</span>
-                      <h3>{item.title}</h3>
-                    </div>
-                    <span className="pending-tag">{roleNames[execution.agents.find((runAgent) => runAgent.id === item.agentRunId)?.agentId ?? ""] ?? "Agente"}</span>
-                  </div>
-                  <p>{item.description}</p>
-                  <details className="decision-details">
-                    <summary>Ver contexto técnico</summary>
-                    <pre>{JSON.stringify(item.details, null, 2)}</pre>
-                  </details>
-                  {item.kind === "permission" ? (
-                    <>
-                    <div className="decision-actions">
-                      <button className="primary-button" type="button" disabled={decisionBusyId === item.id} onClick={() => void respondToDecision(item.id, "allow")}>
-                        {decisionBusyId === item.id ? "Enviando..." : "Aprobar una vez"}
-                      </button>
-                      <button
-                        className="secondary-button"
-                        type="button"
-                        disabled={decisionBusyId === item.id || !canApproveDuringRun(item)}
-                        title={canApproveDuringRun(item)
-                          ? "Recordar únicamente los recursos o argumentos propuestos por el motor durante esta ejecución"
-                          : "El motor no proporcionó un patrón o una operación exacta que pueda recordarse de forma segura"}
-                        onClick={() => void respondToDecision(item.id, "allow-run")}
-                      >
-                        Aprobar durante esta ejecución
-                      </button>
-                      <button className="secondary-button" type="button" disabled={decisionBusyId === item.id} onClick={() => void respondToDecision(item.id, "deny")}>Rechazar</button>
-                    </div>
-                    <span className="decision-scope-note">
-                      {item.engine === "opencode"
-                        ? "La aprobación temporal no modifica permisos globales ni se conserva para futuros análisis. Solo cubre los patrones concretos propuestos por OpenCode."
-                        : "La aprobación temporal no modifica permisos globales ni se conserva para futuros análisis. Solo permite repetir exactamente esta misma operación de Claude."}
-                    </span>
-                    </>
-                  ) : (
-                    <div className="decision-answer">
-                      <textarea value={decisionAnswers[item.id] ?? ""} onChange={(event) => setDecisionAnswers((current) => ({ ...current, [item.id]: event.target.value }))} rows={3} placeholder="Escribe la aclaración para el agente. Para formularios de varios campos de OpenCode, envía un objeto JSON con las claves del formulario." />
-                      <button className="primary-button" type="button" disabled={decisionBusyId === item.id || !(decisionAnswers[item.id] ?? "").trim()} onClick={() => void respondToDecision(item.id, "answer")}>
-                        {decisionBusyId === item.id ? "Enviando..." : "Enviar respuesta"}
-                      </button>
-                    </div>
-                  )}
-                </article>
-              ))}
-            </div>
-          </section>
+          {!execution && executionMonitoringPanels}
 
           <section className="section-block" id="team">
             <div className="section-title-row">
@@ -1272,6 +1278,7 @@ export default function App() {
                     </div>
                   ))}
                 </div>
+                {executionMonitoringPanels}
                 {execution.run.summary ? (
                   <div className="execution-summary">
                     <div className="execution-summary-heading">

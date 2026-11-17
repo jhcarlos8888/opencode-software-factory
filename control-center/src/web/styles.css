@@ -683,3 +683,50 @@ body { font-size: 16px; }
 .work-round-decisions article > span { color: #8a7a5a; font-size: 8px; font-weight: 800; }
 .work-round-decisions article p { color: #6f6759; font-size: 10px; }
 .work-legacy-note { padding: 9px 11px; border: 1px dashed #d8e0e8; border-radius: 7px; color: #7b8796; background: #fafbfd; font-size: 10px; line-height: 1.55; }
+
+/* Readability pass 3: slightly larger text in execution, activity and continuation. */
+.execution-status-heading h3 { font-size: 16px; line-height: 1.55; }
+.execution-agent-identity strong { font-size: 15px; }
+.execution-agent-identity > span { font-size: 13px; line-height: 1.55; }
+.execution-agent-identity code { font-size: 12px; line-height: 1.55; }
+.run-status-pill { font-size: 12px; }
+.agent-handoff-meta { font-size: 11px; }
+.terminal-kicker { font-size: 10px; }
+.activity-section .section-title-row p,
+.decision-section .section-title-row p { font-size: 14px; }
+.terminal-lines { font-size: 13px; line-height: 1.75; }
+.terminal-line { line-height: 1.6; }
+.terminal-disclaimer { font-size: 13px; }
+.decision-empty strong { font-size: 15px; }
+.decision-empty span { font-size: 13px; }
+.decision-card-head h3 { font-size: 17px; }
+.decision-card > p { font-size: 14px; line-height: 1.7; }
+.decision-details summary { font-size: 13px; }
+.decision-details pre { font-size: 12px; }
+.decision-scope-note { font-size: 12px; line-height: 1.65; }
+.execution-summary-heading h4 { font-size: 19px; }
+.execution-summary-overview { font-size: 15px; }
+.summary-metrics span { font-size: 12px; line-height: 1.55; }
+.summary-columns > div > strong { font-size: 13px; }
+.summary-columns ul { font-size: 13px; line-height: 1.7; }
+.summary-muted, .summary-limitations { font-size: 12px; line-height: 1.7; }
+.summary-source { font-size: 11px; }
+.execution-summary-pending strong { font-size: 14px; }
+.execution-summary-pending span { font-size: 13px; line-height: 1.65; }
+.work-continuation-heading h4 { font-size: 22px; }
+.work-continuation-heading p { font-size: 13px; }
+.work-message p { font-size: 13px; line-height: 1.75; }
+.work-message-meta strong { font-size: 11px; }
+.work-message-meta span { font-size: 10px; }
+.work-continuation-composer label { font-size: 13px; }
+.work-continuation-composer textarea { font-size: 14px; line-height: 1.7; }
+.work-composer-footer > span { font-size: 11px; line-height: 1.65; }
+
+@media (max-width: 760px) {
+  .terminal-lines { font-size: 12px; }
+  .terminal-line { font-size: 11px; }
+  .activity-section .section-title-row p,
+  .decision-section .section-title-row p { font-size: 13px; }
+  .decision-card > p, .execution-summary-overview,
+  .work-message p { font-size: 13px; }
+}
