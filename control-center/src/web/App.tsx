@@ -104,7 +104,8 @@ interface ExecutionSummary {
     legacyReports: string[]; orchestratorIdentifiedReports: string[];
   };
   approvals?: {
-    recordedDecisions: number; pending: number; approved: number; rejected: number;
+    recordedDecisions: number; recordedApprovalEvents: number;
+    pending: number; approved: number; rejected: number;
     answered: number; orphaned: number; automaticApprovals: number;
   };
   participants: { total: number; succeeded: number; skipped: string[]; failed: string[] };
@@ -1341,10 +1342,11 @@ export default function App() {
                       <div className="summary-integrity summary-approvals">
                         <div className="summary-integrity-heading">
                           <strong>Trazabilidad de decisiones y aprobaciones</strong>
-                          <span>{execution.run.summary.approvals.recordedDecisions + execution.run.summary.approvals.automaticApprovals > 0 ? "REGISTRO DISPONIBLE" : "SIN SOLICITUDES"}</span>
+                          <span>{execution.run.summary.approvals.recordedDecisions + execution.run.summary.approvals.recordedApprovalEvents > 0 ? "REGISTRO DISPONIBLE" : "SIN SOLICITUDES"}</span>
                         </div>
                         <div className="summary-integrity-metrics">
-                          <span>{execution.run.summary.approvals.recordedDecisions} solicitudes humanas</span>
+                          <span>{execution.run.summary.approvals.recordedDecisions} decisiones formales</span>
+                          <span>{execution.run.summary.approvals.recordedApprovalEvents} eventos de aprobación/revisión</span>
                           <span>{execution.run.summary.approvals.approved} aprobadas</span>
                           <span>{execution.run.summary.approvals.rejected} rechazadas</span>
                           <span>{execution.run.summary.approvals.answered} aclaraciones respondidas</span>

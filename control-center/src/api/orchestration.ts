@@ -80,6 +80,7 @@ export interface HandoffIntegritySummary {
 
 export interface ApprovalAuditSummary {
   recordedDecisions: number;
+  recordedApprovalEvents: number;
   pending: number;
   approved: number;
   rejected: number;
@@ -135,16 +136,26 @@ export interface ExecutionSummary {
   generatedAt: string;
 }
 
+function isAutomaticApprovalEvent(event: ApprovalAuditEvent): boolean {
+  return /autorización temporal aplicada automáticamente durante esta ejecución|autorización temporal reutilizada para la misma operación/i
+    .test(event.message);
+}
+
+function isApprovalAuditEvent(event: ApprovalAuditEvent): boolean {
+  return isAutomaticApprovalEvent(event) ||
+    /autorización limitada a esta ejecución|autorización limitada a la misma operación|solicitud atendida:|solicitud pendiente:|solicitud rechazada|rechazó las demás solicitudes/i
+      .test(event.message);
+}
+
 export function buildApprovalAuditSummary(
   decisions: ApprovalAuditDecision[] = [],
   events: ApprovalAuditEvent[] = []
 ): ApprovalAuditSummary {
-  const automaticApprovals = events.filter((event) =>
-    /autorización temporal aplicada automáticamente durante esta ejecución|autorización temporal reutilizada para la misma operación/i
-      .test(event.message)
-  ).length;
+  const automaticApprovals = events.filter(isAutomaticApprovalEvent).length;
+  const recordedApprovalEvents = events.filter(isApprovalAuditEvent).length;
   return {
     recordedDecisions: decisions.length,
+    recordedApprovalEvents,
     pending: decisions.filter((decision) => decision.status === "pending").length,
     approved: decisions.filter((decision) => decision.status === "approved").length,
     rejected: decisions.filter((decision) => decision.status === "rejected").length,
@@ -158,10 +169,8 @@ export function formatApprovalAuditContext(
   decisions: ApprovalAuditDecision[] = [],
   events: ApprovalAuditEvent[] = []
 ): string {
-  const automaticEvents = events.filter((event) =>
-    /autorización temporal aplicada automáticamente durante esta ejecución|autorización temporal reutilizada para la misma operación/i
-      .test(event.message)
-  );
+  const approvalEvents = events.filter(isApprovalAuditEvent);
+  const automaticEvents = approvalEvents.filter(isAutomaticApprovalEvent);
   const counts = buildApprovalAuditSummary(decisions, events);
   const lines = [
     "REGISTRO DE DECISIONES HUMANAS Y AUTORIZACIONES TEMPORALES — DATOS PERSISTIDOS DE ESTA EJECUCIÓN",
@@ -174,7 +183,7 @@ export function formatApprovalAuditContext(
       " | autorizaciones temporales aplicadas automáticamente: " + counts.automaticApprovals
   ];
 
-  if (!decisions.length && !automaticEvents.length) {
+  if (!decisions.length && !approvalEvents.length) {
     lines.push("No se registraron solicitudes de decisión ni reutilizaciones automáticas de autorizaciones en el ledger de esta ronda.");
     lines.push("No infieras aprobaciones de rondas anteriores ni confundas ausencia de solicitudes con aprobación global.");
     return lines.join("\n");
@@ -194,9 +203,9 @@ export function formatApprovalAuditContext(
       "respuesta registrada=" + (decision.response ?? "sin respuesta").slice(0, 500)
     ].join(" | "));
   }
-  for (const event of automaticEvents.slice(0, 50)) {
+  for (const event of approvalEvents.slice(0, 50)) {
     lines.push([
-      "AUTORIZACIÓN TEMPORAL AUTOMÁTICA",
+      isAutomaticApprovalEvent(event) ? "AUTORIZACIÓN TEMPORAL AUTOMÁTICA" : "EVENTO DE REVISIÓN / APROBACIÓN",
       "área=" + event.area,
       "agenteRun=" + (event.agentRunId ?? "no disponible"),
       "fecha=" + event.createdAt,
@@ -327,12 +336,19 @@ export function createHandoffDescriptor(
   const payload = result.handoffOutput ?? prepareHandoffOutput(result.output, result.handoffId);
   const hashMatches = createHash("sha256").update(payload.content, "utf8").digest("hex") === payload.sha256;
   const characterLengthMatches = payload.contentLength === payload.content.length;
+  const actualContentByteLength = Buffer.byteLength(payload.content, "utf8");
   const byteLengthMatches = typeof payload.contentByteLength === "number" &&
-    payload.contentByteLength === Buffer.byteLength(payload.content, "utf8");
-  const metadataComplete = byteLengthMatches &&
-    typeof payload.sourceByteLength === "number" &&
+    payload.contentByteLength === actualContentByteLength;
+  const sourceCharacterLengthMatches = payload.truncated
+    ? payload.sourceLength > payload.contentLength
+    : payload.sourceLength === payload.contentLength;
+  const sourceByteLengthMatches = typeof payload.sourceByteLength === "number" &&
+    payload.sourceByteLength >= payload.sourceLength &&
+    (payload.truncated || payload.sourceByteLength === actualContentByteLength);
+  const metadataComplete = byteLengthMatches && sourceByteLengthMatches &&
     (payload.idAuthor === "agent" || payload.idAuthor === "orchestrator");
-  const contentIntegrityVerified = hashMatches && characterLengthMatches && metadataComplete;
+  const contentIntegrityVerified = hashMatches && characterLengthMatches &&
+    sourceCharacterLengthMatches && metadataComplete;
   return {
     id: result.handoffId,
     fromAgent: result.agentId,
@@ -518,14 +534,21 @@ function assessHandoffIntegrity(
 
     const hashMatches = createHash("sha256").update(report.content, "utf8").digest("hex") === report.sha256;
     const characterLengthMatches = report.contentLength === report.content.length;
+    const actualContentByteLength = Buffer.byteLength(report.content, "utf8");
     const byteLengthAvailable = typeof report.contentByteLength === "number";
-    const byteLengthMatches = !byteLengthAvailable ||
-      report.contentByteLength === Buffer.byteLength(report.content, "utf8");
+    const byteLengthMatches = !byteLengthAvailable || report.contentByteLength === actualContentByteLength;
+    const sourceCharacterLengthMatches = report.truncated
+      ? report.sourceLength > report.contentLength
+      : report.sourceLength === report.contentLength;
+    const sourceByteLengthMatches = typeof report.sourceByteLength !== "number" ||
+      (report.sourceByteLength >= report.sourceLength &&
+        (report.truncated || report.sourceByteLength === actualContentByteLength));
     const sourceByteLengthAvailable = typeof report.sourceByteLength === "number";
     const idAuthorAvailable = report.idAuthor === "agent" || report.idAuthor === "orchestrator";
     const metadataIsLegacy = !byteLengthAvailable || !sourceByteLengthAvailable || !idAuthorAvailable;
     const idMatches = hasHandoffIdAtStart(report.content, result.handoffId);
-    const contentValid = hashMatches && characterLengthMatches && byteLengthMatches && idMatches;
+    const contentValid = hashMatches && characterLengthMatches && byteLengthMatches &&
+      sourceCharacterLengthMatches && sourceByteLengthMatches && idMatches;
 
     if (report.truncated) summary.truncatedReports.push(agent.agentId);
     if (!contentValid) summary.invalidReports.push(agent.agentId);
@@ -576,6 +599,8 @@ export function buildExecutionSummary(input: {
     typeof handoff.contentByteLength === "number" &&
     handoff.contentByteLength > 0 &&
     typeof handoff.sourceByteLength === "number" &&
+    handoff.sourceLength === handoff.contentLength &&
+    handoff.sourceByteLength === handoff.contentByteLength &&
     (handoff.idAuthor === "agent" || handoff.idAuthor === "orchestrator") &&
     Boolean(handoff.fromSessionId) &&
     Boolean(handoff.toSessionId);

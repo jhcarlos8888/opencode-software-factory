@@ -183,6 +183,10 @@ test("summary integrity marks missing, truncated and hash-mismatched reports", (
   const truncated = prepareHandoffOutput(truncatedId + "\n" + "dato. ".repeat(1800), truncatedId, 5000);
   const tampered = prepareHandoffOutput("HANDOFF-BUILD-12345678\nBuild.", "HANDOFF-BUILD-12345678");
   const corrupted = { ...tampered, sha256: "0".repeat(64) };
+  const invalidSourceLength = {
+    ...prepareHandoffOutput("HANDOFF-REVIEWER-12345678\nReviewer.", "HANDOFF-REVIEWER-12345678"),
+    sourceByteLength: 1
+  };
   const baseResult = (agentId: string, handoffId: string, output: ReturnType<typeof prepareHandoffOutput>) => ({
     agentRunId: agentId + "-run", agentId, engine: "opencode" as const,
     modelId: "opencode-go/glm-5.3-flash", sessionId: agentId + "-session",
@@ -191,17 +195,18 @@ test("summary integrity marks missing, truncated and hash-mismatched reports", (
   });
   const summary = buildExecutionSummary({
     instructions: "Diagnóstico.",
-    agents: ["architect", "build", "tester"].map((agentId) => ({
+    agents: ["architect", "build", "reviewer", "tester"].map((agentId) => ({
       agentId, engine: "opencode" as const, status: "succeeded" as const,
       startedAt: "2026-01-01T10:00:00Z", finishedAt: "2026-01-01T10:01:00Z", handoffIn: []
     })),
     results: [
       baseResult("architect", truncatedId, truncated),
-      baseResult("build", "HANDOFF-BUILD-12345678", corrupted)
+      baseResult("build", "HANDOFF-BUILD-12345678", corrupted),
+      baseResult("reviewer", "HANDOFF-REVIEWER-12345678", invalidSourceLength)
     ]
   });
   assert.deepEqual(summary.integrity.truncatedReports, ["architect"]);
-  assert.deepEqual(summary.integrity.invalidReports, ["build"]);
+  assert.deepEqual(summary.integrity.invalidReports, ["build", "reviewer"]);
   assert.deepEqual(summary.integrity.missingReports, ["tester"]);
   assert.equal(summary.integrity.status, "observations");
   assert.equal(summary.verdict, "observations");
@@ -247,7 +252,7 @@ test("approval audit summarizes human decisions and automatic run-scoped grants"
   ];
   const summary = buildApprovalAuditSummary(decisions, events);
   assert.deepEqual(summary, {
-    recordedDecisions: 3, pending: 0, approved: 1, rejected: 1,
+    recordedDecisions: 3, recordedApprovalEvents: 2, pending: 0, approved: 1, rejected: 1,
     answered: 1, orphaned: 0, automaticApprovals: 1
   });
   const context = formatApprovalAuditContext(decisions, events);
@@ -283,13 +288,30 @@ test("unresolved approval requests prevent a clean completed verdict", () => {
   assert.equal(summary.verdict, "observations");
 });
 
+test("approval audit keeps review events visible when a decision row is missing", () => {
+  const events = [{
+    area: "HUMAN-REVIEW",
+    message: "Autorización limitada a esta ejecución: Autorizar acción: shell.",
+    createdAt: "2026-11-16T20:00:05.000Z",
+    agentRunId: "tester-run"
+  }];
+  const summary = buildApprovalAuditSummary([], events);
+  assert.equal(summary.recordedDecisions, 0);
+  assert.equal(summary.recordedApprovalEvents, 1);
+  assert.equal(summary.automaticApprovals, 0);
+  const context = formatApprovalAuditContext([], events);
+  assert.match(context, /EVENTO DE REVISIÓN \/ APROBACIÓN/);
+  assert.match(context, /Autorización limitada a esta ejecución/);
+  assert.doesNotMatch(context, /No se registraron solicitudes/);
+});
+
 test("approval audit explicitly states when the current round has no approval requests", () => {
   const context = formatApprovalAuditContext([], []);
   assert.match(context, /No se registraron solicitudes/);
   assert.match(context, /ni confundas ausencia de solicitudes con aprobación global/i);
   const summary = buildApprovalAuditSummary([], []);
   assert.deepEqual(summary, {
-    recordedDecisions: 0, pending: 0, approved: 0, rejected: 0,
+    recordedDecisions: 0, recordedApprovalEvents: 0, pending: 0, approved: 0, rejected: 0,
     answered: 0, orphaned: 0, automaticApprovals: 0
   });
 });
@@ -376,7 +398,7 @@ test("cross-engine collaboration requires verified handoffs in both directions",
     fromModelId: "deepseek-v4.1-flash", fromSessionId: "session-claude",
     toAgent: "implementer", toAgentRunId: "agent-implementer", toEngine: "opencode",
     toSessionId: "session-opencode", contentIdVerified: true, contentIntegrityVerified: true,
-    contentSha256: "a".repeat(64), contentLength: 150, contentByteLength: 150, sourceByteLength: 150,
+    contentSha256: "a".repeat(64), contentLength: 150, sourceLength: 150, contentByteLength: 150, sourceByteLength: 150,
     contentTruncated: false, sourceIdentityVerified: true, idAuthor: "agent", deliveredAt: "2026-01-01T10:01:00Z"
   } as const;
   const openCodeToClaude = {
@@ -385,7 +407,7 @@ test("cross-engine collaboration requires verified handoffs in both directions",
     fromModelId: "opencode-go/glm-5.3-flash", fromSessionId: "session-opencode",
     toAgent: "reviewer", toAgentRunId: "agent-reviewer", toEngine: "claude",
     toSessionId: "session-reviewer", contentIdVerified: true, contentIntegrityVerified: true,
-    contentSha256: "b".repeat(64), contentLength: 170, contentByteLength: 170, sourceByteLength: 170,
+    contentSha256: "b".repeat(64), contentLength: 170, sourceLength: 170, contentByteLength: 170, sourceByteLength: 170,
     contentTruncated: false, sourceIdentityVerified: true, idAuthor: "agent", deliveredAt: "2026-01-01T10:04:00Z"
   } as const;
   const summary = buildExecutionSummary({
