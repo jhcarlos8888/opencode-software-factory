@@ -500,7 +500,12 @@ async function runMcpServer() {
 }
 
 const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
-if (invokedPath && pathToFileURL(invokedPath).href === import.meta.url) {
+const configuredEntryPoint = process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT
+  ? resolve(process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT)
+  : "";
+const isDirectEntryPoint = invokedPath && pathToFileURL(invokedPath).href === import.meta.url;
+const isConfiguredEntryPoint = configuredEntryPoint && pathToFileURL(configuredEntryPoint).href === import.meta.url;
+if (isDirectEntryPoint || isConfiguredEntryPoint) {
   runMcpServer().catch((error) => {
     process.stderr.write("[factory-filesystem] " + (error instanceof Error ? error.message : String(error)) + "\n");
     process.exitCode = 1;

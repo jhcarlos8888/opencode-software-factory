@@ -15,6 +15,7 @@ import { inspectFactoryFilesystemMcp, inspectOpenCodeAgentRegistry } from "./ope
 import { buildOpenCodePermissionRules } from "./opencode-permissions.js";
 import { redactSecrets, safeJson, sanitizeText } from "./redaction.js";
 import { claudeToolPathIsAllowed, OPENCODE_SENSITIVE_PATH_GLOBS, requireCanonicalProjectRoot } from "./filesystem-guards.js";
+import { createClaudeFactoryMcpConfig, isAllowedFactoryFilesystemMcpTool, isFactoryFilesystemToolName } from "./claude-mcp.js";
 import { planTask, type ResearchDepth } from "./task-planner.js";
 import {
   buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
@@ -808,7 +809,7 @@ async function runClaudeAgent(
       systemPrompt: {
         type: "preset",
         preset: "claude_code",
-        append: role + "\n\nLa fábrica administra otras fases de trabajo. No invoques subagentes ni delegues."
+        append: role + "\n\nLECTURA SEGURA DEL PROYECTO: usa exclusivamente el MCP interno factory_filesystem y sus herramientas list_files, read_file y search_text. No uses Read, Glob, Grep, LS, shell ni otros MCP para enumerar o leer archivos. El MCP está limitado al proyecto activo, rechaza traversal, symlinks y secretos, y solo ofrece lectura/búsqueda. La fábrica administra otras fases de trabajo: no invoques subagentes ni delegues."
       },
       disallowedTools: agent.permissionProfile === "read-only"
         ? ["Bash", "BashOutput", "KillShell", "Edit", "Write", "NotebookEdit", "MultiEdit", "NotebookWrite", "NotebookCellEdit", "Agent", "Task", "TaskCreate", "TaskGet", "TaskStop"]
@@ -817,6 +818,10 @@ async function runClaudeAgent(
       // including user allow-lists, plugins, MCP servers or filesystem hooks.
       // Provider credentials are passed explicitly via localClaudeConfig.env.
       settingSources: [],
+      // The only MCP admitted in this isolated session is the factory-owned,
+      // project-rooted, read-only filesystem service. It inherits cwd=projectPath.
+      mcpServers: createClaudeFactoryMcpConfig(factoryRoot),
+      strictMcpConfig: true,
       // canUseTool is not a hard boundary: CLI allow-rules may auto-approve a
       // tool before that callback runs. PreToolUse executes for every tool and
       // is therefore the enforcement point for project filesystem isolation.
@@ -839,10 +844,14 @@ async function runClaudeAgent(
               }
             });
 
+            const mcpServerName = hookInput.mcp_server && typeof hookInput.mcp_server === "object"
+              ? String((hookInput.mcp_server as Record<string, unknown>).name ?? "")
+              : "";
             if (hookInput.mcp_server || toolName.startsWith("mcp__")) {
+              if (isAllowedFactoryFilesystemMcpTool(toolName, mcpServerName)) return {};
               addLog(state.runId, agent.agentId.toUpperCase(), "warning",
-                "Bloqueo de aislamiento: las herramientas MCP no configuradas por la fábrica no están permitidas en sesiones Claude.", agent.id);
-              return deny("La sesión de fábrica no tiene permiso para invocar servidores MCP externos a su configuración controlada.");
+                "Bloqueo de aislamiento: solo se permite el MCP interno factory_filesystem y sus tres herramientas de solo lectura.", agent.id);
+              return deny("La sesión solo puede invocar list_files, read_file y search_text del MCP interno factory_filesystem.");
             }
             if (agent.permissionProfile === "read-only" &&
                 (writeTools.has(toolName) || shellTools.has(toolName) || delegationTools.has(toolName))) {
@@ -872,6 +881,9 @@ async function runClaudeAgent(
         }]
       },
       canUseTool: async (toolName, input, options) => {
+        if (isFactoryFilesystemToolName(toolName)) {
+          return { behavior: "allow", toolUseID: options.toolUseID };
+        }
         if (readTools.has(toolName)) {
           const allowed = await claudeToolPathIsAllowed(projectPath, toolName, input);
           if (allowed) return { behavior: "allow", toolUseID: options.toolUseID };
