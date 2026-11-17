@@ -660,8 +660,24 @@ export function getExecutionSnapshot(runId: string): ExecutionSnapshot | null {
   const events = db.prepare(`
     SELECT id, run_id AS runId, agent_run_id AS agentRunId, created_at AS createdAt,
       area, kind, message
-    FROM execution_events WHERE run_id = ? ORDER BY id DESC LIMIT 300
-  `).all(runId).reverse() as unknown as ExecutionEventRecord[];
+    FROM execution_events
+    WHERE run_id = ? AND (
+      id IN (
+        SELECT id FROM execution_events
+        WHERE run_id = ? ORDER BY id DESC LIMIT 300
+      ) OR
+      message LIKE '%Autorización temporal aplicada automáticamente durante esta ejecución:%' OR
+      message LIKE '%Autorización temporal reutilizada para la misma operación%' OR
+      message LIKE '%Autorización temporal reutilizada durante esta ejecución por el mismo agente:%' OR
+      message LIKE '%Autorización limitada a esta ejecución:%' OR
+      message LIKE '%Autorización limitada a la misma operación:%' OR
+      message LIKE '%Solicitud atendida:%' OR
+      message LIKE '%Solicitud pendiente:%' OR
+      message LIKE '%Solicitud rechazada%' OR
+      message LIKE '%rechazó las demás solicitudes%'
+    )
+    ORDER BY id ASC
+  `).all(runId, runId) as unknown as ExecutionEventRecord[];
   const decisionRows = db.prepare(`
     SELECT id, run_id AS runId, agent_run_id AS agentRunId, engine,
       engine_session_id AS engineSessionId, engine_request_id AS engineRequestId,
@@ -680,6 +696,31 @@ export function getExecutionSnapshot(runId: string): ExecutionSnapshot | null {
     decisionHistory
   };
 }
+/**
+ * Returns the complete approval/audit ledger for a run. This is intentionally
+ * independent of getExecutionSnapshot(), whose event list is capped for UI polling.
+ * Do not add a LIMIT here: missing approval evidence changes the security verdict.
+ */
+export function getExecutionApprovalEvents(runId: string): ExecutionEventRecord[] {
+  return db.prepare(`
+    SELECT id, run_id AS runId, agent_run_id AS agentRunId, created_at AS createdAt,
+      area, kind, message
+    FROM execution_events
+    WHERE run_id = ? AND (
+      message LIKE '%Autorización temporal aplicada automáticamente durante esta ejecución:%' OR
+      message LIKE '%Autorización temporal reutilizada para la misma operación%' OR
+      message LIKE '%Autorización temporal reutilizada durante esta ejecución por el mismo agente:%' OR
+      message LIKE '%Autorización limitada a esta ejecución:%' OR
+      message LIKE '%Autorización limitada a la misma operación:%' OR
+      message LIKE '%Solicitud atendida:%' OR
+      message LIKE '%Solicitud pendiente:%' OR
+      message LIKE '%Solicitud rechazada%' OR
+      message LIKE '%rechazó las demás solicitudes%'
+    )
+    ORDER BY id ASC
+  `).all(runId) as unknown as ExecutionEventRecord[];
+}
+
 export function getExecutionAgentHandoffOutput(runId: string, agentRunId: string): HandoffOutputRecord | null {
   const row = db.prepare(
     "SELECT handoff_output_json AS handoffOutputJson FROM execution_agents WHERE run_id = ? AND id = ?"

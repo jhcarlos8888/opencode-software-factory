@@ -137,7 +137,7 @@ export interface ExecutionSummary {
 }
 
 function isAutomaticApprovalEvent(event: ApprovalAuditEvent): boolean {
-  return /autorización temporal aplicada automáticamente durante esta ejecución|autorización temporal reutilizada para la misma operación/i
+  return /autorización temporal aplicada automáticamente durante esta ejecución|autorización temporal reutilizada para la misma operación|autorización temporal reutilizada durante esta ejecución por el mismo agente/i
     .test(event.message);
 }
 
@@ -189,7 +189,7 @@ export function formatApprovalAuditContext(
     return lines.join("\n");
   }
 
-  for (const decision of decisions.slice(0, 50)) {
+  for (const decision of decisions) {
     lines.push([
       "DECISIÓN " + decision.id,
       "agente=" + decision.agentId,
@@ -203,7 +203,7 @@ export function formatApprovalAuditContext(
       "respuesta registrada=" + (decision.response ?? "sin respuesta").slice(0, 500)
     ].join(" | "));
   }
-  for (const event of approvalEvents.slice(0, 50)) {
+  for (const event of approvalEvents) {
     lines.push([
       isAutomaticApprovalEvent(event) ? "AUTORIZACIÓN TEMPORAL AUTOMÁTICA" : "EVENTO DE REVISIÓN / APROBACIÓN",
       "área=" + event.area,

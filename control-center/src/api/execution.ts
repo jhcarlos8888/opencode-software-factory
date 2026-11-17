@@ -7,6 +7,7 @@ import { homedir } from "node:os";
 import { basename, delimiter, dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { readClaudeLocalConfig } from "./models.js";
+import { addAgentRunApprovals, matchesAgentRunApproval, buildRunApprovalPatterns } from "./permission-approvals.js";
 import { planTask, type ResearchDepth } from "./task-planner.js";
 import {
   buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
@@ -14,7 +15,7 @@ import {
 } from "./orchestration.js";
 import {
   addExecutionEvent, addWorkMessage, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
-  getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, listFavoriteModels,
+  getExecutionApprovalEvents, getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, listFavoriteModels,
   markUnfinishedExecutionsInterrupted, orphanExecutionDecisions, orphanExecutionDecisionsForAgent,
   resolveExecutionDecision, updateExecutionAgent, updateExecutionRun, updateExecutionSummary, updateWorkThreadStatus,
   type AgentAssignment, type EngineId, type ExecutionAgentRecord, type ExecutionDecisionRecord,
@@ -38,8 +39,8 @@ type RuntimeState = {
   claudeControllers: Map<string, AbortController>;
   resolvers: Map<string, PendingResolver>;
   pendingCount: number;
-  /** Temporary approvals are scoped to this run and discarded in executeRun.finally. */
-  openCodeRunApprovals: Array<{ action: string; resource: string }>;
+  /** Temporary allow-run grants are isolated to the agent run that received the human approval. */
+  openCodeRunApprovals: Map<string, Array<{ action: string; resource: string }>>;
   seenOpenCodePermissionRequests: Set<string>;
   claudeRunApprovalKeys: Set<string>;
 };
@@ -196,39 +197,6 @@ function stableJson(value: unknown): string {
 
 function claudeToolApprovalKey(toolName: string, input: unknown): string {
   return createHash("sha256").update(`${toolName}:${stableJson(input)}`).digest("hex");
-}
-
-function openCodePatternMatches(action: string, pattern: string, resource: string): boolean {
-  const normalize = (value: string) => value.split(String.fromCharCode(92)).join("/");
-  const normalizedPattern = normalize(pattern);
-  const normalizedResource = normalize(resource);
-  if (action === "shell" && normalizedPattern.endsWith(" *") && normalizedResource === normalizedPattern.slice(0, -2)) {
-    return true;
-  }
-  const expression = normalizedPattern.split("").map((character) => {
-    if (character === "*") return "[\\s\\S]*";
-    if (character === "?") return "[\\s\\S]";
-    return "|\\{}()[]^$+?.".includes(character) ? "\\" + character : character;
-  }).join("");
-  return new RegExp(`^${expression}$`).test(normalizedResource);
-}
-
-function runApprovalPatterns(request: OpenCodePermission): Array<{ action: string; resource: string }> {
-  const action = String(request.action ?? request.permission ?? "").trim();
-  if (!action) return [];
-  const proposed = Array.isArray(request.save) ? request.save : [];
-  const resources = Array.isArray(request.resources) ? request.resources : Array.isArray(request.patterns) ? request.patterns : [];
-  return [...new Set((proposed.length ? proposed : resources).filter((item): item is string => typeof item === "string" && !!item.trim()))]
-    .map((resource) => ({ action, resource }));
-}
-
-function matchesOpenCodeRunApproval(state: RuntimeState, request: OpenCodePermission): boolean {
-  const action = String(request.action ?? request.permission ?? "").trim();
-  const resources = Array.isArray(request.resources) ? request.resources : Array.isArray(request.patterns) ? request.patterns : [];
-  if (!action || resources.length === 0) return false;
-  return resources.every((resource) => typeof resource === "string" && state.openCodeRunApprovals.some((rule) =>
-    rule.action === action && openCodePatternMatches(action, rule.resource, resource)
-  ));
 }
 
 function pathIsSensitive(pathValue: string, canonicalPath?: string): boolean {
@@ -486,8 +454,8 @@ function createOpenCodeDecision(
   const action = String(request.action ?? request.permission ?? "acción");
   const resources = Array.isArray(request.resources) ? request.resources : Array.isArray(request.patterns) ? request.patterns : [];
   const proposedPatterns = Array.isArray(request.save) ? request.save : [];
-  const resourceText = resources.length ? ` Recursos solicitados: ${resources.join(", ")}.` : "";
-  const patternText = proposedPatterns.length ? ` Patrones propuestos para esta ejecución: ${proposedPatterns.join(", ")}.` : "";
+  const resourceText = resources.length ? ` Recursos solicitados (elementos separados): ${JSON.stringify(resources)}.` : "";
+  const patternText = proposedPatterns.length ? ` Patrones propuestos (elementos separados): ${JSON.stringify(proposedPatterns)}.` : "";
   const description = kind === "permission"
     ? `OpenCode solicita autorización para ${action}.${resourceText}${patternText}`
     : String(request.metadata?.description ?? "OpenCode necesita información para continuar.");
@@ -532,13 +500,13 @@ async function pollOpenCodeAgent(
     if (!requestId) continue;
     const requestKey = `${sessionId}:${requestId}`;
     if (state.seenOpenCodePermissionRequests.has(requestKey)) continue;
-    if (matchesOpenCodeRunApproval(state, request)) {
+    if (matchesAgentRunApproval(state.openCodeRunApprovals, agent.id, request)) {
       try {
         await replyOpenCodePermission(runtime, sessionId, requestId, "once");
         state.seenOpenCodePermissionRequests.add(requestKey);
         const action = String(request.action ?? request.permission ?? "acción");
         const resources = Array.isArray(request.resources) ? request.resources.join(", ") : "";
-        addLog(state.runId, agent.agentId.toUpperCase(), "success", `Autorización temporal aplicada automáticamente durante esta ejecución: ${action}${resources ? ` · ${resources}` : ""}.`, agent.id);
+        addLog(state.runId, agent.agentId.toUpperCase(), "success", `Autorización temporal reutilizada durante esta ejecución por el mismo agente: ${action}${resources ? ` · ${resources}` : ""}.`, agent.id);
         continue;
       } catch (error) {
         if (error instanceof Error && /OpenCode API HTTP 404/.test(error.message)) {
@@ -1192,6 +1160,7 @@ async function executeRun(
           " | inicio=" + (item.startedAt ?? "no iniciado") + " | fin=" + (item.finishedAt ?? "pendiente") +
           " | handoff-out=" + (item.handoffOut.map((handoff) => handoff.id + "→" + handoff.toAgent).join(", ") || "ninguno")
         ).join("; ") ?? "registro no disponible";
+        const approvalEvents = arbiterLedger ? getExecutionApprovalEvents(state.runId) : [];
         const approvalAudit = arbiterLedger
           ? formatApprovalAuditContext(
               arbiterLedger.decisionHistory.map((decision) => ({
@@ -1206,7 +1175,7 @@ async function executeRun(
                 createdAt: decision.createdAt,
                 resolvedAt: decision.resolvedAt
               })),
-              arbiterLedger.events.map((event) => ({
+              approvalEvents.map((event) => ({
                 area: event.area,
                 message: event.message,
                 createdAt: event.createdAt,
@@ -1354,7 +1323,7 @@ async function executeRun(
         createdAt: decision.createdAt,
         resolvedAt: decision.resolvedAt
       })),
-      approvalEvents: snapshot.events.map((event) => ({
+      approvalEvents: getExecutionApprovalEvents(state.runId).map((event) => ({
         area: event.area,
         message: event.message,
         createdAt: event.createdAt,
@@ -1407,7 +1376,7 @@ async function executeRun(
     }
     for (const resolver of state.resolvers.values()) resolver({ action: "deny" });
     state.resolvers.clear();
-    state.openCodeRunApprovals.length = 0;
+    state.openCodeRunApprovals.clear();
     state.seenOpenCodePermissionRequests.clear();
     state.claudeRunApprovalKeys.clear();
     runtimeByRun.delete(state.runId);
@@ -1484,7 +1453,7 @@ export async function startExecution(
   const state: RuntimeState = {
     runId: id, cancelled: false, claudeControllers: new Map(),
     resolvers: new Map(), pendingCount: 0,
-    openCodeRunApprovals: [], seenOpenCodePermissionRequests: new Set(), claudeRunApprovalKeys: new Set()
+    openCodeRunApprovals: new Map(), seenOpenCodePermissionRequests: new Set(), claudeRunApprovalKeys: new Set()
   };
   runtimeByRun.set(id, state);
   addLog(id, "ORCHESTRATOR", "success",
@@ -1560,11 +1529,10 @@ export async function respondExecutionDecision(
       const details = decision.details && typeof decision.details === "object"
         ? decision.details as OpenCodePermission
         : {};
-      const addedRules = response.action === "allow-run" ? runApprovalPatterns(details) : [];
+      const addedRules = response.action === "allow-run" ? buildRunApprovalPatterns(details) : [];
       if (response.action === "allow-run" && addedRules.length === 0) {
         throw new Error("OpenCode no propuso recursos o patrones concretos para recordar. Aprueba esta operación una sola vez.");
       }
-      state.openCodeRunApprovals.push(...addedRules);
       try {
         await replyOpenCodePermission(
           runtime,
@@ -1574,10 +1542,6 @@ export async function respondExecutionDecision(
           response.answer
         );
       } catch (error) {
-        for (const rule of addedRules) {
-          const index = state.openCodeRunApprovals.lastIndexOf(rule);
-          if (index >= 0) state.openCodeRunApprovals.splice(index, 1);
-        }
         if (error instanceof Error && /OpenCode API HTTP 404/.test(error.message)) {
           const pendingPayload = await openCodeRequest<unknown>(
             runtime, "GET", `/api/session/${encodeURIComponent(decision.engineSessionId)}/permission`
@@ -1592,6 +1556,9 @@ export async function respondExecutionDecision(
           }
         }
         throw error;
+      }
+      if (response.action === "allow-run") {
+        addAgentRunApprovals(state.openCodeRunApprovals, decision.agentRunId, addedRules);
       }
       resolveExecutionDecision(
         decisionId,

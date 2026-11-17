@@ -1,4 +1,5 @@
 import test from "node:test";
+import { addAgentRunApprovals, buildRunApprovalPatterns, matchesAgentRunApproval } from "./permission-approvals.js";
 import assert from "node:assert/strict";
 import {
   buildApprovalAuditSummary, buildExecutionSummary, createHandoffDescriptor, createHandoffId,
@@ -314,6 +315,56 @@ test("approval audit explicitly states when the current round has no approval re
     recordedDecisions: 0, recordedApprovalEvents: 0, pending: 0, approved: 0, rejected: 0,
     answered: 0, orphaned: 0, automaticApprovals: 0
   });
+});
+
+test("OpenCode allow-run grants are isolated to the agent run that received approval", () => {
+  const approvals = new Map();
+  const buildRequest = {
+    action: "shell",
+    resources: ["git status --porcelain", "git log -1"],
+    save: ["git status *", "git log *"]
+  };
+  const rules = buildRunApprovalPatterns(buildRequest);
+  assert.equal(rules.length, 2);
+  addAgentRunApprovals(approvals, "build-run-id", rules);
+
+  assert.equal(matchesAgentRunApproval(approvals, "build-run-id", {
+    action: "shell", resources: ["git status --porcelain"]
+  }), true);
+  assert.equal(matchesAgentRunApproval(approvals, "tester-run-id", {
+    action: "shell", resources: ["git status --porcelain"]
+  }), false);
+  assert.equal(matchesAgentRunApproval(approvals, "build-run-id", {
+    action: "shell", resources: ["git status --porcelain", "git log -1"]
+  }), true);
+  assert.equal(matchesAgentRunApproval(approvals, "build-run-id", {
+    action: "write", resources: ["git status --porcelain"]
+  }), false);
+});
+
+test("agent-run approvals merge without duplicate patterns and empty requests cannot grant", () => {
+  const approvals = new Map();
+  const first = buildRunApprovalPatterns({ action: "shell", save: ["grep *", "wc *"] });
+  addAgentRunApprovals(approvals, "tester-run-id", first);
+  addAgentRunApprovals(approvals, "tester-run-id", first);
+  assert.equal(approvals.get("tester-run-id").length, 2);
+  assert.deepEqual(buildRunApprovalPatterns({ action: "shell", save: [] , resources: [] }), []);
+  assert.deepEqual(buildRunApprovalPatterns({ save: ["*"], resources: ["*" ] }), []);
+});
+
+test("approval audit context retains more than fifty approval events", () => {
+  const events = Array.from({ length: 75 }, (_, index) => ({
+    area: "TESTER",
+    message: `Autorización temporal reutilizada durante esta ejecución por el mismo agente: shell · cmd-${index}.`,
+    createdAt: new Date(Date.UTC(2026, 10, 17, 12, 0, index)).toISOString(),
+    agentRunId: "tester-run"
+  }));
+  const summary = buildApprovalAuditSummary([], events);
+  assert.equal(summary.recordedApprovalEvents, 75);
+  assert.equal(summary.automaticApprovals, 75);
+  const context = formatApprovalAuditContext([], events);
+  assert.match(context, /cmd-0/);
+  assert.match(context, /cmd-74/);
 });
 
 test("handoff identifiers are deterministic, unique by agent and tied to the run", () => {
