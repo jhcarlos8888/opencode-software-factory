@@ -78,6 +78,36 @@ export interface HandoffIntegritySummary {
   orchestratorIdentifiedReports: string[];
 }
 
+export interface ApprovalAuditSummary {
+  recordedDecisions: number;
+  pending: number;
+  approved: number;
+  rejected: number;
+  answered: number;
+  orphaned: number;
+  automaticApprovals: number;
+}
+
+export interface ApprovalAuditDecision {
+  id: string;
+  agentId: string;
+  engine: CoordinationEngine;
+  kind: "permission" | "question";
+  status: string;
+  title: string;
+  description: string;
+  response: string | null;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface ApprovalAuditEvent {
+  area: string;
+  message: string;
+  createdAt: string;
+  agentRunId: string | null;
+}
+
 export interface ExecutionSummary {
   verdict: "completed" | "observations" | "failed";
   headline: string;
@@ -85,6 +115,7 @@ export interface ExecutionSummary {
   findings: string[];
   nextSteps: string[];
   integrity: HandoffIntegritySummary;
+  approvals: ApprovalAuditSummary;
   participants: {
     total: number;
     succeeded: number;
@@ -102,6 +133,80 @@ export interface ExecutionSummary {
   };
   generatedBy: "cloud-arbiter" | "orchestrator";
   generatedAt: string;
+}
+
+export function buildApprovalAuditSummary(
+  decisions: ApprovalAuditDecision[] = [],
+  events: ApprovalAuditEvent[] = []
+): ApprovalAuditSummary {
+  const automaticApprovals = events.filter((event) =>
+    /autorización temporal aplicada automáticamente durante esta ejecución|autorización temporal reutilizada para la misma operación/i
+      .test(event.message)
+  ).length;
+  return {
+    recordedDecisions: decisions.length,
+    pending: decisions.filter((decision) => decision.status === "pending").length,
+    approved: decisions.filter((decision) => decision.status === "approved").length,
+    rejected: decisions.filter((decision) => decision.status === "rejected").length,
+    answered: decisions.filter((decision) => decision.status === "answered").length,
+    orphaned: decisions.filter((decision) => decision.status === "orphaned").length,
+    automaticApprovals
+  };
+}
+
+export function formatApprovalAuditContext(
+  decisions: ApprovalAuditDecision[] = [],
+  events: ApprovalAuditEvent[] = []
+): string {
+  const automaticEvents = events.filter((event) =>
+    /autorización temporal aplicada automáticamente durante esta ejecución|autorización temporal reutilizada para la misma operación/i
+      .test(event.message)
+  );
+  const counts = buildApprovalAuditSummary(decisions, events);
+  const lines = [
+    "REGISTRO DE DECISIONES HUMANAS Y AUTORIZACIONES TEMPORALES — DATOS PERSISTIDOS DE ESTA EJECUCIÓN",
+    "Solicitudes registradas: " + counts.recordedDecisions +
+      " | aprobadas: " + counts.approved +
+      " | rechazadas: " + counts.rejected +
+      " | aclaraciones respondidas: " + counts.answered +
+      " | pendientes: " + counts.pending +
+      " | huérfanas: " + counts.orphaned +
+      " | autorizaciones temporales aplicadas automáticamente: " + counts.automaticApprovals
+  ];
+
+  if (!decisions.length && !automaticEvents.length) {
+    lines.push("No se registraron solicitudes de decisión ni reutilizaciones automáticas de autorizaciones en el ledger de esta ronda.");
+    lines.push("No infieras aprobaciones de rondas anteriores ni confundas ausencia de solicitudes con aprobación global.");
+    return lines.join("\n");
+  }
+
+  for (const decision of decisions.slice(0, 50)) {
+    lines.push([
+      "DECISIÓN " + decision.id,
+      "agente=" + decision.agentId,
+      "motor=" + decision.engine,
+      "tipo=" + decision.kind,
+      "estado=" + decision.status,
+      "creada=" + decision.createdAt,
+      "resuelta=" + (decision.resolvedAt ?? "pendiente"),
+      "título=" + decision.title.slice(0, 300),
+      "alcance/solicitud=" + decision.description.slice(0, 600),
+      "respuesta registrada=" + (decision.response ?? "sin respuesta").slice(0, 500)
+    ].join(" | "));
+  }
+  for (const event of automaticEvents.slice(0, 50)) {
+    lines.push([
+      "AUTORIZACIÓN TEMPORAL AUTOMÁTICA",
+      "área=" + event.area,
+      "agenteRun=" + (event.agentRunId ?? "no disponible"),
+      "fecha=" + event.createdAt,
+      event.message.slice(0, 600)
+    ].join(" | "));
+  }
+  lines.push("Fuente de verdad: decisionHistory y eventos persistidos de la ejecución actual; no mezclar con otras rondas.");
+  lines.push("Contrasta el resumen con cada DECISIÓN y AUTORIZACIÓN TEMPORAL AUTOMÁTICA enumerada. No afirmes que no hubo aprobaciones si estos registros contienen decisiones aprobadas.");
+  lines.push("Distinción obligatoria: decisión humana explícita, autorización temporal reutilizada y ausencia de solicitudes son situaciones diferentes. Una autorización limitada a esta ejecución no es un permiso global ni persistente.");
+  return lines.join("\n");
 }
 
 const EXPECTED_AGENTS = ["architect", "build", "implementer", "reviewer", "tester", "reverse", "cloud-arbiter"];
@@ -446,10 +551,13 @@ export function buildExecutionSummary(input: {
   agents: SummaryAgent[];
   cloudArbiterOutput?: string | null;
   results: AgentResult[];
+  decisions?: ApprovalAuditDecision[];
+  approvalEvents?: ApprovalAuditEvent[];
   generatedAt?: string;
 }): ExecutionSummary {
   const agents = input.agents;
   const integrity = assessHandoffIntegrity(agents, input.results);
+  const approvals = buildApprovalAuditSummary(input.decisions, input.approvalEvents);
   const succeeded = agents.filter((agent) => agent.status === "succeeded").length;
   const skipped = agents.filter((agent) => agent.status === "skipped").map((agent) => agent.agentId);
   const failed = agents.filter((agent) => agent.status === "failed").map((agent) => agent.agentId);
@@ -498,9 +606,10 @@ export function buildExecutionSummary(input: {
   const nextSteps = extractNextSteps(nextStepsSection);
   const failedPipeline = failed.length > 0;
   const collaborationIncomplete = collaborationExpected && (!collaborationVerified || !concurrentCrossEngineVerified);
+  const approvalAuditIncomplete = approvals.pending > 0 || approvals.orphaned > 0;
   const verdict: ExecutionSummary["verdict"] =
     failedPipeline || mandatoryUnavailable ? "failed" :
-      skipped.length > 0 || collaborationIncomplete || integrity.status === "observations" ? "observations" : "completed";
+      skipped.length > 0 || collaborationIncomplete || integrity.status === "observations" || approvalAuditIncomplete ? "observations" : "completed";
   const skippedText = skipped.length ? ` Agentes deshabilitados u omitidos: ${skipped.join(", ")}.` : "";
   const missingText = missingExpected.length ? ` No hay registro de: ${missingExpected.join(", ")}.` : "";
   const fallback = `Se completaron ${succeeded} de ${agents.length} agentes registrados. Se entregaron ${handoffs.length} handoffs, de los cuales ${verifiedCrossEngineHandoffs} cruces entre motores están verificados de extremo a extremo. ${concurrentCrossEngineVerified ? "Se verificó solapamiento temporal real entre Claude Code y OpenCode." : "No se verificó solapamiento temporal entre motores."}${skippedText}${missingText}`;
@@ -513,6 +622,7 @@ export function buildExecutionSummary(input: {
     findings,
     nextSteps,
     integrity,
+    approvals,
     participants: { total: agents.length, succeeded, skipped, failed },
     collaboration: {
       handoffs: handoffs.length,

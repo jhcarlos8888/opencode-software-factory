@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
-  extractClaudeFinalText, hasConcurrentCrossEngineRun, hasHandoffIdAtStart, prepareHandoffOutput,
-  type SummaryAgent
+  buildApprovalAuditSummary, buildExecutionSummary, createHandoffDescriptor, createHandoffId,
+  extractCanonicalOpenCodeAssistantText, extractClaudeFinalText, formatApprovalAuditContext,
+  hasConcurrentCrossEngineRun, hasHandoffIdAtStart, prepareHandoffOutput, type SummaryAgent
 } from "./orchestration.js";
 
 test("OpenCode handoff capture selects only the terminal assistant message", () => {
@@ -205,6 +205,93 @@ test("summary integrity marks missing, truncated and hash-mismatched reports", (
   assert.deepEqual(summary.integrity.missingReports, ["tester"]);
   assert.equal(summary.integrity.status, "observations");
   assert.equal(summary.verdict, "observations");
+});
+
+test("approval audit summarizes human decisions and automatic run-scoped grants", () => {
+  const decisions = [
+    {
+      id: "decision-approved", agentId: "tester", engine: "opencode" as const,
+      kind: "permission" as const, status: "approved", title: "Autorizar acción: shell",
+      description: "shell solicita grep y wc en el proyecto.",
+      response: "Aprobado durante esta ejecución: shell: grep; wc",
+      createdAt: "2026-11-16T20:00:00.000Z", resolvedAt: "2026-11-16T20:00:05.000Z"
+    },
+    {
+      id: "decision-rejected", agentId: "build", engine: "opencode" as const,
+      kind: "permission" as const, status: "rejected", title: "Autorizar acción: shell",
+      description: "shell solicita una operación fuera del alcance.",
+      response: "Rechazado.",
+      createdAt: "2026-11-16T20:01:00.000Z", resolvedAt: "2026-11-16T20:01:03.000Z"
+    },
+    {
+      id: "decision-question", agentId: "architect", engine: "claude" as const,
+      kind: "question" as const, status: "answered", title: "Aclaración sobre el contrato",
+      description: "El agente solicitó una precisión.",
+      response: "Conserva el comportamiento actual.",
+      createdAt: "2026-11-16T20:02:00.000Z", resolvedAt: "2026-11-16T20:02:10.000Z"
+    }
+  ];
+  const events = [
+    {
+      area: "TESTER", message: "Autorización temporal aplicada automáticamente durante esta ejecución: shell · opencode --version.",
+      createdAt: "2026-11-16T20:03:00.000Z", agentRunId: "tester-run"
+    },
+    {
+      area: "HUMAN-REVIEW", message: "Autorización limitada a esta ejecución: Autorizar acción: shell.",
+      createdAt: "2026-11-16T20:00:05.000Z", agentRunId: "tester-run"
+    },
+    {
+      area: "TESTER", message: "Se leyó README.md.",
+      createdAt: "2026-11-16T20:04:00.000Z", agentRunId: "tester-run"
+    }
+  ];
+  const summary = buildApprovalAuditSummary(decisions, events);
+  assert.deepEqual(summary, {
+    recordedDecisions: 3, pending: 0, approved: 1, rejected: 1,
+    answered: 1, orphaned: 0, automaticApprovals: 1
+  });
+  const context = formatApprovalAuditContext(decisions, events);
+  assert.match(context, /Solicitudes registradas: 3/);
+  assert.match(context, /DECISIÓN decision-approved/);
+  assert.match(context, /estado=approved/);
+  assert.match(context, /DECISIÓN decision-rejected/);
+  assert.match(context, /AUTORIZACIÓN TEMPORAL AUTOMÁTICA/);
+  assert.match(context, /opencode --version/);
+  const executionSummary = buildExecutionSummary({
+    instructions: "Consulta de solo lectura.",
+    agents: [],
+    results: [],
+    decisions,
+    approvalEvents: events
+  });
+  assert.deepEqual(executionSummary.approvals, summary);
+});
+
+test("unresolved approval requests prevent a clean completed verdict", () => {
+  const summary = buildExecutionSummary({
+    instructions: "Revisión de arquitectura.",
+    agents: [],
+    results: [],
+    decisions: [{
+      id: "decision-pending", agentId: "tester", engine: "opencode",
+      kind: "permission", status: "pending", title: "Autorizar una operación",
+      description: "La operación sigue esperando aprobación.", response: null,
+      createdAt: "2026-11-16T20:00:00.000Z", resolvedAt: null
+    }]
+  });
+  assert.equal(summary.approvals.pending, 1);
+  assert.equal(summary.verdict, "observations");
+});
+
+test("approval audit explicitly states when the current round has no approval requests", () => {
+  const context = formatApprovalAuditContext([], []);
+  assert.match(context, /No se registraron solicitudes/);
+  assert.match(context, /ni confundas ausencia de solicitudes con aprobación global/i);
+  const summary = buildApprovalAuditSummary([], []);
+  assert.deepEqual(summary, {
+    recordedDecisions: 0, pending: 0, approved: 0, rejected: 0,
+    answered: 0, orphaned: 0, automaticApprovals: 0
+  });
 });
 
 test("handoff identifiers are deterministic, unique by agent and tied to the run", () => {

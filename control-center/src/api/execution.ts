@@ -10,7 +10,7 @@ import { readClaudeLocalConfig } from "./models.js";
 import { planTask, type ResearchDepth } from "./task-planner.js";
 import {
   buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
-  extractClaudeFinalText, prepareHandoffOutput, type AgentResult, type HandoffDescriptor
+  extractClaudeFinalText, formatApprovalAuditContext, prepareHandoffOutput, type AgentResult, type HandoffDescriptor
 } from "./orchestration.js";
 import {
   addExecutionEvent, addWorkMessage, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
@@ -1181,20 +1181,48 @@ async function executeRun(
       try {
         const roleInstructions = workflow.roleInstructions[agent.agentId] ??
           await loadRoleInstructions(factoryRoot, agent.agentId);
-        const roster = agent.agentId === "cloud-arbiter"
-          ? getExecutionSnapshot(state.runId)?.agents.map((item) =>
-              item.agentId + " | motor=" + item.engine + " | modelo=" + item.modelId +
-              " | estado=" + item.status + " | sesión=" + (item.sessionId ?? (item.agentId === "cloud-arbiter" && item.status === "running"
-                ? "se asignará durante la inicialización de esta fase; consultar el ledger final"
-                : "no disponible")) +
-              " | inicio=" + (item.startedAt ?? "no iniciado") + " | fin=" + (item.finishedAt ?? "pendiente") +
-              " | handoff-out=" + (item.handoffOut.map((handoff) => handoff.id + "→" + handoff.toAgent).join(", ") || "ninguno")
-            ).join("; ") ?? "registro no disponible"
-          : "";
+        const arbiterLedger = agent.agentId === "cloud-arbiter"
+          ? getExecutionSnapshot(state.runId)
+          : null;
+        const roster = arbiterLedger?.agents.map((item) =>
+          item.agentId + " | motor=" + item.engine + " | modelo=" + item.modelId +
+          " | estado=" + item.status + " | sesión=" + (item.sessionId ?? (item.agentId === "cloud-arbiter" && item.status === "running"
+            ? "se asignará durante la inicialización de esta fase; consultar el ledger final"
+            : "no disponible")) +
+          " | inicio=" + (item.startedAt ?? "no iniciado") + " | fin=" + (item.finishedAt ?? "pendiente") +
+          " | handoff-out=" + (item.handoffOut.map((handoff) => handoff.id + "→" + handoff.toAgent).join(", ") || "ninguno")
+        ).join("; ") ?? "registro no disponible";
+        const approvalAudit = arbiterLedger
+          ? formatApprovalAuditContext(
+              arbiterLedger.decisionHistory.map((decision) => ({
+                id: decision.id,
+                agentId: arbiterLedger.agents.find((item) => item.id === decision.agentRunId)?.agentId ?? "agente desconocido",
+                engine: decision.engine,
+                kind: decision.kind,
+                status: decision.status,
+                title: decision.title,
+                description: decision.description,
+                response: decision.response,
+                createdAt: decision.createdAt,
+                resolvedAt: decision.resolvedAt
+              })),
+              arbiterLedger.events.map((event) => ({
+                area: event.area,
+                message: event.message,
+                createdAt: event.createdAt,
+                agentRunId: event.agentRunId
+              }))
+            )
+          : "No se pudo recuperar el ledger de decisiones de esta ejecución.";
         const agentStructuralContext = agent.agentId === "cloud-arbiter"
-          ? structuralContext + String.fromCharCode(10) + "REGISTRO REAL DE PARTICIPACIÓN (FUENTE DE VERDAD): " + roster +
-            String.fromCharCode(10) + "Este registro prevalece sobre cualquier afirmación textual de un handoff." +
-            String.fromCharCode(10) + "La sesión propia del Cloud Arbiter se asigna después de construir este contexto. Si el roster dice que se asignará durante la inicialización, no informes que la sesión está ausente; el ledger final contiene el ID definitivo."
+          ? [
+              structuralContext,
+              "REGISTRO REAL DE PARTICIPACIÓN (FUENTE DE VERDAD): " + roster,
+              "REGISTRO DE DECISIONES Y APROBACIONES (FUENTE DE VERDAD):",
+              approvalAudit,
+              "Estos registros pertenecen exclusivamente a la ejecución actual y prevalecen sobre las afirmaciones textuales de los handoffs.",
+              "La sesión propia del Cloud Arbiter se asigna después de construir este contexto. Si el roster dice que se asignará durante la inicialización, no informes que la sesión está ausente; el ledger final contiene el ID definitivo."
+            ].join(String.fromCharCode(10))
           : structuralContext;
         const prompt = makeAgentPrompt(
           agent, instructions, roleInstructions, agentStructuralContext, inbound, handoffId, taskPlan.changesExpected
@@ -1308,11 +1336,30 @@ async function executeRun(
 
     const snapshot = getExecutionSnapshot(state.runId);
     if (!snapshot) throw new Error("No se pudo recuperar el registro final de la ejecución.");
+    const agentIdByRunId = new Map(snapshot.agents.map((agent) => [agent.id, agent.agentId]));
     const summary = buildExecutionSummary({
       instructions,
       agents: snapshot.agents,
       results: allResults,
-      cloudArbiterOutput
+      cloudArbiterOutput,
+      decisions: snapshot.decisionHistory.map((decision) => ({
+        id: decision.id,
+        agentId: agentIdByRunId.get(decision.agentRunId) ?? "agente desconocido",
+        engine: decision.engine,
+        kind: decision.kind,
+        status: decision.status,
+        title: decision.title,
+        description: decision.description,
+        response: decision.response,
+        createdAt: decision.createdAt,
+        resolvedAt: decision.resolvedAt
+      })),
+      approvalEvents: snapshot.events.map((event) => ({
+        area: event.area,
+        message: event.message,
+        createdAt: event.createdAt,
+        agentRunId: event.agentRunId
+      }))
     });
     updateExecutionSummary(state.runId, summary);
     addLog(state.runId, "EXECUTIVE-SUMMARY", summary.verdict === "failed" ? "warning" : "success",

@@ -103,6 +103,10 @@ interface ExecutionSummary {
     missingReports: string[]; truncatedReports: string[]; invalidReports: string[];
     legacyReports: string[]; orchestratorIdentifiedReports: string[];
   };
+  approvals?: {
+    recordedDecisions: number; pending: number; approved: number; rejected: number;
+    answered: number; orphaned: number; automaticApprovals: number;
+  };
   participants: { total: number; succeeded: number; skipped: string[]; failed: string[] };
   collaboration: {
     handoffs: number; crossEngineHandoffs: number; verifiedCrossEngineHandoffs: number;
@@ -1330,6 +1334,27 @@ export default function App() {
                         )}
                         {execution.run.summary.integrity.orchestratorIdentifiedReports.length > 0 && (
                           <p><strong>ID incorporado por el orquestador:</strong> {execution.run.summary.integrity.orchestratorIdentifiedReports.join(", ")}</p>
+                        )}
+                      </div>
+                    )}
+                    {execution.run.summary.approvals && (
+                      <div className="summary-integrity summary-approvals">
+                        <div className="summary-integrity-heading">
+                          <strong>Trazabilidad de decisiones y aprobaciones</strong>
+                          <span>{execution.run.summary.approvals.recordedDecisions + execution.run.summary.approvals.automaticApprovals > 0 ? "REGISTRO DISPONIBLE" : "SIN SOLICITUDES"}</span>
+                        </div>
+                        <div className="summary-integrity-metrics">
+                          <span>{execution.run.summary.approvals.recordedDecisions} solicitudes humanas</span>
+                          <span>{execution.run.summary.approvals.approved} aprobadas</span>
+                          <span>{execution.run.summary.approvals.rejected} rechazadas</span>
+                          <span>{execution.run.summary.approvals.answered} aclaraciones respondidas</span>
+                          <span>{execution.run.summary.approvals.automaticApprovals} autorizaciones temporales aplicadas automáticamente</span>
+                        </div>
+                        {(execution.run.summary.approvals.pending > 0 || execution.run.summary.approvals.orphaned > 0) && (
+                          <p>
+                            <strong>Atención:</strong> {execution.run.summary.approvals.pending} pendientes ·
+                            {execution.run.summary.approvals.orphaned} solicitudes huérfanas.
+                          </p>
                         )}
                       </div>
                     )}
