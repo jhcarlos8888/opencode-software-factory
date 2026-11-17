@@ -8,18 +8,35 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadFactoryAssets, mergeAssignments } from "./factory.js";
 import {
-  addWorkMessage, createWorkThread, databaseInfo, getClaudeProviderPreference, getExecutionAgentHandoffOutput, getProjectPreferences,
-  getWorkThreadSnapshot, listAssignments, listFavoriteModels, saveAssignments, saveClaudeProviderPreference,
-  saveFavoriteModels, saveProjectPreferences, synchronizeConfiguredClaudeModel, updateWorkThreadStatus,
+  addWorkMessage, consumeProjectPreflight, createWorkThread, databaseInfo, decideProjectPreflight,
+  getClaudeProviderPreference, getExecutionAgentHandoffOutput, getProjectPreferences, getProjectPreflight,
+  getWorkThreadSnapshot, listAssignments, listFavoriteModels, recordProjectPreflight, saveAssignments,
+  saveClaudeProviderPreference, saveFavoriteModels, saveProjectPreferences, synchronizeConfiguredClaudeModel,
+  updateWorkThreadStatus,
   type AgentAssignment, type ClaudeProviderId, type EngineId, type FavoriteModel, type ModelTier, type PermissionProfile,
   type WorkThreadSnapshot
 } from "./database.js";
 import { getClaudeModels, getDetectedClaudeProvider, getEngineVersion, getOpenCodeModels, readClaudeLocalConfig, listModels } from "./models.js";
 import { analyzeProject } from "./projects.js";
 import { cancelExecution, getExecution, getLatestExecution, recoverExecutionState, respondExecutionDecision, startExecution } from "./execution.js";
+import { compareRuntimeBuilds, parseRuntimeBuildInfo } from "./runtime-build.js";
+import { CONTROL_CENTER_SECURITY_HEADERS, inspectRequestSecurity } from "./request-security.js";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const factoryRoot = resolve(process.env.FACTORY_ROOT || resolve(currentDir, "../../.."));
+const buildInfoPath = join(currentDir, "build-info.json");
+
+function readBuildInfoFromDisk() {
+  try {
+    return parseRuntimeBuildInfo(readFileSync(buildInfoPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+// Capture what this process loaded once. The health endpoint compares this
+// immutable startup fingerprint with the artifact currently present on disk.
+const runtimeBuildInfo = readBuildInfoFromDisk();
 const host = "127.0.0.1";
 const port = Number(process.env.FACTORY_API_PORT || 4141);
 
@@ -66,12 +83,35 @@ await app.register(cors, {
   methods: ["GET", "POST", "PUT", "OPTIONS"]
 });
 
-app.get("/api/health", async () => ({
-  status: "ok",
-  service: "Factory Control Center API",
-  factoryRoot,
-  database: databaseInfo.engine
-}));
+// The service is a local control plane, not a public web API. Reject hostile
+// browser origins and DNS-rebinding fetches before any route can mutate state.
+app.addHook("onRequest", async (request, reply) => {
+  const security = inspectRequestSecurity({
+    origin: request.headers.origin,
+    secFetchSite: request.headers["sec-fetch-site"]
+  });
+  if (!security.allowed) {
+    return reply.code(403).send({ error: security.reason ?? "Solicitud no autorizada." });
+  }
+});
+
+app.addHook("onSend", async (_request, reply, payload) => {
+  for (const [name, value] of Object.entries(CONTROL_CENTER_SECURITY_HEADERS)) {
+    reply.header(name, value);
+  }
+  return payload;
+});
+
+app.get("/api/health", async () => {
+  const build = compareRuntimeBuilds(runtimeBuildInfo, readBuildInfoFromDisk(), process.env.NODE_ENV ?? "development");
+  return {
+    status: build.status,
+    service: "Factory Control Center API",
+    factoryRoot,
+    database: databaseInfo.engine,
+    build
+  };
+});
 
 app.get("/api/engines", async () => {
   const [openCodeVersion, claudeVersion] = await Promise.all([
@@ -299,6 +339,31 @@ app.post<{ Body: { currentPath?: unknown } }>("/api/projects/select-directory", 
 
 app.get("/api/project-preferences", async () => getProjectPreferences());
 
+app.get("/api/projects/preflight", async () => {
+  const preferences = getProjectPreferences();
+  return { preflight: getProjectPreflight(preferences.path, preferences.instructions) };
+});
+
+app.post<{ Body: { path?: unknown; instructions?: unknown; decision?: unknown } }>(
+  "/api/projects/preflight/decision",
+  async (request, reply) => {
+    const path = typeof request.body?.path === "string" ? request.body.path : "";
+    const instructions = typeof request.body?.instructions === "string" ? request.body.instructions : "";
+    const decision = request.body?.decision;
+    if (!path.trim() || !instructions.trim()) {
+      return reply.code(400).send({ error: "La ruta y las instrucciones deben coincidir con la preconsulta." });
+    }
+    if (decision !== "accepted" && decision !== "manual") {
+      return reply.code(400).send({ error: "La decisión debe ser accepted o manual." });
+    }
+    const saved = decideProjectPreflight(path, instructions, decision);
+    if (!saved) {
+      return reply.code(409).send({ error: "No existe una preconsulta vigente para esta ruta e instrucciones. Vuelve a analizar el proyecto." });
+    }
+    return { saved: true, decision };
+  }
+);
+
 app.get("/api/factory/assets", async () => loadFactoryAssets(factoryRoot));
 
 app.get("/api/assignments", async () => {
@@ -403,8 +468,9 @@ app.post<{ Body: { path?: string; instructions?: string } }>("/api/projects/anal
   }
 
   try {
-    saveProjectPreferences(projectPath, instructions);
     const analysis = await analyzeProject(projectPath, instructions);
+    // Persist the canonical project path, not a user-supplied symlink alias.
+    saveProjectPreferences(analysis.path, instructions);
     const current = listAssignments();
     const favorites = listFavoriteModels().filter((item) =>
       item.provider === (item.engine === "claude" ? getClaudeProviderPreference() : "opencode")
@@ -460,7 +526,7 @@ app.post<{ Body: { path?: string; instructions?: string } }>("/api/projects/anal
         ? { ...assignment, engine: chosen.engine, modelId: chosen.modelId, enabled: selectedAgents.has(assignment.agentId) }
         : { ...assignment, enabled: selectedAgents.has(assignment.agentId) };
     });
-    return {
+    const response = {
       ...analysis,
       suggestedAssignments,
       recommendationReady: favorites.length > 0,
@@ -468,6 +534,8 @@ app.post<{ Body: { path?: string; instructions?: string } }>("/api/projects/anal
         ? "Plan " + analysis.taskPlan.depth + ": " + analysis.taskPlan.recommendedAgents.length + " agentes seleccionados usando exclusivamente tus modelos favoritos activos."
         : "Aún no hay modelos favoritos. Configúralos para activar la asignación automática."
     };
+    recordProjectPreflight(analysis.path, instructions, response as unknown as Record<string, unknown>);
+    return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     return reply.code(400).send({ error: message });
@@ -622,9 +690,41 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; taskDepth?: unknown }
       error: `No se puede iniciar: el agente ${nonFavorite.agentId} tiene asignado ${nonFavorite.modelId}, que no está marcado como favorito.`
     });
   }
+  const preflightState = getProjectPreflight(projectPath, instructions);
+  if (!preflightState) {
+    return reply.code(409).send({
+      error: "La ruta o las instrucciones no coinciden con una preconsulta vigente. Ejecuta primero la preconsulta del proyecto."
+    });
+  }
+  if (!preflightState.decision) {
+    return reply.code(409).send({
+      error: "Primero acepta la propuesta automática o registra la configuración manual."
+    });
+  }
+  if (!preflightState.teamSaved) {
+    return reply.code(409).send({
+      error: "Guarda el equipo de agentes después de aceptar la propuesta o elegir la configuración manual."
+    });
+  }
+  if (preflightState.consumed) {
+    return reply.code(409).send({
+      error: "Esta preconsulta ya fue utilizada. Ejecuta una nueva preconsulta para iniciar otra ejecución inicial."
+    });
+  }
   let createdThreadId: string | null = null;
   try {
-    await analyzeProject(projectPath, instructions);
+    // Recheck the project structure, then atomically consume the server-side
+    // preflight/decision/team snapshot. Client-side button state is not trusted.
+    const revalidatedProject = await analyzeProject(projectPath, instructions);
+    if (revalidatedProject.path !== projectPath) {
+      return reply.code(409).send({
+        error: "La ruta real del proyecto cambió desde la preconsulta. Ejecuta nuevamente la preconsulta y confirma la ruta canónica."
+      });
+    }
+    const preflight = consumeProjectPreflight(projectPath, instructions);
+    if (!preflight.consumed) {
+      return reply.code(409).send({ error: preflight.reason ?? "Completa el flujo de preconsulta antes de iniciar." });
+    }
     saveProjectPreferences(projectPath, instructions);
     const threadId = randomUUID();
     createdThreadId = threadId;

@@ -1,5 +1,8 @@
 import test from "node:test";
 import { addAgentRunApprovals, buildRunApprovalPatterns, matchesAgentRunApproval } from "./permission-approvals.js";
+import {
+  createExecutionAdmissionGate, grantAgentRunApprovalKey, hasAgentRunApprovalKey
+} from "./execution-guards.js";
 import assert from "node:assert/strict";
 import {
   buildApprovalAuditSummary, buildExecutionSummary, createHandoffDescriptor, createHandoffId,
@@ -253,14 +256,17 @@ test("approval audit summarizes human decisions and automatic run-scoped grants"
   ];
   const summary = buildApprovalAuditSummary(decisions, events);
   assert.deepEqual(summary, {
-    recordedDecisions: 3, recordedApprovalEvents: 2, pending: 0, approved: 1, rejected: 1,
+    recordedDecisions: 3, recordedApprovalEvents: 2, pending: 0, responding: 0, approved: 1, rejected: 1,
     answered: 1, orphaned: 0, automaticApprovals: 1
   });
   const context = formatApprovalAuditContext(decisions, events);
   assert.match(context, /Solicitudes registradas: 3/);
-  assert.match(context, /DECISIÓN decision-approved/);
-  assert.match(context, /estado=approved/);
-  assert.match(context, /DECISIÓN decision-rejected/);
+  const decisionLines = context.split("\n").filter((line) => line.startsWith("DECISIÓN_JSON "));
+  assert.equal(decisionLines.length, 3);
+  const approvedRecord = JSON.parse(decisionLines[0]!.slice("DECISIÓN_JSON ".length));
+  assert.equal(approvedRecord.id, "decision-approved");
+  assert.equal(approvedRecord.status, "approved");
+  assert.match(context, /DECISIÓN_JSON/);
   assert.match(context, /AUTORIZACIÓN TEMPORAL AUTOMÁTICA/);
   assert.match(context, /opencode --version/);
   const executionSummary = buildExecutionSummary({
@@ -271,6 +277,56 @@ test("approval audit summarizes human decisions and automatic run-scoped grants"
     approvalEvents: events
   });
   assert.deepEqual(executionSummary.approvals, summary);
+});
+
+test("approval audit JSON records preserve delimiters, quotes and newlines without corrupting fields", () => {
+  const decision = {
+    id: "decision-with-delimiters",
+    agentId: "implementer",
+    engine: "opencode" as const,
+    kind: "permission" as const,
+    status: "approved",
+    title: "Editar un archivo | autorización humana",
+    description: "Archivo: src/A.java\nContexto: contiene | y \"comillas\".",
+    response: "Aprobado\nOperación exacta: edit | src/A.java",
+    createdAt: "2026-11-17T12:00:00.000Z",
+    resolvedAt: "2026-11-17T12:00:01.000Z"
+  };
+  const event = {
+    area: "HUMAN-REVIEW",
+    message: "Autorización limitada a esta ejecución: edit | src/A.java\nnota=\"solo una línea\".",
+    createdAt: "2026-11-17T12:00:01.000Z",
+    agentRunId: "implementer-run"
+  };
+  const context = formatApprovalAuditContext([decision], [event]);
+  const decisionLine = context.split("\n").find((line) => line.startsWith("DECISIÓN_JSON "));
+  const eventLine = context.split("\n").find((line) => line.startsWith("EVENTO_REVISIÓN_APROBACIÓN_JSON "));
+  assert.ok(decisionLine);
+  assert.ok(eventLine);
+  assert.deepEqual(JSON.parse(decisionLine!.slice("DECISIÓN_JSON ".length)), decision);
+  assert.deepEqual(JSON.parse(eventLine!.slice("EVENTO_REVISIÓN_APROBACIÓN_JSON ".length)), {
+    area: event.area,
+    agentRunId: event.agentRunId,
+    createdAt: event.createdAt,
+    message: event.message
+  });
+});
+
+test("a decision being answered is counted separately and blocks a clean verdict", () => {
+  const summary = buildExecutionSummary({
+    instructions: "Revisión de permisos.",
+    agents: [],
+    results: [],
+    decisions: [{
+      id: "decision-responding", agentId: "tester", engine: "opencode",
+      kind: "permission", status: "responding", title: "Autorizar herramienta",
+      description: "El motor está recibiendo la decisión.", response: null,
+      createdAt: "2026-11-17T12:00:00.000Z", resolvedAt: null
+    }]
+  });
+  assert.equal(summary.approvals.pending, 0);
+  assert.equal(summary.approvals.responding, 1);
+  assert.equal(summary.verdict, "observations");
 });
 
 test("unresolved approval requests prevent a clean completed verdict", () => {
@@ -301,8 +357,10 @@ test("approval audit keeps review events visible when a decision row is missing"
   assert.equal(summary.recordedApprovalEvents, 1);
   assert.equal(summary.automaticApprovals, 0);
   const context = formatApprovalAuditContext([], events);
-  assert.match(context, /EVENTO DE REVISIÓN \/ APROBACIÓN/);
-  assert.match(context, /Autorización limitada a esta ejecución/);
+  assert.match(context, /EVENTO_REVISIÓN_APROBACIÓN_JSON/);
+  const eventLine = context.split("\n").find((line) => line.startsWith("EVENTO_REVISIÓN_APROBACIÓN_JSON "));
+  assert.ok(eventLine);
+  assert.match(JSON.parse(eventLine!.slice("EVENTO_REVISIÓN_APROBACIÓN_JSON ".length)).message, /Autorización limitada a esta ejecución/);
   assert.doesNotMatch(context, /No se registraron solicitudes/);
 });
 
@@ -312,20 +370,24 @@ test("approval audit explicitly states when the current round has no approval re
   assert.match(context, /ni confundas ausencia de solicitudes con aprobación global/i);
   const summary = buildApprovalAuditSummary([], []);
   assert.deepEqual(summary, {
-    recordedDecisions: 0, recordedApprovalEvents: 0, pending: 0, approved: 0, rejected: 0,
+    recordedDecisions: 0, recordedApprovalEvents: 0, pending: 0, responding: 0, approved: 0, rejected: 0,
     answered: 0, orphaned: 0, automaticApprovals: 0
   });
 });
 
-test("OpenCode allow-run grants are isolated to the agent run that received approval", () => {
+test("OpenCode allow-run grants are exact and isolated to the agent run that received approval", () => {
   const approvals = new Map();
   const buildRequest = {
     action: "shell",
     resources: ["git status --porcelain", "git log -1"],
+    // Provider suggestions are broader than the concrete commands approved.
     save: ["git status *", "git log *"]
   };
   const rules = buildRunApprovalPatterns(buildRequest);
-  assert.equal(rules.length, 2);
+  assert.deepEqual(rules, [
+    { action: "shell", resource: "git status --porcelain" },
+    { action: "shell", resource: "git log -1" }
+  ]);
   addAgentRunApprovals(approvals, "build-run-id", rules);
 
   assert.equal(matchesAgentRunApproval(approvals, "build-run-id", {
@@ -338,33 +400,130 @@ test("OpenCode allow-run grants are isolated to the agent run that received appr
     action: "shell", resources: ["git status --porcelain", "git log -1"]
   }), true);
   assert.equal(matchesAgentRunApproval(approvals, "build-run-id", {
+    action: "shell", resources: ["git status --short"]
+  }), false);
+  assert.equal(matchesAgentRunApproval(approvals, "build-run-id", {
     action: "write", resources: ["git status --porcelain"]
+  }), false);
+  assert.equal(matchesAgentRunApproval(approvals, "build-run-id", {
+    action: "shell", patterns: ["git status *"]
   }), false);
 });
 
-test("agent-run approvals merge without duplicate patterns and empty requests cannot grant", () => {
+test("OpenCode wildcard save suggestion cannot turn a one-file edit into edit-star", () => {
   const approvals = new Map();
-  const first = buildRunApprovalPatterns({ action: "shell", save: ["grep *", "wc *"] });
+  const rules = buildRunApprovalPatterns({
+    action: "edit",
+    resources: ["src/demo/DiscountCalculator.java"],
+    save: ["*"]
+  });
+  assert.deepEqual(rules, [
+    { action: "edit", resource: "src/demo/DiscountCalculator.java" }
+  ]);
+  addAgentRunApprovals(approvals, "implementer-run-id", rules);
+
+  assert.equal(matchesAgentRunApproval(approvals, "implementer-run-id", {
+    action: "edit", resources: ["src/demo/DiscountCalculator.java"]
+  }), true);
+  assert.equal(matchesAgentRunApproval(approvals, "implementer-run-id", {
+    action: "edit", resources: ["src/demo/Other.java"]
+  }), false);
+  assert.equal(matchesAgentRunApproval(approvals, "reviewer-run-id", {
+    action: "edit", resources: ["src/demo/DiscountCalculator.java"]
+  }), false);
+});
+
+test("Claude allow-run grants are isolated to the agent run that received approval", () => {
+  const approvals = new Map<string, Set<string>>();
+  const identicalOperation = "sha256:identical-tool-input";
+
+  grantAgentRunApprovalKey(approvals, "architect-run-id", identicalOperation);
+  grantAgentRunApprovalKey(approvals, "architect-run-id", identicalOperation);
+
+  assert.equal(hasAgentRunApprovalKey(approvals, "architect-run-id", identicalOperation), true);
+  assert.equal(hasAgentRunApprovalKey(approvals, "reviewer-run-id", identicalOperation), false);
+  assert.equal(hasAgentRunApprovalKey(approvals, "tester-run-id", identicalOperation), false);
+  assert.equal(approvals.get("architect-run-id")?.size, 1);
+});
+
+test("Claude allow-run grants fail closed when agent identity or operation key is missing", () => {
+  const approvals = new Map<string, Set<string>>();
+
+  grantAgentRunApprovalKey(approvals, "", "operation-key");
+  grantAgentRunApprovalKey(approvals, "architect-run-id", "");
+  assert.equal(hasAgentRunApprovalKey(approvals, "", "operation-key"), false);
+  assert.equal(hasAgentRunApprovalKey(approvals, "architect-run-id", ""), false);
+  assert.equal(approvals.size, 0);
+});
+
+test("simultaneous execution starts cannot acquire the admission reservation twice", async () => {
+  const gate = createExecutionAdmissionGate();
+  const reservations = await Promise.all([
+    Promise.resolve().then(() => gate.tryAcquire()),
+    Promise.resolve().then(() => gate.tryAcquire())
+  ]);
+  const acquired = reservations.filter((release): release is () => void => release !== null);
+
+  assert.equal(acquired.length, 1);
+  assert.equal(gate.isReserved(), true);
+  assert.equal(gate.tryAcquire(), null);
+
+  acquired[0]!();
+  assert.equal(gate.isReserved(), false);
+
+  const nextReservation = gate.tryAcquire();
+  assert.equal(typeof nextReservation, "function");
+  nextReservation!();
+  nextReservation!();
+  assert.equal(gate.isReserved(), false);
+});
+
+test("agent-run exact approvals merge without duplicates and missing resources fail closed", () => {
+  const approvals = new Map();
+  const first = buildRunApprovalPatterns({
+    action: "shell",
+    resources: ["grep -n TODO src/main.ts", "wc -l README.md"],
+    save: ["grep *", "wc *"]
+  });
   addAgentRunApprovals(approvals, "tester-run-id", first);
   addAgentRunApprovals(approvals, "tester-run-id", first);
   assert.equal(approvals.get("tester-run-id").length, 2);
-  assert.deepEqual(buildRunApprovalPatterns({ action: "shell", save: [] , resources: [] }), []);
-  assert.deepEqual(buildRunApprovalPatterns({ save: ["*"], resources: ["*" ] }), []);
+  assert.deepEqual(buildRunApprovalPatterns({ action: "shell", save: ["grep *"], resources: [] }), []);
+  assert.deepEqual(buildRunApprovalPatterns({ action: "shell", patterns: ["grep *"], save: ["*"] }), []);
+  assert.deepEqual(buildRunApprovalPatterns({ action: "edit", resources: ["src/**/*.java"], save: ["*"] }), []);
 });
 
-test("approval audit context retains more than fifty approval events", () => {
-  const events = Array.from({ length: 75 }, (_, index) => ({
+test("Claude operation-scoped allow-run decisions remain visible in the approval audit", () => {
+  const events = [{
+    area: "HUMAN-REVIEW",
+    message: "Autorización limitada a la misma operación durante esta ejecución: Autorizar herramienta: Bash.",
+    createdAt: "2026-11-17T12:00:00.000Z",
+    agentRunId: "architect-run-id"
+  }];
+  const summary = buildApprovalAuditSummary([], events);
+  assert.equal(summary.recordedApprovalEvents, 1);
+  assert.equal(summary.automaticApprovals, 0);
+  const context = formatApprovalAuditContext([], events);
+  const eventLine = context.split("\n").find((line) => line.startsWith("EVENTO_REVISIÓN_APROBACIÓN_JSON "));
+  assert.ok(eventLine);
+  const recorded = JSON.parse(eventLine!.slice("EVENTO_REVISIÓN_APROBACIÓN_JSON ".length));
+  assert.match(recorded.message, /Autorización limitada a la misma operación durante esta ejecución/);
+  assert.equal(recorded.agentRunId, "architect-run-id");
+});
+
+test("approval audit context retains more than three hundred approval events", () => {
+  const events = Array.from({ length: 375 }, (_, index) => ({
     area: "TESTER",
     message: `Autorización temporal reutilizada durante esta ejecución por el mismo agente: shell · cmd-${index}.`,
     createdAt: new Date(Date.UTC(2026, 10, 17, 12, 0, index)).toISOString(),
     agentRunId: "tester-run"
   }));
   const summary = buildApprovalAuditSummary([], events);
-  assert.equal(summary.recordedApprovalEvents, 75);
-  assert.equal(summary.automaticApprovals, 75);
+  assert.equal(summary.recordedApprovalEvents, 375);
+  assert.equal(summary.automaticApprovals, 375);
   const context = formatApprovalAuditContext([], events);
   assert.match(context, /cmd-0/);
-  assert.match(context, /cmd-74/);
+  assert.match(context, /cmd-374/);
 });
 
 test("handoff identifiers are deterministic, unique by agent and tied to the run", () => {

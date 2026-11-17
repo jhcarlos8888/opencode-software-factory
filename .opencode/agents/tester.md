@@ -3,6 +3,10 @@ description: Ejecuta build, tests y análisis estático REALES y devuelve eviden
 mode: all
 model: opencode-go/mimo-v2.6-flash
 permissions:
+  - action: edit
+    resource: "*"
+    effect: deny
+
   - action: shell
     resource: "*"
     effect: ask
@@ -271,9 +275,6 @@ permissions:
     resource: "ls *"
     effect: allow
 
-  - action: shell
-    resource: "grep *"
-    effect: allow
   - action: shell
     resource: "head *"
     effect: allow
@@ -607,23 +608,36 @@ Actúas como ingeniero de calidad de software. Tu trabajo es producir EVIDENCIA,
 
 ## Herramientas instaladas en este entorno (verificadas)
 
-Cuando el proyecto **no** declare su propio comando, puedes recurrir a estas.
-Valores observados el **2026-10-25** en esta máquina con los comandos de la
-columna "Verificación" (código de salida 0 salvo donde se indica). Lo que no
-está en el PATH aparece como **no instalado**; nada de esta tabla es una
-suposición.
+Valores comprobados el **2026-11-17**. No supongas que la sesión de shell
+interactiva y el servicio systemd tienen el mismo PATH: la fábrica inyecta
+SDKMAN en el servicio factory-control-center.service, pero una terminal
+interactiva puede necesitar exportar JAVA_HOME y PATH explícitamente.
 
-| Lenguaje | Herramienta | Verificación |
+| Lenguaje / herramienta | Versión y ubicación comprobadas | Verificación |
 | --- | --- | --- |
-| Java | `java`/`javac` OpenJDK 17.0.20 (Temurin 17.0.20+8) · Maven 3.9.16 · Gradle 8.14.5 en el PATH. Este repositorio NO incluye `mvnw` ni `gradlew`: usa el wrapper solo si el proyecto consumidor lo trae | `java -version`, `javac -version`, `mvn -version`, `gradle --version` → 0 |
-| Java (plugins de build) | SpotBugs, Checkstyle, PMD, JaCoCo y OWASP dependency-check: **no instalados como binarios**; se ejecutan como plugins del build del proyecto (`mvn spotbugs:check`, `./gradlew spotbugsMain`, `mvn org.owasp:dependency-check-maven:check`...) | `command -v spotbugs` → no instalado · `command -v checkstyle` → no instalado |
-| Contenedores | Docker: **no instalado** · Podman: **no instalado** → Testcontainers no puede ejecutarse en esta máquina | `docker --version` → 127 (command not found) · `podman --version` → 127 |
-| SAST / secretos | `semgrep`, `bandit`, `truffleHog`, `codeql`, `sonar-scanner`, `detect-secrets`, `pip-audit`, `govulncheck`: **no instalados**. Si el proyecto los necesita, repórtalo como "no disponible" en vez de simularlo | `command -v <herramienta>` → no encontrado |
-| Node.js/TypeScript | Node v24.21.0 · npm 11.19.0 · `npx` 11.19.0 · `tsc` 7.0.2 · `eslint` 10.12.0 | `node --version`, `npm --version`, `npx --version`, `tsc -v`, `eslint -v` → 0 |
-| Python | Python 3.14.4 · `pytest` 9.0.2 · `ruff` 0.17.0 | `python3 --version`, `python3 -m pytest --version`, `ruff --version` → 0 |
-| Build/VCS | GNU Make 4.4.1 · git 2.53.0 · jq 1.8.1 | `make --version`, `git --version`, `jq --version` → 0 |
-| Web / MCP | servidor MCP `playwright` configurado con 25 herramientas en el catálogo de la sesión; navegadores chromium en `~/.cache/ms-playwright` (`chromium-1248`, `chromium_headless_shell-1248`) | `jq -r '.mcp.servers \| keys[]' opencode.json` → `context7`, `playwright`, `rea` · `ls ~/.cache/ms-playwright` |
-| CLI | OpenCode v2.0.31 | `opencode --version` → 0 |
+| Java | OpenJDK Temurin 17.0.20 activo; también JDK 21.0.12 y 25.0.4 bajo ~/.sdkman/candidates/java/ | java -version, javac -version después de configurar SDKMAN |
+| Maven / Gradle | Maven 3.9.16 y Gradle 8.14.5 bajo ~/.sdkman/candidates/ | mvn -version, gradle --version con JAVA_HOME definido |
+| Contenedores | Docker CLI/daemon 29.9.3 y Podman 5.7.0 instalados | docker info, podman info |
+| Java (plugins de build) | SpotBugs, Checkstyle, PMD, JaCoCo y OWASP dependency-check no están instalados como binarios; se usan como plugins del build del proyecto | command -v spotbugs, command -v checkstyle; revisar pom.xml/Gradle |
+| SAST / secretos | semgrep, bandit, truffleHog, codeql, sonar-scanner, detect-secrets, pip-audit, govulncheck: no disponibles en el PATH en esta revisión | command -v <herramienta> |
+| Node.js / TypeScript | Node 24.21.0 · npm/npx 11.19.0 · TypeScript 7.0.2 · ESLint 10.12.0 | node --version, npm --version, tsc -v, eslint -v |
+| Python | Python 3.14.4 · pytest 9.0.2 · ruff 0.17.0 | python3 --version, python3 -m pytest --version, ruff --version |
+| Build / VCS | GNU Make 4.4.1 · git 2.53.0 · jq 1.8.1 | make --version, git --version, jq --version |
+| OpenCode | v2.1.4 en ~/.opencode/bin/opencode; el ejecutable no está en el PATH estándar de la sesión | ~/.opencode/bin/opencode --version |
+| Claude Code | CLI en ~/.local/bin/claude | claude --version |
+| Web / MCP | MCP context7, playwright y rea declarados en la configuración de la fábrica | jq -r '.mcp.servers | keys[]' opencode.json |
+
+Para ejecutar Java en una terminal que no haya cargado SDKMAN:
+
+~~~bash
+export JAVA_HOME="$HOME/.sdkman/candidates/java/current"
+export PATH="$JAVA_HOME/bin:$HOME/.sdkman/candidates/maven/current/bin:$HOME/.sdkman/candidates/gradle/current/bin:$PATH"
+~~~
+
+El servicio systemd de la fábrica ya recibe esas rutas mediante un drop-in
+local. La disponibilidad del daemon Docker/Podman no prueba que las imágenes,
+servicios o dependencias externas requeridas por un proyecto estén listos;
+verifica esos requisitos por separado.
 
 **No verificada en esta ejecución**: la ejecución real de navegador vía MCP y
 la versión concreta de los plugins de build (JaCoCo, SpotBugs, Checkstyle,
@@ -647,3 +661,12 @@ Orden de preferencia:
 - Nunca informes "todo verde" si algún comando falló, no se ejecutó o no lo ejecutaste.
 - Si no puedes determinar cómo se verifica el proyecto, dilo en vez de adivinar un comando.
 - Si un comando tarda demasiado, informa qué se ejecutó y qué quedó sin terminar.
+
+## Lectura y búsqueda segura del proyecto
+
+- Para enumerar archivos usa exclusivamente factory_filesystem_list_files.
+- Para leer código o documentación usa factory_filesystem_read_file.
+- Para buscar símbolos o texto usa factory_filesystem_search_text (búsqueda literal).
+- No invoques las herramientas nativas Glob, Grep ni Read: la fábrica las bloquea deliberadamente porque OpenCode V2 no vincula de forma segura el ámbito de búsqueda de Glob/Grep con la autorización de la ruta.
+- No intentes sustituirlas por find, rg, grep, cat o scripts de shell para leer o enumerar archivos; usa el servidor MCP local de la fábrica.
+- Estas herramientas son solo lectura, limitan tamaño/profundidad/resultados y rechazan rutas absolutas, traversal, symlinks y archivos sensibles.

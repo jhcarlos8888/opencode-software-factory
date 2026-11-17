@@ -1,128 +1,148 @@
-# Guía de uso — Factory Control Center 0.1.0
+# Guía de operación — Factory Control Center
 
-## 1. Iniciar la aplicación
+## 1. Abrir el Centro de Control
 
-La forma recomendada es producción local, con interfaz y API en el mismo puerto:
+En este equipo, el Control Center funciona como servicio de usuario de systemd y se inicia automáticamente.
 
-```bash
-cd "/home/jcherre/Documents/PERSONAL/PROYECTOS, NEGOCIOS Y FINANZAS/NEGOCIOS/PROGRAMACION/opencode-software-factory/control-center"
-npm start
-```
-
-Abrir en el mismo computador:
+Dirección local:
 
 http://127.0.0.1:4141/
 
-Mantener abierta la terminal mientras se utiliza. Para detener el servidor, pulsar `Ctrl+C`.
+Comprobar su estado:
 
-Si se desea reconstruir después de cambios de código:
+~~~bash
+systemctl --user status factory-control-center.service
+curl -sS http://127.0.0.1:4141/api/health | jq
+~~~
 
-```bash
-npm run typecheck
-npm run build
-npm start
-```
+No ejecutes npm start mientras el servicio systemd esté activo: ambos intentarían utilizar el puerto 4141.
 
-Alternativa para desarrollo (dos servidores):
+Para ver los logs:
 
-```bash
-npm run dev
-```
+~~~bash
+journalctl --user -u factory-control-center.service -n 100 --no-pager
+~~~
 
-Abrir http://127.0.0.1:5173/. En este modo Vite sirve la interfaz y Fastify la API en 4141.
+### Después de cambios de código
 
-## 2. Qué muestra el panel
+No basta con compilar. El procedimiento normal de despliegue es:
 
-- **Centro de operaciones:** estado de los CLIs instalados, cantidad de modelos detectados y número de agentes configurados.
-- **Proyecto de trabajo:** escribir una ruta absoluta o pulsar **Elegir carpeta** para abrir el selector nativo del escritorio. La carpeta elegida rellena el campo; después pulsa **Preconsulta del proyecto** para iniciar el análisis de solo lectura. El análisis actual es estructural y de solo lectura: manifiestos, stack probable, archivos de instrucciones y estado Git.
-- **Equipo de agentes:** asignar a cada agente OpenCode o Claude Code, elegir un modelo/alias, seleccionar un perfil de permisos y activar/desactivar el agente. Pulsar Guardar equipo para persistir los cambios en SQLite.
-- **Skills:** inventario de Skills originales detectadas bajo `.opencode/skills`.
-- **Orquestación:** muestra el siguiente hito planificado; el debate y ejecución multi-motor aún no están implementados.
+~~~bash
+cd control-center
+npm run verify
+npm run deploy
+~~~
 
-## 3. Recomendación para las primeras pruebas
+La verificación incluye tests, typecheck, auditoría npm, validador del instalador y registro real de los siete agentes. El despliegue recompila, reinicia el servicio y comprueba que el fingerprint cargado en memoria coincide con el artefacto del disco.
 
-1. Abrir el panel y verificar que ambos CLIs aparezcan detectados.
-2. En Proyecto de trabajo, analizar primero un repositorio de prueba o uno que no tenga cambios importantes pendientes.
-3. Revisar la sección Git antes de cualquier futura ejecución; si hay modificaciones locales, conservarlas y no asumir que el panel las respaldará.
-4. En Equipo de agentes, explorar los selectores sin guardar si solo se está conociendo la interfaz.
-5. Si se cambia una asignación, pulsar Guardar equipo. La selección queda almacenada localmente, fuera del repositorio.
-6. Volver a cargar la página para comprobar que las asignaciones persisten.
+En el panel aparece una advertencia si el proceso activo está desfasado. El endpoint de salud publica el estado del build y sus dos fingerprints.
 
-## 4.1 Preconsulta, consola y decisiones
+## 2. Flujo de una ejecución nueva
 
-La preconsulta prepara una recomendación con los modelos favoritos, pero no ejecuta motores ni modifica archivos. La propuesta aparece como pendiente y debe aceptarse explícitamente o descartarse para configurar el equipo manualmente. Después de aceptarla, pulsa «Guardar equipo» para persistir las asignaciones.
+El flujo tiene que completarse en este orden:
 
-La Consola de actividad registra acciones reales del Control Center (preconsulta y configuración). Aún no es una terminal de OpenCode/Claude: la salida real de los motores requiere los adaptadores de ejecución y streaming.
+1. **Proyecto de trabajo:** escribe una ruta absoluta o utiliza Elegir carpeta.
+2. **Preconsulta del proyecto:** analiza el proyecto en modo de solo lectura. Revisa stack, estructura, manifiestos, instrucciones, Git y contexto relevante.
+3. **Propuesta:** la fábrica recomienda agentes y modelos usando exclusivamente los modelos favoritos activos.
+4. **Decisión:** acepta la propuesta automática o elige configuración manual.
+5. **Equipo:** si aceptaste la propuesta o seleccionaste la opción manual, guarda el equipo. Una configuración manual también debe guardarse después de seleccionarla.
+6. **Iniciar instrucciones:** solo se habilita cuando la preconsulta sigue vigente, existe una decisión explícita y el equipo está guardado.
 
-El Centro de decisiones es el espacio previsto para solicitudes de permiso y preguntas de los agentes. Su cola se activará cuando se conecten las sesiones y las APIs de aprobación/respuesta; todavía no hay ejecución de agentes ni solicitudes reales que atender.
+La API vuelve a comprobar estas condiciones. No depende únicamente del botón o del estado de la interfaz. Si cambias la ruta, las instrucciones o el equipo, vuelve a ejecutar la preconsulta antes de iniciar.
 
-## 4. Límites importantes de la versión 0.1.0
+La preconsulta no ejecuta agentes ni modifica archivos. La ejecución comienza después de completar el flujo.
 
-Esta versión es un panel de descubrimiento y configuración, no un orquestador de tareas todavía.
+## 3. Equipo de agentes y favoritos
 
-- No envía prompts a Claude ni a OpenCode.
-- No crea sesiones ni hace que los motores conversen entre sí.
-- Los modelos elegidos se guardan como configuración, pero todavía no se utilizan en una ejecución.
-- Los perfiles "Solo lectura", "Requiere aprobación" y "Escritura en workspace" se registran, pero todavía no aplican restricciones reales a procesos. No interpretar una selección como una barrera de seguridad ejecutable.
-- El análisis de proyecto no modifica archivos ni ejecuta comandos del proyecto.
-- Claude Code y OpenCode conservan su autenticación propia. No copiar tokens ni API keys al panel.
+El equipo contiene siete especialistas:
 
-No utilizar aún este panel para autorizar modificaciones automáticas. La fase de ejecución deberá implementar y probar aislamiento, permisos efectivos, registro de acciones, cancelación y aprobación humana antes de habilitar escritura.
+| Agente | Responsabilidad |
+| --- | --- |
+| Build | construcción, manifiestos y herramientas de calidad |
+| Architect | arquitectura y contexto del proyecto |
+| Implementer | cambios de código y pruebas |
+| Reviewer | revisión independiente |
+| Tester | build, pruebas y evidencia |
+| Reverse | reconstrucción de flujos y análisis inverso |
+| Cloud Arbiter | consolidación final y resolución de discrepancias |
 
-## 5. Diagnóstico rápido
+Cada agente tiene motor, modelo y perfil de permisos independiente. Los modelos asignables deben pertenecer a los favoritos activos del motor/proveedor. Si eliminas un favorito utilizado por el equipo, la API impide iniciar hasta que corrijas la asignación.
 
-Comprobar que la API responde:
+Los proveedores y credenciales permanecen en las instalaciones locales de OpenCode y Claude Code. El Control Center no debe almacenar ni imprimir tokens.
 
-```bash
-curl -s http://127.0.0.1:4141/api/health
-```
+## 4. Ejecución, actividad y decisiones
 
-Comprobar motores:
+La consola registra eventos de orquestación, agentes, sesiones, handoffs, verificaciones y errores reales.
 
-```bash
-curl -s http://127.0.0.1:4141/api/engines
-```
+El Centro de decisiones atiende solicitudes de permiso y preguntas que llegan de las sesiones de los motores. Una decisión puede estar pendiente, enviándose, aprobada, rechazada, respondida o marcada para revisión cuando el estado del motor no se puede reconciliar.
 
-Comprobar los catálogos:
+- **Permitir una vez:** autoriza la operación solicitada una sola vez.
+- **Permitir durante esta ejecución:** conserva una autorización temporal limitada al agente que la solicitó y a los recursos concretos aprobados.
+- **Rechazar:** devuelve una denegación al motor.
+- **Responder:** envía el texto o los valores pedidos por el formulario.
 
-```bash
-curl -s http://127.0.0.1:4141/api/models/opencode
-curl -s http://127.0.0.1:4141/api/models/claude
-```
+No confundas una aprobación temporal con un permiso global. Las aprobaciones no deben transferirse de Architect a Reviewer ni de un agente a otro. Si el motor deja de confirmar el estado de una solicitud, la fábrica debe cerrarla para revisión y no volver a aprobarla automáticamente.
 
-Si no abre el navegador, confirmar que `npm start` sigue activo y que el puerto 4141 está escuchando:
+No apruebes una operación cuyo recurso, alcance o efecto no esté claro. El hecho de que un agente la solicite no constituye autorización.
 
-```bash
+## 5. Procesos persistentes y continuación
+
+Las ejecuciones iniciales generan un proceso de trabajo persistente. El historial conserva instrucciones, mensajes, rondas, configuración histórica, decisiones, aprobaciones, eventos y handoffs.
+
+Cuando una ronda termina, utiliza la opción de continuación del proceso para dar la siguiente instrucción. La fábrica conserva el objetivo original y el contexto anterior, sin presentar una configuración histórica como si fuera la configuración actual.
+
+La cancelación detiene sesiones y procesos de la ejecución activa. El backend impide iniciar otra ejecución mientras la anterior siga activa o en proceso de cancelación.
+
+## 6. Perfiles y límites de seguridad
+
+- **Solo lectura:** inspección del proyecto mediante el MCP local de lectura; no concede shell ni herramientas de escritura.
+- **Escritura en workspace:** permite cambios dentro del proyecto conforme a las reglas de seguridad.
+- **Requiere aprobación:** solicita autorización humana para las operaciones sensibles.
+
+Las rutas sensibles, los secretos, los metadatos Git y los accesos fuera del proyecto se bloquean en las capas disponibles. Las lecturas MCP no siguen symlinks, comprueban la identidad del descriptor y tienen límites de tamaño y profundidad.
+
+La API está enlazada a loopback. Rechaza orígenes de navegador externos y solicitudes cross-site. No expongas el panel ni el servidor Vite en una interfaz de red pública.
+
+La línea base de seguridad y la excepción temporal de la dependencia picomatch están documentadas en docs/SECURITY-BASELINE.md.
+
+## 7. Diagnóstico
+
+Salud del servicio y fingerprint:
+
+~~~bash
+curl -sS http://127.0.0.1:4141/api/health | jq
+~~~
+
+Motores instalados:
+
+~~~bash
+curl -sS http://127.0.0.1:4141/api/engines | jq
+~~~
+
+Catálogos:
+
+~~~bash
+curl -sS http://127.0.0.1:4141/api/models/opencode | jq
+curl -sS http://127.0.0.1:4141/api/models/claude | jq
+~~~
+
+Servicio y puerto:
+
+~~~bash
+systemctl --user status factory-control-center.service
 ss -ltnp | grep 4141
-```
+~~~
 
-Si aparece "address already in use", ya puede haber una instancia activa; revisar `curl` antes de iniciar otra.
+Si la interfaz indica que el runtime está desfasado, ejecuta npm run deploy desde control-center. Si la API no responde, revisa primero el estado de systemd y los logs; no inicies una segunda instancia a ciegas.
 
-## 6. Datos y seguridad
+## 8. Límites conocidos y trabajo pendiente
 
-- La API se enlaza a `127.0.0.1`, no a todas las interfaces de red.
-- Las asignaciones se guardan en `~/.local/state/opencode-software-factory/control-center/`.
-- El panel no almacena credenciales de proveedor.
-- La fábrica original, agentes y Skills se mantienen en su ubicación original.
+- La fábrica serializa las ejecuciones activas; no ejecuta varios trabajos escritores concurrentes.
+- No crea todavía Git worktrees aislados por agente. Los agentes autorizados trabajan sobre la ruta de proyecto seleccionada. Antes de una tarea real, revisa el estado Git y conserva los cambios locales.
+- No existe garantía de colaboración bidireccional completa solo porque los agentes hayan terminado. Deben existir handoffs verificados en ambas direcciones, con identidad, contenido, hash, recepción y utilización.
+- La última ronda real de validación (Ronda 4, 17 de noviembre de 2026) ejecutó los siete agentes y produjo 18 handoffs, pero el Árbitro dejó sin verificar la dirección Claude → OpenCode. También registró defectos de alcance en las autorizaciones de aquella ejecución. El generador de permisos se endureció después y tiene pruebas unitarias de regresión; la validación bidireccional de extremo a extremo debe repetirse con una nueva ronda controlada.
+- En esa ronda, el script de prueba Java necesitó un JDK presente en PATH. Que exista un JDK dentro de un IDE no significa que el terminal o el servicio lo encuentre automáticamente.
+- El Control Center es una herramienta local de un solo usuario. No es una plataforma multiusuario ni un servicio remoto.
+- La dependencia de desarrollo picomatch mantiene una excepción temporal de seguridad hasta que el upstream publique una versión corregida. Mantén Vite solo en loopback.
 
-
-## 7. Servicio automático (configurado en este equipo)
-
-El Centro de Control está instalado como servicio de usuario de systemd y se inicia automáticamente. No es necesario abrir una terminal y ejecutar `npm start` cada vez.
-
-```bash
-systemctl --user status factory-control-center
-systemctl --user start factory-control-center
-systemctl --user stop factory-control-center
-systemctl --user restart factory-control-center
-```
-
-Después de reiniciar el equipo, abrir http://127.0.0.1:4141/.
-
-Para revisar errores:
-
-```bash
-journalctl --user -u factory-control-center -n 80 --no-pager
-```
-
-No iniciar manualmente `npm start` mientras el servicio ya esté activo; se ocuparía el puerto 4141.
+La verificación automatizada de la fábrica no sustituye una prueba funcional con proveedores reales. Los resultados no ejecutados o no verificables deben reportarse como pendientes, no como aprobados.

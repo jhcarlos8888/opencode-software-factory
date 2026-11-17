@@ -4,10 +4,17 @@ import { createServer } from "node:net";
 import { request as httpRequest } from "node:http";
 import { readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, delimiter, dirname, join, resolve, relative, isAbsolute, sep } from "node:path";
+import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { readClaudeLocalConfig } from "./models.js";
 import { addAgentRunApprovals, matchesAgentRunApproval, buildRunApprovalPatterns } from "./permission-approvals.js";
+import {
+  createExecutionAdmissionGate, grantAgentRunApprovalKey, hasAgentRunApprovalKey
+} from "./execution-guards.js";
+import { inspectFactoryFilesystemMcp, inspectOpenCodeAgentRegistry } from "./opencode-agents.js";
+import { buildOpenCodePermissionRules } from "./opencode-permissions.js";
+import { redactSecrets, safeJson, sanitizeText } from "./redaction.js";
+import { claudeToolPathIsAllowed, OPENCODE_SENSITIVE_PATH_GLOBS, requireCanonicalProjectRoot } from "./filesystem-guards.js";
 import { planTask, type ResearchDepth } from "./task-planner.js";
 import {
   buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
@@ -16,8 +23,9 @@ import {
 import {
   addExecutionEvent, addWorkMessage, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
   getExecutionApprovalEvents, getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, listFavoriteModels,
-  markUnfinishedExecutionsInterrupted, orphanExecutionDecisions, orphanExecutionDecisionsForAgent,
-  resolveExecutionDecision, updateExecutionAgent, updateExecutionRun, updateExecutionSummary, updateWorkThreadStatus,
+  claimExecutionDecision, markUnfinishedExecutionsInterrupted, orphanExecutionDecisions, orphanExecutionDecisionsForAgent,
+  releaseExecutionDecisionClaim, resolveExecutionDecision, updateExecutionAgent, updateExecutionRun, updateExecutionSummary,
+  updateWorkThreadStatus,
   type AgentAssignment, type EngineId, type ExecutionAgentRecord, type ExecutionDecisionRecord,
   type ExecutionSnapshot, type ExecutionStatus
 } from "./database.js";
@@ -28,6 +36,7 @@ type OpenCodeRuntime = {
   baseUrl: string;
   password: string;
   sessions: Map<string, string>;
+  filesystemReadyProjects: Set<string>;
   serverErrors: string[];
   closing: boolean;
 };
@@ -39,10 +48,11 @@ type RuntimeState = {
   claudeControllers: Map<string, AbortController>;
   resolvers: Map<string, PendingResolver>;
   pendingCount: number;
-  /** Temporary allow-run grants are isolated to the agent run that received the human approval. */
+  /** Temporary OpenCode grants are isolated to the agent run that received approval. */
   openCodeRunApprovals: Map<string, Array<{ action: string; resource: string }>>;
   seenOpenCodePermissionRequests: Set<string>;
-  claudeRunApprovalKeys: Set<string>;
+  /** Temporary Claude allow-run grants are isolated to the agent run that received approval. */
+  claudeRunApprovalKeys: Map<string, Set<string>>;
 };
 type AgentInput = {
   id: string;
@@ -66,126 +76,18 @@ type OpenCodePermission = {
 };
 
 const runtimeByRun = new Map<string, RuntimeState>();
+const executionStartGate = createExecutionAdmissionGate();
 const opencodeBinary = join(homedir(), ".opencode", "bin", "opencode");
 const readTools = new Set(["Read", "Glob", "Grep", "LS", "List", "Skill", "LSP", "TodoRead", "NotebookRead"]);
 const writeTools = new Set(["Edit", "Write", "NotebookEdit", "MultiEdit", "NotebookWrite", "NotebookCellEdit"]);
 const shellTools = new Set(["Bash", "BashOutput", "KillShell"]);
 const delegationTools = new Set(["Agent", "Task", "TaskCreate", "TaskGet", "TaskStop"]);
-const sensitivePathPattern = /(^|[/\\])(?:\.env(?:\.[^/\\]*)?|\.claude|\.ssh|\.aws|\.azure|\.config|\.local|\.gnupg|\.kube|\.docker|\.npm|secrets?|credentials?|id_rsa[^/\\]*|.*(?:token|apikey|api_key|private_key).*|[^/\\]+\.(?:pem|key))($|[/\\])/i;
-const secretTextPatterns = [
-  /(authorization\s*[:=]\s*bearer\s+)[^\s"' ,;]+/gi,
-  /((?:api[_-]?key|access[_-]?token|refresh[_-]?token|auth[_-]?token|password|secret)\s*[:=]\s*)[^\s"' ,;]+/gi,
-  /\bsk-ant-[A-Za-z0-9_-]{12,}\b/g,
-  /\bsk-[A-Za-z0-9_-]{24,}\b/g
-];
-
-function sanitizeText(value: string): string {
-  let result = value;
-  for (const pattern of secretTextPatterns) result = result.replace(pattern, "$1[REDACTED]");
-  return result.slice(0, 12000);
-}
-function safeJson(value: unknown): unknown {
-  if (Array.isArray(value)) return value.map(safeJson);
-  if (!value || typeof value !== "object") {
-    return typeof value === "string" ? sanitizeText(value) : value;
-  }
-  const output: Record<string, unknown> = {};
-  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-    if (/token|password|secret|authorization|api.?key|credential/i.test(key)) output[key] = "[REDACTED]";
-    else output[key] = safeJson(entry);
-  }
-  return output;
-}
 function addLog(runId: string, area: string, kind: string, message: string, agentRunId: string | null = null): void {
   addExecutionEvent(runId, area, kind, sanitizeText(message), agentRunId);
 }
 function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms));
 }
-function isWithinDirectory(directory: string, candidate: string): boolean {
-  const rel = relative(directory, candidate);
-  return rel === "" || (rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel));
-}
-
-/**
- * Resolve a tool path against the canonical project directory. Resolving the
- * nearest existing ancestor also detects symlinks when the final file does
- * not exist yet (for example, a new file being written).
- */
-async function resolveProjectCandidate(projectPath: string, candidate: unknown): Promise<string | null> {
-  if (typeof candidate !== "string" || !candidate.trim()) return null;
-
-  const projectRoot = await realpath(projectPath).catch(() => null);
-  if (!projectRoot) return null;
-
-  const suppliedPath = candidate.trim();
-  const lexicalPath = isAbsolute(suppliedPath)
-    ? resolve(suppliedPath)
-    : resolve(projectRoot, suppliedPath);
-  if (!isWithinDirectory(projectRoot, lexicalPath)) return null;
-
-  let current = lexicalPath;
-  const missingSegments: string[] = [];
-  for (let attempt = 0; attempt < 64; attempt++) {
-    try {
-      const existingAncestor = await realpath(current);
-      const canonicalCandidate = resolve(existingAncestor, ...missingSegments);
-      return isWithinDirectory(projectRoot, canonicalCandidate) ? canonicalCandidate : null;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOENT" && code !== "ENOTDIR") return null;
-      const parent = dirname(current);
-      if (parent === current) return null;
-      missingSegments.unshift(basename(current));
-      current = parent;
-    }
-  }
-  return null;
-}
-
-function inputPath(input: Record<string, unknown>): unknown {
-  return input.file_path ?? input.filePath ?? input.path ??
-    input.notebook_path ?? input.notebookPath ?? input.uri;
-}
-
-async function claudeToolPathIsAllowed(
-  projectPath: string,
-  toolName: string,
-  input: Record<string, unknown>
-): Promise<boolean> {
-  // Skill/TodoRead do not accept arbitrary filesystem paths. All path-based
-  // tools must resolve inside the canonical project root.
-  if (toolName === "Skill" || toolName === "TodoRead") return true;
-
-  let rawPath = inputPath(input);
-  if (rawPath === undefined && ["Glob", "Grep", "LS", "List", "LSP"].includes(toolName)) {
-    rawPath = ".";
-  }
-  if (typeof rawPath !== "string" || !rawPath.trim()) return false;
-  let normalizedPath: string = rawPath;
-
-  if (normalizedPath.startsWith("file://")) {
-    try {
-      normalizedPath = decodeURIComponent(new URL(normalizedPath).pathname);
-    } catch {
-      return false;
-    }
-  }
-
-  // Glob patterns are separate from their base directory. Reject absolute
-  // patterns and traversal segments so a safe base path cannot be escaped.
-  if (toolName === "Glob") {
-    const pattern = input.pattern;
-    if (typeof pattern !== "string" || isAbsolute(pattern) || pattern.startsWith("~") ||
-        pattern.split(/[\\/]+/).some((segment) => segment === "..")) {
-      return false;
-    }
-  }
-
-  const canonicalPath = await resolveProjectCandidate(projectPath, normalizedPath);
-  return canonicalPath !== null && !pathIsSensitive(normalizedPath, canonicalPath);
-}
-
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
@@ -199,52 +101,8 @@ function claudeToolApprovalKey(toolName: string, input: unknown): string {
   return createHash("sha256").update(`${toolName}:${stableJson(input)}`).digest("hex");
 }
 
-function pathIsSensitive(pathValue: string, canonicalPath?: string): boolean {
-  const paths = canonicalPath === undefined ? [pathValue] : [pathValue, canonicalPath];
-  return paths.some((candidate) =>
-    sensitivePathPattern.test(candidate) ||
-    /(^|[/\\])\.git[/\\](?:config|credentials|hooks)(?:[/\\]|$)/i.test(candidate)
-  );
-}
 function createPermissionRules(profile: AgentAssignment["permissionProfile"]) {
-  // OpenCode V2 evaluates ordered rules with "last match wins".
-  const rules: Array<{ action: string; resource: string; effect: "allow" | "ask" | "deny" }> = [
-    { action: "*", resource: "*", effect: "ask" },
-    { action: "read", resource: "*", effect: "allow" },
-    { action: "glob", resource: "*", effect: "allow" },
-    { action: "grep", resource: "*", effect: "allow" },
-    { action: "list", resource: "*", effect: "allow" },
-    { action: "skill", resource: "*", effect: "allow" }
-  ];
-
-  if (profile === "read-only") {
-    for (const action of ["edit", "shell", "subagent"]) {
-      rules.push({ action, resource: "*", effect: "deny" });
-    }
-  } else if (profile === "workspace-write") {
-    rules.push({ action: "edit", resource: "*", effect: "allow" });
-    rules.push({ action: "subagent", resource: "*", effect: "deny" });
-  }
-
-  // Hard boundaries must be appended after broad profile rules because V2
-  // resolves the last matching rule.
-  rules.push({ action: "external_directory", resource: "*", effect: "deny" });
-  const sensitiveResources = [
-    "*.env*", "**/.env*", "**/.env.*", "**/secrets/**", "**/credentials/**",
-    "**/.claude/**", "**/.ssh/**", "**/.aws/**", "**/.azure/**", "**/.config/**",
-    "**/.local/**", "**/.gnupg/**", "**/.kube/**", "**/.docker/**", "**/.npm/**",
-    "**/.git/config", "**/.git/credentials", "**/.git/hooks/**",
-    "**/*.pem", "**/*.key", "**/id_rsa*", "**/*token*", "**/*apikey*", "**/*api_key*"
-  ];
-  for (const action of ["read", "edit"]) {
-    for (const resource of sensitiveResources) {
-      rules.push({ action, resource, effect: "deny" });
-    }
-  }
-  // The REA MCP exposes filesystem-oriented tools. Keep it denied even when
-  // its server is present in the factory-level OpenCode configuration.
-  rules.push({ action: "rea_*", resource: "*", effect: "deny" });
-  return rules;
+  return buildOpenCodePermissionRules(profile);
 }
 
 async function freePort(): Promise<number> {
@@ -278,7 +136,8 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
       PATH: childPath,
       OPENCODE_CONFIG: join(factoryRoot, "opencode.json"),
       OPENCODE_CONFIG_DIR: join(factoryRoot, ".opencode"),
-      OPENCODE_DISABLE_EXTERNAL_SKILLS: "true"
+      OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
+      FACTORY_FILESYSTEM_MCP_ENTRYPOINT: join(factoryRoot, ".opencode", "mcp", "factory-filesystem.mjs")
     },
     stdio: ["ignore", "pipe", "pipe"]
   });
@@ -318,7 +177,16 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
         const response = await fetch(baseUrl + "/api/info", { headers: { Authorization: auth }, signal: AbortSignal.timeout(1500) });
         if (response.ok) {
           addLog(runId, "OPENCODE-SERVER", "success", "Servidor local aislado de OpenCode disponible en localhost.");
-          return { child, baseUrl, password, sessions: new Map(), serverErrors, closing: false };
+          const runtime: OpenCodeRuntime = {
+            child, baseUrl, password, sessions: new Map(), filesystemReadyProjects: new Set(), serverErrors, closing: false
+          };
+          try {
+            await waitForFactoryOpenCodeAgents(runtime, factoryRoot, runId);
+          } catch (error) {
+            child.kill("SIGTERM");
+            throw error;
+          }
+          return runtime;
         }
       } catch { /* server still starting */ }
     }
@@ -343,12 +211,139 @@ async function openCodeRequest<T>(runtime: OpenCodeRuntime, method: string, path
   return (text ? JSON.parse(text) : undefined) as T;
 }
 
+/**
+ * OpenCode V2 may expose /api/info before asynchronous project configuration
+ * scanning has registered the factory's Markdown agents. Never create an
+ * execution session until every required agent and mode is visible.
+ */
+async function waitForFactoryOpenCodeAgents(
+  runtime: OpenCodeRuntime,
+  factoryRoot: string,
+  runId: string
+): Promise<void> {
+  const query = new URLSearchParams();
+  query.set("location[directory]", factoryRoot);
+  const endpoint = "/api/agent?" + query.toString();
+  const deadline = Date.now() + 15000;
+  let reportedWaiting = false;
+  let lastRegistry = inspectOpenCodeAgentRegistry({ data: [] });
+  let lastError: string | null = null;
+
+  while (Date.now() < deadline) {
+    try {
+      const payload = await openCodeRequest<unknown>(runtime, "GET", endpoint, undefined, 2500);
+      lastRegistry = inspectOpenCodeAgentRegistry(payload);
+      lastError = null;
+      if (lastRegistry.ready) {
+        addLog(
+          runId,
+          "OPENCODE-SERVER",
+          "success",
+          "Catálogo verificado: los 7 agentes personalizados están registrados con sus modos correctos."
+        );
+        return;
+      }
+      if (!reportedWaiting) {
+        reportedWaiting = true;
+        addLog(
+          runId,
+          "OPENCODE-SERVER",
+          "info",
+          "OpenCode respondió, pero su catálogo de agentes todavía está cargando; se espera antes de iniciar sesiones."
+        );
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error.message : String(error);
+    }
+    await delay(250);
+  }
+
+  const missing = lastRegistry.missing.length ? lastRegistry.missing.join(", ") : "ninguno";
+  const wrongModes = lastRegistry.wrongModes.length
+    ? lastRegistry.wrongModes.map((item) =>
+        item.id + "=" + String(item.actual) + " (esperado " + item.expected + ")"
+      ).join(", ")
+    : "ninguno";
+  const detail = [
+    "OpenCode no terminó de registrar los agentes de la fábrica en 15 segundos.",
+    "Agentes ausentes: " + missing + ".",
+    "Modos incorrectos: " + wrongModes + ".",
+    "Agentes reconocidos: " + lastRegistry.loadedCount + ".",
+    lastError ? "Último error API: " + sanitizeText(lastError).slice(0, 500) : ""
+  ].filter(Boolean).join(" ");
+  addLog(runId, "OPENCODE-SERVER", "warning", detail);
+  throw new Error(detail);
+}
+
 // The V2 wait endpoint is intentionally long-polling: it sends its response
 // only after the session agent loop becomes idle. Node's global fetch uses
 // Undici's default 300s headers timeout even when no AbortSignal is supplied,
 // so a valid agent run can be reported as "fetch failed" after five minutes.
 // Use node:http for this one request; its client has no implicit 300s
 // response-header timeout. The caller still observes connection errors.
+/**
+ * MCP servers are scoped to the session Location, not only to the server cwd.
+ * Wait after session creation and before sending its first prompt, so no
+ * agent can start without the project-rooted filesystem MCP.
+ */
+async function waitForFactoryFilesystemMcp(
+  runtime: OpenCodeRuntime,
+  projectPath: string,
+  runId: string
+): Promise<void> {
+  if (runtime.filesystemReadyProjects.has(projectPath)) return;
+
+  const query = new URLSearchParams();
+  query.set("location[directory]", projectPath);
+  const endpoint = "/api/mcp?" + query.toString();
+  const deadline = Date.now() + 15000;
+  let reportedWaiting = false;
+  let lastStatus = inspectFactoryFilesystemMcp({ data: [] });
+
+  while (Date.now() < deadline) {
+    try {
+      const payload = await openCodeRequest<unknown>(runtime, "GET", endpoint, undefined, 2500);
+      lastStatus = inspectFactoryFilesystemMcp(payload);
+      if (lastStatus.ready) {
+        runtime.filesystemReadyProjects.add(projectPath);
+        addLog(
+          runId,
+          "OPENCODE-SERVER",
+          "success",
+          "MCP factory_filesystem conectado al proyecto seleccionado; lectura/búsqueda segura disponible."
+        );
+        return;
+      }
+      if (lastStatus.status === "failed") {
+        throw new Error(lastStatus.error ?? "OpenCode devolvió el estado failed sin detalle.");
+      }
+      if (!reportedWaiting) {
+        reportedWaiting = true;
+        addLog(
+          runId,
+          "OPENCODE-SERVER",
+          "info",
+          "La sesión existe; se espera la conexión del MCP local de lectura antes de enviar el primer prompt."
+        );
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (/MCP server|MODULE_NOT_FOUND|factory_filesystem|Connection closed/i.test(message)) {
+        lastStatus = { ready: false, status: "failed", error: sanitizeText(message).slice(0, 1200) };
+      }
+    }
+    await delay(250);
+  }
+
+  const detail = [
+    "El MCP local factory_filesystem no quedó conectado al proyecto antes de iniciar el agente.",
+    "Estado: " + String(lastStatus.status ?? "no registrado") + ".",
+    lastStatus.error ? "Detalle: " + sanitizeText(lastStatus.error).slice(0, 1200) : ""
+  ].filter(Boolean).join(" ");
+  addLog(runId, "OPENCODE-SERVER", "warning", detail);
+  throw new Error(detail);
+}
+
 async function waitForOpenCodeSessionIdle(runtime: OpenCodeRuntime, sessionId: string): Promise<void> {
   const auth = "Basic " + Buffer.from("opencode:" + runtime.password).toString("base64");
   const url = new URL(
@@ -445,10 +440,7 @@ function createOpenCodeDecision(
   const requestId = String(request.id ?? "");
   if (!requestId) return;
   const requestKey = `${sessionId}:${requestId}`;
-  if (kind === "permission") {
-    if (state.seenOpenCodePermissionRequests.has(requestKey)) return;
-    state.seenOpenCodePermissionRequests.add(requestKey);
-  }
+  if (kind === "permission" && state.seenOpenCodePermissionRequests.has(requestKey)) return;
   const snapshot = getExecutionSnapshot(state.runId);
   if (snapshot?.decisions.some((item) => item.engineRequestId === requestId && item.engineSessionId === sessionId)) return;
   const action = String(request.action ?? request.permission ?? "acción");
@@ -471,6 +463,7 @@ function createOpenCodeDecision(
     description,
     details: safeJson(request)
   });
+  if (kind === "permission") state.seenOpenCodePermissionRequests.add(requestKey);
   addLog(state.runId, agent.agentId.toUpperCase(), "warning", `Solicitud pendiente: ${description}`, agent.id);
   updateExecutionAgent(agent.id, { status: "waiting" });
   updateExecutionRun(state.runId, "waiting");
@@ -571,18 +564,23 @@ async function runOpenCodeAgent(
     location: { directory: projectPath },
     permissions: createPermissionRules(agent.permissionProfile)
   };
-  let session: Record<string, unknown>;
-  try {
-    session = await openCodeRequest<Record<string, unknown>>(runtime, "POST", "/api/session", sessionPayload);
-  } catch (error) {
-    if (!/agent|unknown|not found/i.test(error instanceof Error ? error.message : String(error))) throw error;
-    const { agent: _ignored, ...withoutAgent } = sessionPayload;
-    session = await openCodeRequest<Record<string, unknown>>(runtime, "POST", "/api/session", withoutAgent);
-    addLog(state.runId, agent.agentId.toUpperCase(), "warning", "No se pudo activar la definición de agente desde la carpeta de configuración; se utilizará su instrucción de rol integrada.", agent.id);
-  }
+  // Do not silently fall back to OpenCode's default agent. The runtime startup
+  // gate has already verified this custom agent and its mode. If it disappears
+  // between startup and session creation, fail closed with the provider error.
+  const session = await openCodeRequest<Record<string, unknown>>(
+    runtime, "POST", "/api/session", sessionPayload
+  );
   const sessionData = session.data && typeof session.data === "object" ? session.data as Record<string, unknown> : session;
   const sessionId = String(sessionData.id ?? "");
   if (!sessionId) throw new Error("OpenCode creó una sesión sin devolver su identificador.");
+  try {
+    await waitForFactoryFilesystemMcp(runtime, projectPath, state.runId);
+  } catch (error) {
+    await openCodeRequest<unknown>(
+      runtime, "DELETE", "/api/session/" + encodeURIComponent(sessionId)
+    ).catch(() => undefined);
+    throw error;
+  }
   runtime.sessions.set(agent.id, sessionId);
   updateExecutionAgent(agent.id, { sessionId, status: "running", startedAt: new Date().toISOString() });
   addLog(state.runId, agent.agentId.toUpperCase(), "info", `Sesión OpenCode creada: ${sessionId}. Modelo: ${agent.modelId}.`, agent.id);
@@ -875,41 +873,23 @@ async function runClaudeAgent(
       },
       canUseTool: async (toolName, input, options) => {
         if (readTools.has(toolName)) {
-          // These tools do not accept an arbitrary filesystem path.
-          if (toolName === "Skill" || toolName === "TodoRead") {
-            return { behavior: "allow", toolUseID: options.toolUseID };
-          }
-
-          const rawPath = inputPath(input) ??
-            (["Glob", "Grep", "LS", "List", "LSP"].includes(toolName) ? "." : undefined);
-          const pathValue = typeof rawPath === "string" && rawPath.startsWith("file://")
-            ? decodeURIComponent(new URL(rawPath).pathname)
-            : rawPath;
-          const canonicalPath = await resolveProjectCandidate(projectPath, pathValue);
-          if (canonicalPath && typeof pathValue === "string" && !pathIsSensitive(pathValue, canonicalPath)) {
-            return { behavior: "allow", toolUseID: options.toolUseID };
-          }
+          const allowed = await claudeToolPathIsAllowed(projectPath, toolName, input);
+          if (allowed) return { behavior: "allow", toolUseID: options.toolUseID };
           return {
             behavior: "deny",
-            message: "La lectura fue bloqueada: la ruta no pertenece al proyecto o corresponde a un archivo sensible.",
+            message: "La lectura fue bloqueada: la ruta no pertenece al proyecto, contiene un enlace externo o selecciona un archivo sensible.",
             toolUseID: options.toolUseID
           };
         }
         if (agent.permissionProfile === "workspace-write" && writeTools.has(toolName)) {
-          const rawPath = inputPath(input) ??
-            (["Glob", "Grep", "LS", "List", "LSP"].includes(toolName) ? "." : undefined);
-          const pathValue = typeof rawPath === "string" && rawPath.startsWith("file://")
-            ? decodeURIComponent(new URL(rawPath).pathname)
-            : rawPath;
-          const canonicalPath = await resolveProjectCandidate(projectPath, pathValue);
-          if (canonicalPath && typeof pathValue === "string" && !pathIsSensitive(pathValue, canonicalPath)) {
-            return { behavior: "allow", toolUseID: options.toolUseID };
-          }
+          const allowed = await claudeToolPathIsAllowed(projectPath, toolName, input);
+          if (allowed) return { behavior: "allow", toolUseID: options.toolUseID };
         }
         const isQuestion = toolName === "AskUserQuestion";
         const approvalKey = claudeToolApprovalKey(toolName, input);
-        if (!isQuestion && state.claudeRunApprovalKeys.has(approvalKey)) {
-          addLog(state.runId, agent.agentId.toUpperCase(), "success", `Autorización temporal reutilizada para la misma operación ${toolName} durante esta ejecución.`, agent.id);
+        if (!isQuestion && hasAgentRunApprovalKey(state.claudeRunApprovalKeys, agent.id, approvalKey)) {
+          addLog(state.runId, agent.agentId.toUpperCase(), "success",
+            `Autorización temporal reutilizada durante esta ejecución por el mismo agente: ${toolName}.`, agent.id);
           return { behavior: "allow", toolUseID: options.toolUseID };
         }
         const title = isQuestion ? "Claude necesita una aclaración" : (options.title ?? `Autorizar herramienta: ${toolName}`);
@@ -1202,7 +1182,7 @@ async function executeRun(
         const finishedAt = new Date().toISOString();
         const snapshot = getExecutionSnapshot(state.runId);
         const sessionId = snapshot?.agents.find((item) => item.id === agent.id)?.sessionId ?? null;
-        const handoffOutput = prepareHandoffOutput(output, handoffId);
+        const handoffOutput = prepareHandoffOutput(redactSecrets(output), handoffId);
         const result: AgentResult = {
           agentRunId: agent.id, agentId: agent.agentId, engine: agent.engine, modelId: agent.modelId,
           sessionId, status: "succeeded", startedAt, finishedAt, handoffId,
@@ -1396,76 +1376,91 @@ export async function startExecution(
   depthOverride?: ResearchDepth,
   options: StartExecutionOptions = {}
 ): Promise<{ runId: string }> {
-  const active = [...runtimeByRun.values()].find((runtime) => !runtime.cancelled);
-  if (active) throw new Error("Ya hay una ejecución activa. Termínala o cancélala antes de comenzar otra.");
-  const resolvedProjectPath = resolve(projectPath);
-  const projectStat = await stat(resolvedProjectPath).catch(() => null);
-  if (!projectStat?.isDirectory()) throw new Error("La ruta del proyecto no existe o no es una carpeta.");
-  if (!instructions.trim()) throw new Error("Escribe las instrucciones que deben ejecutar los agentes.");
-  const assignments = listAssignments();
-  const enabledAssignments = assignments.filter((item) => item.enabled);
-  if (!enabledAssignments.length) throw new Error("No hay agentes habilitados. Activa al menos uno y guarda el equipo.");
-  if (enabledAssignments.some((item) => item.engine === "opencode") && !(await stat(opencodeBinary).catch(() => null))) {
-    throw new Error("No se encontró OpenCode en ~/.opencode/bin/opencode.");
+  // Acquire synchronously before the first await so simultaneous HTTP requests cannot
+  // both pass the active-run check while project/configuration preparation is in flight.
+  const releaseStartReservation = executionStartGate.tryAcquire();
+  if (!releaseStartReservation) {
+    throw new Error("Ya se está preparando otra ejecución. Espera a que comience o termine antes de iniciar otra.");
   }
-  const id = randomUUID();
-  const now = new Date().toISOString();
-  const agents: AgentInput[] = assignments.map((assignment) => ({
-    id: randomUUID(), runId: id, agentId: assignment.agentId,
-    engine: assignment.engine, modelId: assignment.modelId,
-    permissionProfile: assignment.permissionProfile, enabled: assignment.enabled
-  }));
-  const roundNumber = Math.max(1, Math.floor(options.roundNumber ?? 1));
-  const continuityContext = (options.continuityContext ?? "").slice(0, 28000);
-  const roleEntries = await Promise.all(assignments.map(async (assignment) => {
-    const roleText = await loadRoleInstructions(factoryRoot, assignment.agentId);
-    return [assignment.agentId, roleText, createHash("sha256").update(roleText).digest("hex")] as const;
-  }));
-  const roleInstructions = Object.fromEntries(roleEntries.map(([agentId, roleText]) => [agentId, roleText]));
-  const roleDigests = Object.fromEntries(roleEntries.map(([agentId, _roleText, digest]) => [agentId, digest]));
-  const workflowSkillSource = options.threadId
-    ? await readFile(join(factoryRoot, ".opencode", "skills", "continuous-workflow", "SKILL.md"), "utf8").catch(() => "")
-    : "";
-  createExecutionRecords({
-    id, projectPath: resolvedProjectPath, instructions: instructions.trim(),
-    status: "queued", startedAt: now,
-    threadId: options.threadId ?? null,
-    roundNumber,
-    continuityContext,
-    configurationSnapshot: {
-      capturedAt: now,
-      claudeProvider: getClaudeProviderPreference(),
-      favorites: listFavoriteModels(),
-      assignments: assignments.map((item) => ({ ...item })),
-      roleInstructionDigests: roleDigests,
-      roleInstructions,
-      workflowSkillDigest: workflowSkillSource
-        ? createHash("sha256").update(workflowSkillSource).digest("hex") : null,
-      workflowSkillContent: workflowSkillSource
+  try {
+    // A cancelled run remains exclusive until executeRun() finishes its cleanup.
+    if (runtimeByRun.size > 0) {
+      throw new Error("Ya hay una ejecución activa o en proceso de cancelación. Espera a que termine antes de comenzar otra.");
     }
-  }, agents.map((agent) => ({
-    id: agent.id, agentId: agent.agentId, engine: agent.engine,
-    modelId: agent.modelId, permissionProfile: agent.permissionProfile,
-    status: agent.enabled ? "queued" : "skipped",
-    error: agent.enabled ? null : "Deshabilitado en la configuración del equipo; se registra explícitamente y no se ejecuta.",
-    finishedAt: null
-  })));
-  const state: RuntimeState = {
-    runId: id, cancelled: false, claudeControllers: new Map(),
-    resolvers: new Map(), pendingCount: 0,
-    openCodeRunApprovals: new Map(), seenOpenCodePermissionRequests: new Set(), claudeRunApprovalKeys: new Set()
-  };
-  runtimeByRun.set(id, state);
-  addLog(id, "ORCHESTRATOR", "success",
-    "Ejecución creada para " + resolvedProjectPath + ". " + enabledAssignments.length +
-    " agentes habilitados y " + (assignments.length - enabledAssignments.length) +
-    " deshabilitados (registrados explícitamente como skipped)." +
-    (options.threadId ? " Proceso persistente " + options.threadId + " · ronda " + roundNumber + "." : ""));
-  void executeRun(state, resolvedProjectPath, instructions.trim(), factoryRoot, agents, depthOverride, {
-    threadId: options.threadId ?? null, roundNumber, continuityContext,
-    skillContent: workflowSkillSource, roleInstructions
-  });
-  return { runId: id };
+    const resolvedProjectPath = await requireCanonicalProjectRoot(projectPath);
+    if (!instructions.trim()) throw new Error("Escribe las instrucciones que deben ejecutar los agentes.");
+    const assignments = listAssignments();
+    const enabledAssignments = assignments.filter((item) => item.enabled);
+    if (!enabledAssignments.length) throw new Error("No hay agentes habilitados. Activa al menos uno y guarda el equipo.");
+    if (enabledAssignments.some((item) => item.engine === "opencode") && !(await stat(opencodeBinary).catch(() => null))) {
+      throw new Error("No se encontró OpenCode en ~/.opencode/bin/opencode.");
+    }
+    const id = randomUUID();
+    const now = new Date().toISOString();
+    const agents: AgentInput[] = assignments.map((assignment) => ({
+      id: randomUUID(), runId: id, agentId: assignment.agentId,
+      engine: assignment.engine, modelId: assignment.modelId,
+      permissionProfile: assignment.permissionProfile, enabled: assignment.enabled
+    }));
+    const roundNumber = Math.max(1, Math.floor(options.roundNumber ?? 1));
+    const continuityContext = (options.continuityContext ?? "").slice(0, 28000);
+    const roleEntries = await Promise.all(assignments.map(async (assignment) => {
+      const roleText = await loadRoleInstructions(factoryRoot, assignment.agentId);
+      return [assignment.agentId, roleText, createHash("sha256").update(roleText).digest("hex")] as const;
+    }));
+    const roleInstructions = Object.fromEntries(roleEntries.map(([agentId, roleText]) => [agentId, roleText]));
+    const roleDigests = Object.fromEntries(roleEntries.map(([agentId, _roleText, digest]) => [agentId, digest]));
+    const workflowSkillSource = options.threadId
+      ? await readFile(join(factoryRoot, ".opencode", "skills", "continuous-workflow", "SKILL.md"), "utf8").catch(() => "")
+      : "";
+    createExecutionRecords({
+      id, projectPath: resolvedProjectPath, instructions: instructions.trim(),
+      status: "queued", startedAt: now,
+      threadId: options.threadId ?? null,
+      roundNumber,
+      continuityContext,
+      configurationSnapshot: {
+        capturedAt: now,
+        claudeProvider: getClaudeProviderPreference(),
+        favorites: listFavoriteModels(),
+        assignments: assignments.map((item) => ({ ...item })),
+        roleInstructionDigests: roleDigests,
+        roleInstructions,
+        workflowSkillDigest: workflowSkillSource
+          ? createHash("sha256").update(workflowSkillSource).digest("hex") : null,
+        workflowSkillContent: workflowSkillSource
+      }
+    }, agents.map((agent) => ({
+      id: agent.id, agentId: agent.agentId, engine: agent.engine,
+      modelId: agent.modelId, permissionProfile: agent.permissionProfile,
+      status: agent.enabled ? "queued" : "skipped",
+      error: agent.enabled ? null : "Deshabilitado en la configuración del equipo; se registra explícitamente y no se ejecuta.",
+      finishedAt: null
+    })));
+    const state: RuntimeState = {
+      runId: id, cancelled: false, claudeControllers: new Map(),
+      resolvers: new Map(), pendingCount: 0,
+      openCodeRunApprovals: new Map(), seenOpenCodePermissionRequests: new Set(), claudeRunApprovalKeys: new Map()
+    };
+    try {
+      addLog(id, "ORCHESTRATOR", "success",
+        "Ejecución creada para " + resolvedProjectPath + ". " + enabledAssignments.length +
+        " agentes habilitados y " + (assignments.length - enabledAssignments.length) +
+        " deshabilitados (registrados explícitamente como skipped)." +
+        (options.threadId ? " Proceso persistente " + options.threadId + " · ronda " + roundNumber + "." : ""));
+    } catch (error) {
+      try { updateExecutionRun(id, "failed", true); } catch { /* Preserve the original startup error. */ }
+      throw error;
+    }
+    runtimeByRun.set(id, state);
+    void executeRun(state, resolvedProjectPath, instructions.trim(), factoryRoot, agents, depthOverride, {
+      threadId: options.threadId ?? null, roundNumber, continuityContext,
+      skillContent: workflowSkillSource, roleInstructions
+    });
+    return { runId: id };
+  } finally {
+    releaseStartReservation();
+  }
 }
 
 export function getLatestExecution(): ExecutionSnapshot | null {
@@ -1512,133 +1507,197 @@ export async function respondExecutionDecision(
 ): Promise<void> {
   const decision = getExecutionDecision(decisionId);
   if (!decision || decision.runId !== runId || decision.status !== "pending") {
-    throw new Error("La solicitud ya fue respondida o no pertenece a esta ejecución.");
+    throw new Error("La solicitud ya fue respondida, está siendo procesada o no pertenece a esta ejecución.");
   }
   const state = runtimeByRun.get(runId);
   if (!state) throw new Error("La sesión del motor ya no está activa. Reanuda la ejecución desde el motor o inicia una nueva.");
   if (decision.kind === "question" && response.action !== "answer") {
     throw new Error("Las solicitudes de aclaración requieren una respuesta escrita; no admiten permisos persistentes.");
   }
-  if (decision.engine === "opencode") {
-    const runtime = state.openCode;
-    if (!runtime || !decision.engineSessionId || !decision.engineRequestId) {
-      throw new Error("No se encontró la sesión OpenCode asociada a esta solicitud.");
-    }
-    if (decision.kind === "permission") {
-      if (response.action === "answer") throw new Error("Esta solicitud requiere aprobar o rechazar la acción.");
-      const details = decision.details && typeof decision.details === "object"
-        ? decision.details as OpenCodePermission
-        : {};
-      const addedRules = response.action === "allow-run" ? buildRunApprovalPatterns(details) : [];
-      if (response.action === "allow-run" && addedRules.length === 0) {
-        throw new Error("OpenCode no propuso recursos o patrones concretos para recordar. Aprueba esta operación una sola vez.");
-      }
-      try {
-        await replyOpenCodePermission(
-          runtime,
-          decision.engineSessionId,
-          decision.engineRequestId,
-          response.action === "deny" ? "reject" : "once",
-          response.answer
-        );
-      } catch (error) {
-        if (error instanceof Error && /OpenCode API HTTP 404/.test(error.message)) {
+
+  const openCodeRuntime = decision.engine === "opencode" ? state.openCode : undefined;
+  if (decision.engine === "opencode" && (!openCodeRuntime || !decision.engineSessionId || !decision.engineRequestId)) {
+    throw new Error("No se encontró la sesión OpenCode asociada a esta solicitud.");
+  }
+  const claudeResolver = decision.engine === "claude" ? state.resolvers.get(decisionId) : undefined;
+  if (decision.engine === "claude" && !claudeResolver) {
+    throw new Error("La solicitud ya no tiene un agente Claude esperando una respuesta.");
+  }
+
+  const details = decision.details && typeof decision.details === "object"
+    ? decision.details as OpenCodePermission
+    : {};
+  const addedRules = decision.engine === "opencode" && decision.kind === "permission" && response.action === "allow-run"
+    ? buildRunApprovalPatterns(details)
+    : [];
+  if (decision.engine === "opencode" && decision.kind === "permission" &&
+      response.action === "allow-run" && addedRules.length === 0) {
+    throw new Error("OpenCode no propuso recursos concretos que puedan recordarse de forma segura. Aprueba esta operación una sola vez.");
+  }
+
+  // Claim the row before making an asynchronous provider call. Only one request
+  // can transition pending -> responding; a second browser click gets HTTP 409.
+  if (!claimExecutionDecision(decisionId)) {
+    throw new Error("Otra solicitud ya está respondiendo esta decisión. Actualiza el Centro de decisiones.");
+  }
+
+  let claimHeld = true;
+  let engineConsumedRequest = false;
+  try {
+    if (decision.engine === "opencode") {
+      const runtime = openCodeRuntime!;
+      const sessionId = decision.engineSessionId!;
+      const requestId = decision.engineRequestId!;
+
+      if (decision.kind === "permission") {
+        if (response.action === "answer") throw new Error("Esta solicitud requiere aprobar o rechazar la acción.");
+        try {
+          await replyOpenCodePermission(
+            runtime,
+            sessionId,
+            requestId,
+            response.action === "deny" ? "reject" : "once",
+            response.answer
+          );
+          engineConsumedRequest = true;
+        } catch (error) {
           const pendingPayload = await openCodeRequest<unknown>(
-            runtime, "GET", `/api/session/${encodeURIComponent(decision.engineSessionId)}/permission`
+            runtime, "GET", `/api/session/${encodeURIComponent(sessionId)}/permission`
           ).catch(() => null);
           const requestStillPending = pendingPayload !== null &&
-            parseOpenCodeData<OpenCodePermission>(pendingPayload).some((item) => item.id === decision.engineRequestId);
-          if (pendingPayload !== null && !requestStillPending) {
-            const reason = "OpenCode ya no conserva esta solicitud pendiente; se retiró de la cola para evitar una aprobación fantasma.";
-            resolveExecutionDecision(decisionId, "orphaned", reason);
+            parseOpenCodeData<OpenCodePermission>(pendingPayload).some((item) => item.id === requestId);
+          if (!requestStillPending) {
+            const reason = pendingPayload === null
+              ? "No se pudo reconciliar con OpenCode si la solicitud sigue pendiente. Se marcó como huérfana para impedir una segunda aprobación."
+              : "OpenCode ya no conserva esta solicitud pendiente; se retiró de la cola para evitar una aprobación fantasma.";
+            if (resolveExecutionDecision(decisionId, "orphaned", reason)) claimHeld = false;
             addLog(runId, "HUMAN-REVIEW", "warning", reason, decision.agentRunId);
             throw new Error(reason);
           }
+          // OpenCode confirms the permission is still pending; the outer catch
+          // may safely release the claim so the user can retry.
+          throw error;
         }
-        throw error;
+
+        const resolved = resolveExecutionDecision(
+          decisionId,
+          response.action === "deny" ? "rejected" : "approved",
+          response.action === "allow-run"
+            ? `Aprobado durante esta ejecución: ${addedRules.map((rule) => `${rule.action}: ${rule.resource}`).join("; ")}`
+            : response.action === "allow" ? "Aprobado una vez." : "Rechazado."
+        );
+        if (!resolved) throw new Error("OpenCode consumió la solicitud, pero no se pudo persistir su decisión; se marcará para revisión.");
+        claimHeld = false;
+        if (response.action === "allow-run") {
+          addAgentRunApprovals(state.openCodeRunApprovals, decision.agentRunId, addedRules);
+        }
+
+        if (response.action === "deny") {
+          // OpenCode rejects other pending permission requests in the same session.
+          const siblings = getExecutionSnapshot(runId)?.decisions.filter((item) =>
+            item.id !== decisionId && item.status === "pending" && item.engine === "opencode" &&
+            item.kind === "permission" && item.engineSessionId === sessionId
+          ) ?? [];
+          for (const sibling of siblings) {
+            if (resolveExecutionDecision(sibling.id, "rejected", "OpenCode rechazó las demás solicitudes pendientes de esta sesión.")) {
+              addLog(runId, "HUMAN-REVIEW", "warning", "Solicitud rechazada junto con otra autorización de la misma sesión OpenCode.", sibling.agentRunId);
+            }
+          }
+        }
+        addLog(runId, "HUMAN-REVIEW", "success",
+          response.action === "allow-run"
+            ? `Autorización limitada a esta ejecución: ${decision.title}.`
+            : `Solicitud atendida: ${decision.title}.`,
+          decision.agentRunId
+        );
+      } else {
+        if (response.action !== "answer") throw new Error("Esta solicitud requiere una respuesta escrita.");
+        const metadata = details.metadata && typeof details.metadata === "object"
+          ? details.metadata as Record<string, unknown>
+          : details;
+        const fields = Array.isArray(metadata.fields) ? metadata.fields as Array<Record<string, unknown>> : [];
+        let answers: Record<string, unknown> = {};
+        try {
+          const parsed = JSON.parse(response.answer ?? "");
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) answers = parsed as Record<string, unknown>;
+          else throw new Error("La respuesta JSON debe ser un objeto.");
+        } catch (error) {
+          if (error instanceof Error && error.message === "La respuesta JSON debe ser un objeto.") throw error;
+          if (fields.length > 1) throw new Error("El formulario tiene varios campos. Envía un objeto JSON con una respuesta por cada clave de campo.");
+          if (fields.length === 1) {
+            const field = fields[0];
+            if (!field) throw new Error("No se encontró el campo que debe responderse.");
+            const key = String(field.key ?? "answer");
+            if (field.type === "boolean") answers[key] = /^(si|sí|true|1|yes)$/i.test(response.answer ?? "");
+            else if (field.type === "number") {
+              const number = Number(response.answer);
+              if (!Number.isFinite(number)) throw new Error("La respuesta debe ser un número válido.");
+              answers[key] = number;
+            } else answers[key] = response.answer ?? "";
+          } else answers.answer = response.answer ?? "";
+        }
+        try {
+          await openCodeRequest(runtime, "POST",
+            `/api/session/${encodeURIComponent(sessionId)}/form/${encodeURIComponent(requestId)}/reply`,
+            { answer: answers }
+          );
+          engineConsumedRequest = true;
+        } catch (error) {
+          const definitiveRejection = error instanceof Error &&
+            /OpenCode API HTTP (400|401|403|405|409|422):/.test(error.message);
+          engineConsumedRequest = !definitiveRejection;
+          throw error;
+        }
+        if (!resolveExecutionDecision(decisionId, "answered", response.answer ?? "")) {
+          throw new Error("OpenCode aceptó la respuesta, pero no se pudo confirmar en el ledger.");
+        }
+        claimHeld = false;
+        addLog(runId, "HUMAN-REVIEW", "success", `Solicitud atendida: ${decision.title}.`, decision.agentRunId);
       }
-      if (response.action === "allow-run") {
-        addAgentRunApprovals(state.openCodeRunApprovals, decision.agentRunId, addedRules);
+    } else {
+      const resolver = claudeResolver!;
+      let claudeApprovalKey: string | null = null;
+      if (decision.kind === "permission" && response.action === "allow-run") {
+        claudeApprovalKey = typeof details.approvalKey === "string" ? details.approvalKey : "";
+        if (!claudeApprovalKey) throw new Error("No se pudo identificar la operación exacta de Claude para recordarla durante esta ejecución.");
+        if (!decision.agentRunId) throw new Error("No se pudo vincular la autorización de Claude con el agente que la solicitó.");
       }
-      resolveExecutionDecision(
+      const finalAnswer: DecisionAnswer = decision.kind === "question" && response.action !== "answer"
+        ? { action: "answer", answer: response.action === "deny" ? "No, no continúes." : "Sí, continúa." }
+        : response.action === "allow-run" ? { action: "allow" } : response;
+      resolver(finalAnswer);
+      engineConsumedRequest = true;
+      const resolved = resolveExecutionDecision(
         decisionId,
-        response.action === "deny" ? "rejected" : "approved",
-        response.action === "allow-run"
-          ? `Aprobado durante esta ejecución: ${addedRules.map((rule) => `${rule.action}: ${rule.resource}`).join("; ")}`
-          : response.action === "allow" ? "Aprobado una vez." : "Rechazado."
+        finalAnswer.action === "answer" ? "answered" : finalAnswer.action === "allow" ? "approved" : "rejected",
+        response.action === "allow-run" ? "Aprobado para repetir esta misma operación durante esta ejecución." : finalAnswer.answer ?? ""
       );
-      if (response.action === "deny") {
-        // OpenCode rejects every other pending permission request in the same session too.
-        const siblings = getExecutionSnapshot(runId)?.decisions.filter((item) =>
-          item.id !== decisionId && item.engine === "opencode" &&
-          item.kind === "permission" && item.engineSessionId === decision.engineSessionId
-        ) ?? [];
-        for (const sibling of siblings) {
-          resolveExecutionDecision(sibling.id, "rejected", "OpenCode rechazó las demás solicitudes pendientes de esta sesión.");
-          addLog(runId, "HUMAN-REVIEW", "warning", "Solicitud rechazada junto con otra autorización de la misma sesión OpenCode.", sibling.agentRunId);
-        }
+      if (!resolved) throw new Error("Claude recibió la respuesta, pero no se pudo confirmar en el ledger.");
+      claimHeld = false;
+      if (claudeApprovalKey) {
+        grantAgentRunApprovalKey(state.claudeRunApprovalKeys, decision.agentRunId, claudeApprovalKey);
       }
       addLog(runId, "HUMAN-REVIEW", "success",
         response.action === "allow-run"
-          ? `Autorización limitada a esta ejecución: ${decision.title}.`
+          ? `Autorización limitada a la misma operación durante esta ejecución: ${decision.title}.`
           : `Solicitud atendida: ${decision.title}.`,
         decision.agentRunId
       );
-    } else {
-      if (response.action !== "answer") throw new Error("Esta solicitud requiere una respuesta escrita.");
-      const details = decision.details as Record<string, unknown>;
-      const metadata = details.metadata && typeof details.metadata === "object" ? details.metadata as Record<string, unknown> : details;
-      const fields = Array.isArray(metadata.fields) ? metadata.fields as Array<Record<string, unknown>> : [];
-      let answers: Record<string, unknown> = {};
-      try {
-        const parsed = JSON.parse(response.answer ?? "");
-        if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) answers = parsed as Record<string, unknown>;
-      } catch {
-        if (fields.length > 1) throw new Error("El formulario tiene varios campos. Envía un objeto JSON con una respuesta por cada clave de campo.");
-        if (fields.length === 1) {
-          const field = fields[0];
-          if (!field) throw new Error("No se encontró el campo que debe responderse.");
-          const key = String(field.key ?? "answer");
-          if (field.type === "boolean") answers[key] = /^(si|sí|true|1|yes)$/i.test(response.answer ?? "");
-          else if (field.type === "number") {
-            const number = Number(response.answer);
-            if (!Number.isFinite(number)) throw new Error("La respuesta debe ser un número válido.");
-            answers[key] = number;
-          } else answers[key] = response.answer ?? "";
-        } else answers.answer = response.answer ?? "";
+    }
+  } catch (error) {
+    if (claimHeld) {
+      if (engineConsumedRequest) {
+        // The engine may have consumed the request even if persistence failed.
+        // Never make it approvable a second time; fail closed and leave evidence.
+        resolveExecutionDecision(
+          decisionId,
+          "orphaned",
+          "El motor aceptó o pudo aceptar la respuesta, pero la fábrica no pudo confirmar el resultado. Revisión manual requerida."
+        );
+      } else {
+        releaseExecutionDecisionClaim(decisionId);
       }
-      await openCodeRequest(runtime, "POST",
-        `/api/session/${encodeURIComponent(decision.engineSessionId)}/form/${encodeURIComponent(decision.engineRequestId)}/reply`,
-        { answer: answers }
-      );
-      resolveExecutionDecision(decisionId, "answered", response.answer ?? "");
-      addLog(runId, "HUMAN-REVIEW", "success", `Solicitud atendida: ${decision.title}.`, decision.agentRunId);
     }
-  } else {
-    const resolver = state.resolvers.get(decisionId);
-    if (!resolver) throw new Error("La solicitud ya no tiene un agente esperando una respuesta.");
-    if (decision.kind === "permission" && response.action === "allow-run") {
-      const details = decision.details && typeof decision.details === "object"
-        ? decision.details as Record<string, unknown>
-        : {};
-      const approvalKey = typeof details.approvalKey === "string" ? details.approvalKey : "";
-      if (!approvalKey) throw new Error("No se pudo identificar la operación exacta de Claude para recordarla durante esta ejecución.");
-      state.claudeRunApprovalKeys.add(approvalKey);
-    }
-    const finalAnswer: DecisionAnswer = decision.kind === "question" && response.action !== "answer"
-      ? { action: "answer", answer: response.action === "deny" ? "No, no continúes." : "Sí, continúa." }
-      : response.action === "allow-run" ? { action: "allow" } : response;
-    resolver(finalAnswer);
-    resolveExecutionDecision(
-      decisionId,
-      finalAnswer.action === "answer" ? "answered" : finalAnswer.action === "allow" ? "approved" : "rejected",
-      response.action === "allow-run" ? "Aprobado para repetir esta misma operación durante esta ejecución." : finalAnswer.answer ?? ""
-    );
-    addLog(runId, "HUMAN-REVIEW", "success",
-      response.action === "allow-run"
-        ? `Autorización limitada a la misma operación durante esta ejecución: ${decision.title}.`
-        : `Solicitud atendida: ${decision.title}.`,
-      decision.agentRunId
-    );
+    throw error;
   }
 }

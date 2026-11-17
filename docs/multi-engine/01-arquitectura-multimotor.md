@@ -1,7 +1,8 @@
 # Decisión de arquitectura — Fábrica multi-motor
 
-**Estado:** propuesta base para implementación incremental
-**Fecha:** 2026-11-12
+**Estado:** documento de diseño inicial; partes implementadas y refinadas desde entonces.
+**Fecha original:** 2026-11-12
+**Estado operativo vigente:** control-center/README.md y docs/GUIA-USUARIO-CONTROL-CENTER.md.
 
 ## Decisión principal
 

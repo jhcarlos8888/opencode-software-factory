@@ -11,11 +11,14 @@
     "dev": "concurrently -k -n API,WEB -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "tsx watch src/api/server.ts",
     "dev:web": "vite --host 127.0.0.1",
-    "build": "tsc -p tsconfig.api.json && vite build",
+    "build": "tsc -p tsconfig.api.json && node scripts/write-build-info.mjs && vite build",
     "start": "node dist-api/api/server.js",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc -p tsconfig.api.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "test:orchestration": "tsx --test src/api/orchestration.test.ts"
+    "test:orchestration": "tsx --test src/api/*.test.ts && node --test ../scripts/factory-filesystem.test.mjs ../scripts/build-info.test.mjs scripts/security-audit.test.mjs",
+    "deploy": "bash scripts/deploy.sh",
+    "verify": "npm run test:orchestration && npm run typecheck && npm run security:audit && python3 -m py_compile ../scripts/factory.py ../scripts/verify-opencode-agents.py ../scripts/verify-opencode-agents.test.py && bash ../scripts/verify-factory.sh && git -C .. diff --check",
+    "security:audit": "node scripts/security-audit.mjs"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "^0.3.322",

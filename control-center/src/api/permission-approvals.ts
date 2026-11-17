@@ -1,5 +1,6 @@
 export interface PermissionPattern {
   action: string;
+  /** Exact resource from the permission request; never a provider-supplied glob. */
   resource: string;
 }
 
@@ -12,39 +13,39 @@ export interface PermissionRequestLike {
 }
 
 function stringArray(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0)
-    : [];
+  if (!Array.isArray(value)) return [];
+  return value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0 && item.length <= 12000);
 }
 
-function patternMatches(action: string, pattern: string, resource: string): boolean {
-  const normalize = (value: string) => value.split(String.fromCharCode(92)).join("/");
-  const normalizedPattern = normalize(pattern);
-  const normalizedResource = normalize(resource);
-  if (
-    action === "shell" &&
-    normalizedPattern.endsWith(" *") &&
-    normalizedResource === normalizedPattern.slice(0, -2)
-  ) {
-    return true;
+function normalizeResource(action: string, resource: string): string {
+  // Filesystem paths may be reported with either separator. Shell commands are
+  // compared byte-for-byte: backslashes can be meaningful shell escapes.
+  if (["edit", "read", "write", "external_directory"].includes(action)) {
+    return resource.replace(/\\/g, "/");
   }
-  const expression = normalizedPattern.split("").map((character) => {
-    if (character === "*") return "[\\s\\S]*";
-    if (character === "?") return "[\\s\\S]";
-    return "|\\{}()[]^$+?.".includes(character) ? "\\" + character : character;
-  }).join("");
-  return new RegExp(`^${expression}$`).test(normalizedResource);
+  return resource;
 }
 
+/**
+ * Build run-scoped grants from the concrete resources that triggered the
+ * approval. OpenCode's save field is a suggested persistent pattern and can
+ * contain broad values such as "*" even when the actual request targets one
+ * file. It is deliberately never trusted as an authorization boundary.
+ */
 export function buildRunApprovalPatterns(request: PermissionRequestLike): PermissionPattern[] {
   const action = String(request.action ?? request.permission ?? "").trim();
   if (!action) return [];
-  const proposed = stringArray(request.save);
-  const resources = stringArray(request.resources).length
-    ? stringArray(request.resources)
-    : stringArray(request.patterns);
-  const candidates = proposed.length ? proposed : resources;
-  return [...new Set(candidates)].map((resource) => ({ action, resource }));
+
+  const resources = stringArray(request.resources)
+    // A wildcard filesystem resource is not a concrete object to authorize.
+    .filter((resource) => action === "shell" || !/[*?]/.test(resource));
+
+  if (resources.length === 0) return [];
+  return [...new Set(resources.map((resource) => normalizeResource(action, resource)))]
+    .map((resource) => ({ action, resource }));
 }
 
 export function addAgentRunApprovals(
@@ -52,12 +53,12 @@ export function addAgentRunApprovals(
   agentRunId: string,
   additions: PermissionPattern[]
 ): void {
-  if (!agentRunId || additions.length === 0) return;
+  if (!agentRunId.trim() || additions.length === 0) return;
   const existing = approvalsByAgent.get(agentRunId) ?? [];
-  const keys = new Set(existing.map((item) => `${item.action}\0${item.resource}`));
+  const keys = new Set(existing.map((item) => JSON.stringify([item.action, item.resource])));
   const merged = [...existing];
   for (const item of additions) {
-    const key = `${item.action}\0${item.resource}`;
+    const key = JSON.stringify([item.action, item.resource]);
     if (!keys.has(key)) {
       keys.add(key);
       merged.push(item);
@@ -72,12 +73,17 @@ export function matchesAgentRunApproval(
   request: PermissionRequestLike
 ): boolean {
   const action = String(request.action ?? request.permission ?? "").trim();
-  const resources = stringArray(request.resources).length
-    ? stringArray(request.resources)
-    : stringArray(request.patterns);
-  if (!agentRunId || !action || resources.length === 0) return false;
+  if (!agentRunId.trim() || !action) return false;
+
+  // Only the engine's concrete resource list may be matched. Its patterns
+  // field describes possible grants, not the resource being requested.
+  const resources = stringArray(request.resources)
+    .filter((resource) => action === "shell" || !/[*?]/.test(resource))
+    .map((resource) => normalizeResource(action, resource));
+  if (resources.length === 0) return false;
+
   const grants = approvalsByAgent.get(agentRunId) ?? [];
   return resources.every((resource) =>
-    grants.some((grant) => grant.action === action && patternMatches(action, grant.resource, resource))
+    grants.some((grant) => grant.action === action && grant.resource === resource)
   );
 }

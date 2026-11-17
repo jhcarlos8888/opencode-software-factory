@@ -55,9 +55,6 @@ permissions:
     resource: "ls *"
     effect: allow
   - action: shell
-    resource: "grep *"
-    effect: allow
-  - action: shell
     resource: "head *"
     effect: allow
   - action: shell
@@ -257,3 +254,12 @@ Criterios:
 
 No combines estados, no añadas calificadores a la línea final y no declares
 pruebas ejecutadas si no lo fueron.
+
+## Lectura y búsqueda segura del proyecto
+
+- Para enumerar archivos usa exclusivamente factory_filesystem_list_files.
+- Para leer código o documentación usa factory_filesystem_read_file.
+- Para buscar símbolos o texto usa factory_filesystem_search_text (búsqueda literal).
+- No invoques las herramientas nativas Glob, Grep ni Read: la fábrica las bloquea deliberadamente porque OpenCode V2 no vincula de forma segura el ámbito de búsqueda de Glob/Grep con la autorización de la ruta.
+- No intentes sustituirlas por find, rg, grep, cat o scripts de shell para leer o enumerar archivos; usa el servidor MCP local de la fábrica.
+- Estas herramientas son solo lectura, limitan tamaño/profundidad/resultados y rechazan rutas absolutas, traversal, symlinks y archivos sensibles.

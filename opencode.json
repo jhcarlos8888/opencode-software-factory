@@ -23,6 +23,101 @@
       "action": "rea_*",
       "resource": "*",
       "effect": "deny"
+    },
+    {
+      "action": "external_directory",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "*.env",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "*.env.*",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "**/.git/**",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "**/.ssh/**",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "**/.aws/**",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "**/credentials/**",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "**/secrets/**",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "**/*.pem",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "**/*.key",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "**/*.p12",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "**/*.pfx",
+      "effect": "deny"
+    },
+    {
+      "action": "read",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "glob",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "grep",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "list",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "lsp",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "subagent",
+      "resource": "*",
+      "effect": "deny"
+    },
+    {
+      "action": "factory_filesystem_*",
+      "resource": "*",
+      "effect": "allow"
     }
   ],
   "providers": {
@@ -122,6 +217,20 @@
           "--headless",
           "--no-sandbox"
         ]
+      },
+      "factory_filesystem": {
+        "type": "local",
+        "command": [
+          "node",
+          "-e",
+          "import(require('node:url').pathToFileURL(require('node:path').resolve(process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT || '.opencode/mcp/factory-filesystem.mjs')).href)"
+        ],
+        "enabled": true,
+        "codemode": false,
+        "timeout": {
+          "startup": 10000,
+          "execution": 30000
+        }
       }
     }
   }

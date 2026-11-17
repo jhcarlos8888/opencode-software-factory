@@ -14,6 +14,7 @@ ALLOWED = (
     ".opencode/agents",
     ".opencode/commands",
     ".opencode/skills",
+    ".opencode/mcp",
     ".agents/skills",
     "opencode.json",
 )
@@ -132,7 +133,12 @@ def state_root():
         base = os.environ.get(
             "XDG_STATE_HOME", str(Path.home() / ".local/state")
         )
-    return Path(base).expanduser() / "opencode-software-factory"
+    root = Path(base).expanduser() / "opencode-software-factory"
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError(f"El directorio de estado de la fábrica no es seguro: {root}")
+    os.chmod(root, 0o700)
+    return root
 
 
 def manifest_path(target):
@@ -156,8 +162,11 @@ def source_files():
     result = {}
     for prefix in ALLOWED:
         base = ROOT / prefix
-        if base.is_symlink():
-            raise ValueError(f"No se admiten enlaces simbólicos: {base}")
+        current = ROOT
+        for part in Path(prefix).parts:
+            current = current / part
+            if current.is_symlink():
+                raise ValueError(f"No se admiten enlaces simbólicos en las fuentes: {current}")
         if base.is_file():
             # Las entradas de ALLOWED que son archivos (p. ej. opencode.json).
             result[prefix] = base.read_bytes()
@@ -223,11 +232,22 @@ def check_ancestors(target, rel):
 
 
 def write_manifest_exclusive(path, data):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    # El modo exclusivo evita sobrescribir un manifiesto creado por otra ejecución.
-    with path.open("x", encoding="utf-8") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
-        f.write("\n")
+    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path.parent, 0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+            f.write("\n")
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def factory_commit():
@@ -321,10 +341,16 @@ def install(raw_target, dry_run=False):
                     elif current.is_symlink() or not current.is_dir():
                         raise ValueError(f"Ruta de destino insegura: {current}")
 
-                # Exclusivo: no sobrescribe archivos creados concurrentemente.
-                with dest.open("xb") as f:
+                # Exclusivo y sin seguir symlinks; registra inode antes de escribir
+                # para que incluso un write parcial pueda revertirse.
+                flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+                fd = os.open(dest, flags, 0o644)
+                info = os.fstat(fd)
+                created.append((dest, info.st_dev, info.st_ino, data))
+                with os.fdopen(fd, "wb") as f:
                     f.write(data)
-                created.append((dest, sha(data)))
+                    f.flush()
+                    os.fsync(f.fileno())
 
             record = {
                 "schema_version": 1,
@@ -341,11 +367,15 @@ def install(raw_target, dry_run=False):
         except Exception:
             if manifest_created and manifest.exists():
                 manifest.unlink()
-            for path, expected_hash in reversed(created):
+            for path, device, inode, expected_data in reversed(created):
                 try:
-                    if path.is_file() and not path.is_symlink():
-                        if sha(path.read_bytes()) == expected_hash:
-                            path.unlink()
+                    info = path.lstat()
+                    if path.is_symlink() or (info.st_dev, info.st_ino) != (device, inode):
+                        continue
+                    current_data = path.read_bytes()
+                    # Delete only a complete or partial prefix written by this transaction.
+                    if expected_data.startswith(current_data):
+                        path.unlink()
                 except OSError:
                     pass
             for directory in reversed(created_dirs):
@@ -392,6 +422,7 @@ def status(raw_target):
         changed = 0
         for item in record.get("files", []):
             rel = safe_relative(item["path"])
+            check_ancestors(target, rel)
             path = target.joinpath(*rel.parts)
 
             if path.is_symlink():
@@ -450,12 +481,21 @@ def uninstall(raw_target):
 
         if retained:
             # No perdemos el registro de archivos que se preservaron.
-            temp = manifest.with_suffix(".tmp")
-            temp.write_text(
-                json.dumps({**record, "files": retained}, indent=2) + "\n",
-                encoding="utf-8",
-            )
-            os.replace(temp, manifest)
+            fd, temp_name = tempfile.mkstemp(prefix=f".{manifest.name}.", suffix=".tmp", dir=manifest.parent)
+            temp = Path(temp_name)
+            try:
+                os.fchmod(fd, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump({**record, "files": retained}, f, indent=2, ensure_ascii=False)
+                    f.write("\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(temp, manifest)
+            finally:
+                try:
+                    temp.unlink()
+                except FileNotFoundError:
+                    pass
             print(f"\nQuedaron {len(retained)} archivos modificados.")
             print(f"Registro conservado: {manifest}")
             return 2
@@ -474,9 +514,10 @@ def uninstall(raw_target):
 
 
 def doctor(raw_target):
-    """Comprueba que la fábrica funciona en el proyecto consumidor."""
+    """Comprueba el registro efectivo de agentes en OpenCode V2."""
+    import shutil
     import subprocess
-    import time
+    import sys
 
     try:
         target = resolve_target(raw_target)
@@ -490,178 +531,49 @@ def doctor(raw_target):
         print("Instala la fábrica en el proyecto antes de ejecutar 'doctor'.")
         return 1
 
-    # El modelo esperado lo declara el propio opencode.json del destino:
-    # permite instalaciones con otro modelo (p. ej. glm-5.3-flash) sin romper
-    # la verificación, siempre que agentes y configuración coincidan entre sí.
-    # Si el fichero no se puede leer, se mantiene EXPECTED_MODEL por defecto.
-    expected_provider, expected_name = EXPECTED_MODEL
-    try:
-        with config_path.open(encoding="utf-8") as fh:
-            local_model = (json.load(fh) or {}).get("model") or ""
-        if isinstance(local_model, str) and "/" in local_model:
-            expected_provider, expected_name = local_model.split("/", 1)
-    except (OSError, json.JSONDecodeError):
-        pass
-
-    findings = 0
-
-    def check(ok, message):
-        nonlocal findings
-        if ok:
-            print(f"PASS: {message}")
-        else:
-            findings += 1
-            print(f"ERROR: {message}")
-
-    def run_debug(subcommand):
-        try:
-            proc = subprocess.run(
-                ["opencode", "debug", subcommand],
-                cwd=str(target),
-                capture_output=True,
-                text=True,
-                timeout=180,
-            )
-        except FileNotFoundError:
-            print("ERROR: no existe el comando 'opencode' en este entorno.")
-            return None
-        except subprocess.TimeoutExpired:
-            print(f"ERROR: 'opencode debug {subcommand}' superó los 180 s.")
-            return None
-        if proc.returncode != 0:
-            if proc.stderr:
-                print(proc.stderr, end="")
-            print(
-                f"ERROR: 'opencode debug {subcommand}' terminó con el "
-                f"código {proc.returncode}."
-            )
-            return None
-        return proc.stdout
-
-    agents_stdout = run_debug("agents")
-    if agents_stdout is None:
-        return 1
-    try:
-        agents = json.loads(agents_stdout)
-    except json.JSONDecodeError as exc:
-        print(f"ERROR: 'opencode debug agents' no devolvió JSON: {exc}")
-        return 1
-
-    # En un directorio recién instalado el servicio de OpenCode tarda en
-    # cargar la configuración de esa ubicación: la primera invocación puede
-    # devolver [] o solo los agentes globales (sin los del proyecto y sin
-    # modelo). Se reintenta con espera hasta que aparezcan todos los agentes
-    # esperados, porque informar hallazgos con una carga a medias sería un
-    # falso negativo.
-    max_agent_attempts = 5
-    expected_ids = set(EXPECTED_AGENTS)
-    for attempt in range(1, max_agent_attempts + 1):
-        found_ids = {
-            item.get("id")
-            for item in agents
-            if isinstance(item, dict)
-        } if isinstance(agents, list) else set()
-        if expected_ids <= found_ids:
-            break
-        if attempt == max_agent_attempts:
-            print(
-                "NOTA: 'opencode debug agents' no muestra todos los agentes "
-                f"del proyecto tras {max_agent_attempts} intentos; se "
-                "informan los hallazgos con la respuesta disponible."
-            )
-            break
+    binary = (
+        os.environ.get("OPENCODE_BIN")
+        or shutil.which("opencode")
+        or str(Path.home() / ".opencode" / "bin" / "opencode")
+    )
+    if not Path(binary).is_file() or not os.access(binary, os.X_OK):
         print(
-            "NOTA: 'opencode debug agents' aún no muestra los agentes del "
-            f"proyecto (intento {attempt}/{max_agent_attempts}); se "
-            "reintenta en 2 s."
+            "ERROR: no se encontró un ejecutable OpenCode. "
+            "Define OPENCODE_BIN o instala ~/.opencode/bin/opencode."
         )
-        time.sleep(2)
-        agents_stdout = run_debug("agents")
-        if agents_stdout is None:
-            return 1
-        try:
-            agents = json.loads(agents_stdout)
-        except json.JSONDecodeError as exc:
-            print(f"ERROR: 'opencode debug agents' no devolvió JSON: {exc}")
-            return 1
-
-    by_id = {}
-    if isinstance(agents, list):
-        by_id = {
-            item.get("id"): item
-            for item in agents
-            if isinstance(item, dict)
-        }
-
-    for agent_id in sorted(EXPECTED_AGENTS):
-        expected_mode = EXPECTED_AGENT_MODES[agent_id]
-        agent = by_id.get(agent_id)
-        check(agent is not None, f"agente '{agent_id}' reconocido")
-        if agent is None:
-            continue
-        mode = agent.get("mode")
-        check(
-            mode == expected_mode,
-            f"agente '{agent_id}' en modo {expected_mode} "
-            f"(obtenido: {mode})",
-        )
-        model = agent.get("model") or {}
-        provider = model.get("providerID")
-        # El CLI usa model.id dentro del objeto model de cada agente.
-        name = model.get("model", model.get("id"))
-        check(
-            provider == expected_provider,
-            f"agente '{agent_id}' con proveedor {expected_provider} "
-            f"(obtenido: {provider})",
-        )
-        check(
-            name == expected_name,
-            f"agente '{agent_id}' con modelo {expected_name} "
-            f"(obtenido: {name})",
-        )
-
-    config_stdout = run_debug("config")
-    if config_stdout is None:
         return 1
+
+    verifier = ROOT / "scripts" / "verify-opencode-agents.py"
     try:
-        documents = json.loads(config_stdout)
-    except json.JSONDecodeError as exc:
-        print(f"ERROR: 'opencode debug config' no devolvió JSON: {exc}")
+        proc = subprocess.run(
+            [
+                sys.executable,
+                str(verifier),
+                "--project",
+                str(target),
+                "--binary",
+                binary,
+            ],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+    except subprocess.TimeoutExpired:
+        print("ERROR: la verificación aislada de agentes superó los 60 segundos.")
         return 1
 
-    document = None
-    if isinstance(documents, list):
-        for entry in documents:
-            if (
-                isinstance(entry, dict)
-                and entry.get("path") == str(config_path)
-            ):
-                document = entry
-                break
-    check(
-        document is not None,
-        f"OpenCode carga {config_path}",
-    )
-    info = (document or {}).get("info") or {}
-    default_agent = info.get("default_agent")
-    check(
-        default_agent == "build",
-        f"default_agent == 'build' en {config_path} "
-        f"(obtenido: {default_agent})",
-    )
-    model_info = info.get("model") or {}
-    model_name = model_info.get("model")
-    check(
-        model_name == expected_name,
-        f"modelo {expected_name} en {config_path} "
-        f"(obtenido: {model_name})",
-    )
-
-    if findings:
-        print(f"\nDoctor: {findings} hallazgo(s).")
+    if proc.stdout:
+        print(proc.stdout, end="")
+    if proc.stderr:
+        print(proc.stderr, end="")
+    if proc.returncode != 0:
+        print(f"\nDoctor: la fábrica no está lista en este proyecto (código {proc.returncode}).")
         return 2
+
     print("\nDoctor: la fábrica funciona en este proyecto.")
     return 0
+
 
 
 def _mask_xml_comments(text):
@@ -885,20 +797,71 @@ def _xml_is_well_formed(text):
     return True
 
 
-def _backup_build_file(build_file):
-    """Copia el build a ~/.local/state/opencode-software-factory/quality/."""
+def _backup_build_file(build_file, data=None):
+    """Copia el build a un directorio de estado privado, con creación exclusiva."""
     import time
 
     backup_dir = state_root() / "quality"
-    backup_dir.mkdir(parents=True, exist_ok=True)
+    backup_dir.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if backup_dir.is_symlink() or not backup_dir.is_dir():
+        raise ValueError(f"Directorio de respaldos inseguro: {backup_dir}")
+    os.chmod(backup_dir, 0o700)
+    payload = build_file.read_bytes() if data is None else data
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    dest = backup_dir / f"{build_file.name}.{stamp}.bak"
-    counter = 1
-    while dest.exists():
-        counter += 1
-        dest = backup_dir / f"{build_file.name}.{stamp}-{counter}.bak"
-    dest.write_bytes(build_file.read_bytes())
+    counter = 0
+    while True:
+        suffix = f"-{counter}" if counter else ""
+        dest = backup_dir / f"{build_file.name}.{stamp}{suffix}.bak"
+        try:
+            fd = os.open(dest, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0), 0o600)
+            break
+        except FileExistsError:
+            counter += 1
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(payload)
+            f.flush()
+            os.fsync(f.fileno())
+    except Exception:
+        try:
+            dest.unlink()
+        except OSError:
+            pass
+        raise
     return dest
+
+
+def _atomic_replace_build_file(build_file, original_text, new_text):
+    """Reemplaza un build file sin seguir symlinks y solo si no cambió desde la lectura."""
+    if build_file.is_symlink():
+        raise ValueError(f"El archivo de build se convirtió en enlace simbólico: {build_file}")
+    original_info = build_file.stat(follow_symlinks=False)
+    if build_file.read_text(encoding="utf-8") != original_text:
+        raise ValueError(f"El archivo cambió durante la operación; no se sobrescribió: {build_file}")
+    fd, temp_name = tempfile.mkstemp(prefix=f".{build_file.name}.", suffix=".tmp", dir=build_file.parent)
+    temp = Path(temp_name)
+    try:
+        os.fchmod(fd, original_info.st_mode & 0o777)
+        with os.fdopen(fd, "w", encoding="utf-8", newline="") as f:
+            f.write(new_text)
+            f.flush()
+            os.fsync(f.fileno())
+        current_info = build_file.stat(follow_symlinks=False)
+        if build_file.is_symlink() or (current_info.st_dev, current_info.st_ino) != (original_info.st_dev, original_info.st_ino):
+            raise ValueError(f"El archivo fue reemplazado durante la operación; no se sobrescribió: {build_file}")
+        if build_file.read_text(encoding="utf-8") != original_text:
+            raise ValueError(f"El archivo cambió durante la operación; no se sobrescribió: {build_file}")
+        os.replace(temp, build_file)
+        directory_fd = os.open(build_file.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        try:
+            temp.unlink()
+        except FileNotFoundError:
+            pass
 
 
 def _quality_command(kind, build_file, goal):
@@ -917,6 +880,9 @@ def _detect_quality_build(target):
         target / "build.gradle",
         target / "build.gradle.kts",
     )
+    linked = [path for path in candidates if path.is_symlink()]
+    if linked:
+        return "unsafe-symlink", linked[0]
     found = [path for path in candidates if path.is_file()]
     if not found:
         return "none", None
@@ -943,6 +909,9 @@ def quality(raw_target, apply_changes=False):
         return 1
 
     kind, build_file = _detect_quality_build(target)
+    if kind == "unsafe-symlink":
+        print(f"ERROR: no se modifica un archivo de build que sea enlace simbólico: {build_file}")
+        return 2
     if kind == "none":
         print(f"ERROR: no hay pom.xml, build.gradle ni build.gradle.kts en {target}")
         print("'quality' solo funciona sobre un proyecto Maven o Gradle.")
@@ -1101,8 +1070,13 @@ def quality(raw_target, apply_changes=False):
         )
         return 2
 
-    backup = _backup_build_file(build_file)
-    build_file.write_text(new_text, encoding="utf-8")
+    try:
+        original_bytes = raw.encode("utf-8")
+        backup = _backup_build_file(build_file, original_bytes)
+        _atomic_replace_build_file(build_file, raw, new_text)
+    except Exception as exc:
+        print(f"\nERROR: no se pudo aplicar el cambio de forma segura: {exc}. El build no se sobrescribió.")
+        return 2
     print(f"\nRespaldo del build: {backup}")
     print(f"Plugins inyectados: {', '.join(actionable)}")
     if present:
@@ -1137,6 +1111,7 @@ def self_test():
 
             assert install(project) == 0
             assert (project / ".opencode/agents/build.md").is_file()
+            assert (project / ".opencode/mcp/factory-filesystem.mjs").is_file()
             assert (project / "opencode.json").read_bytes() == factory_config
             assert (project / "README.md").read_text() == "README del usuario\n"
             # AGENTS.md ausente → se crea con la plantilla de la fábrica.
@@ -1152,6 +1127,7 @@ def self_test():
             installed.unlink()
             assert uninstall(project) == 0
             assert not (project / ".opencode/agents/architect.md").exists()
+            assert not (project / ".opencode/mcp/factory-filesystem.mjs").exists()
             # AGENTS.md lo creó la fábrica y nadie lo modificó: se retira.
             assert not (project / "AGENTS.md").exists()
             print(
@@ -1586,6 +1562,17 @@ def self_test():
             q_none.mkdir()
             assert quality(q_none) == 1
             print("PASS: quality sin build de proyecto → código 1")
+
+            # A build file symlink must never cause quality to edit outside the project.
+            quality_symlink = base / "quality-symlink"
+            quality_symlink.mkdir()
+            external_pom = base / "external-pom.xml"
+            external_content = "<project><modelVersion>4.0.0</modelVersion></project>\n"
+            external_pom.write_text(external_content, encoding="utf-8")
+            os.symlink(external_pom, quality_symlink / "pom.xml")
+            assert quality(quality_symlink, apply_changes=True) == 2
+            assert external_pom.read_text(encoding="utf-8") == external_content
+            print("PASS: quality rechaza pom.xml simbólico y conserva intacto el destino externo")
 
         finally:
             if old_state is None:

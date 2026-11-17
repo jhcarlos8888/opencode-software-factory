@@ -1,3 +1,5 @@
+> **Registro de arquitectura inicial — noviembre de 2026.** Describe decisiones de diseño anteriores a la implementación completa. No es el estado ejecutable actual. Consulta control-center/README.md y docs/GUIA-USUARIO-CONTROL-CENTER.md para el comportamiento vigente.
+
 # Auditoría inicial — 2026-11-12
 
 ## Alcance y seguridad

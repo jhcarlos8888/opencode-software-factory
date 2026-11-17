@@ -105,7 +105,7 @@ interface ExecutionSummary {
   };
   approvals?: {
     recordedDecisions: number; recordedApprovalEvents: number;
-    pending: number; approved: number; rejected: number;
+    pending: number; responding: number; approved: number; rejected: number;
     answered: number; orphaned: number; automaticApprovals: number;
   };
   participants: { total: number; succeeded: number; skipped: string[]; failed: string[] };
@@ -146,7 +146,7 @@ interface ExecutionData {
     handoffOutput: HandoffOutputMetadata | null;
   }>;
   events: Array<{ id: number; createdAt: string; area: string; kind: string; message: string; agentRunId: string | null }>;
-  decisions: Array<{ id: string; agentRunId: string; engine: EngineId; engineSessionId: string | null; engineRequestId: string | null; kind: "permission" | "question"; title: string; description: string; details: unknown; status: string; createdAt: string }>;
+  decisions: Array<{ id: string; agentRunId: string; engine: EngineId; engineSessionId: string | null; engineRequestId: string | null; kind: "permission" | "question"; title: string; description: string; details: unknown; status: "pending" | "responding"; createdAt: string }>;
   decisionHistory: Array<{
     id: string; agentRunId: string; engine: EngineId; engineSessionId: string | null;
     engineRequestId: string | null; kind: "permission" | "question"; title: string;
@@ -193,11 +193,13 @@ function canApproveDuringRun(decision: ExecutionData["decisions"][number]): bool
   const details = decision.details as Record<string, unknown>;
   if (decision.engine === "claude") return typeof details.approvalKey === "string" && details.approvalKey.length > 0;
   const action = details.action ?? details.permission;
-  const proposed = Array.isArray(details.save) && details.save.length > 0
-    ? details.save
-    : Array.isArray(details.resources) ? details.resources
-      : Array.isArray(details.patterns) ? details.patterns : [];
-  return typeof action === "string" && action.length > 0 && proposed.some((item) => typeof item === "string" && item.length > 0);
+  // Use the same concrete resources as the backend. Provider save suggestions are advisory.
+  const resources = Array.isArray(details.resources) ? details.resources : [];
+  if (typeof action !== "string" || !action.trim()) return false;
+  return resources.some((item) =>
+    typeof item === "string" && item.trim().length > 0 &&
+    (action === "shell" || !/[*?]/.test(item))
+  );
 }
 
 const permissionNames: Record<PermissionProfile, string> = {
@@ -234,10 +236,12 @@ export default function App() {
   const [notice, setNotice] = useState("");
   const [error, setError] = useState("");
   const [apiReady, setApiReady] = useState(false);
+  const [runtimeBuildWarning, setRuntimeBuildWarning] = useState("");
   const [claudeProvider, setClaudeProvider] = useState<ClaudeProviderId>("apmix");
   const [claudeProviderStatus, setClaudeProviderStatus] = useState<ClaudeProviderStatus | null>(null);
   const [providerSaving, setProviderSaving] = useState(false);
   const [teamSaved, setTeamSaved] = useState(false);
+  const [preflightConsumed, setPreflightConsumed] = useState(false);
   const [execution, setExecution] = useState<ExecutionData | null>(null);
   const [workThread, setWorkThread] = useState<WorkThreadSnapshot | null>(null);
   const [handoffOutputContents, setHandoffOutputContents] = useState<Record<string, HandoffOutputRecord>>({});
@@ -257,6 +261,30 @@ export default function App() {
 
   useEffect(() => {
     void loadInitialData();
+  }, []);
+
+  useEffect(() => {
+    const checkRuntimeBuild = () => {
+      void api<{
+        build?: { runtimeMatchesDisk: boolean | null; runtimeBuildId: string | null; artifactBuildId: string | null; verification: string };
+      }>("/api/health")
+        .then((health) => {
+          const build = health.build;
+          if (!build) {
+            setRuntimeBuildWarning("Esta instancia no informa la versión cargada en memoria. Reinicia el Control Center con npm run deploy para verificar el runtime.");
+          } else if (build.runtimeMatchesDisk === false) {
+            setRuntimeBuildWarning(
+              `El Control Center está ejecutando un build diferente al artefacto en disco (runtime: ${build.runtimeBuildId ?? "desconocido"}; disco: ${build.artifactBuildId ?? "desconocido"}). Ejecuta npm run deploy.`
+            );
+          } else {
+            setRuntimeBuildWarning("");
+          }
+        })
+        .catch(() => setRuntimeBuildWarning("No se pudo verificar la versión activa del Control Center."));
+    };
+    checkRuntimeBuild();
+    const timer = window.setInterval(checkRuntimeBuild, 30000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -307,7 +335,7 @@ export default function App() {
       // Synchronize the current local APMix model before loading saved assignments
       // so model changes in ~/.claude/settings.json are reflected automatically.
       await api<{ synchronized: boolean }>("/api/providers/claude/synchronize-model", { method: "POST" });
-      const [engineResponse, mcpResponse, assetResponse, assignmentResponse, openCodeModels, claudeModels, providerResponse, favoriteResponse, projectPreferences, latestExecution] = await Promise.all([
+      const [engineResponse, mcpResponse, assetResponse, assignmentResponse, openCodeModels, claudeModels, providerResponse, favoriteResponse, projectPreferences, latestExecution, preflightResponse] = await Promise.all([
         api<{ engines: EngineStatus[] }>("/api/engines"),
         api<{ configFound: boolean; servers: McpServerInfo[] }>("/api/mcps"),
         api<{ agents: Agent[]; skills: string[] }>("/api/factory/assets"),
@@ -317,7 +345,8 @@ export default function App() {
         api<ClaudeProviderStatus>("/api/providers/claude"),
         api<{ favorites: FavoriteModel[] }>("/api/favorites"),
         api<{ path: string; instructions: string }>("/api/project-preferences"),
-        api<{ execution: ExecutionData | null }>("/api/executions/latest")
+        api<{ execution: ExecutionData | null }>("/api/executions/latest"),
+        api<{ preflight: { analysis: ProjectAnalysis; decision: "accepted" | "manual" | null; teamSaved: boolean; consumed: boolean } | null }>("/api/projects/preflight")
       ]);
 
       setEngines(engineResponse.engines);
@@ -333,7 +362,16 @@ export default function App() {
       setProjectInstructions(projectPreferences.instructions);
       setFavoriteModelId(openCodeModels.models[0]?.id ?? "");
       setAssignments(Object.fromEntries(assignmentResponse.assignments.map((item) => [item.agentId, item])));
-      setTeamSaved(assignmentResponse.saved);
+      const preflight = preflightResponse.preflight;
+      setAnalysis(preflight?.analysis ?? null);
+      setRecommendationStatus(preflight?.decision ?? (preflight?.analysis.recommendationReady ? "pending" : null));
+      setPendingAssignments(
+        preflight && !preflight.decision && preflight.analysis.recommendationReady
+          ? preflight.analysis.suggestedAssignments
+          : null
+      );
+      setTeamSaved(preflight ? preflight.teamSaved : assignmentResponse.saved);
+      setPreflightConsumed(preflight?.consumed ?? false);
       setExecution(latestExecution.execution);
       if (latestExecution.execution?.run.threadId) {
         const workflowResponse = await api<{ workflow: WorkThreadSnapshot }>(
@@ -458,22 +496,40 @@ export default function App() {
     }
   }
 
-  function acceptRecommendation() {
+  async function acceptRecommendation() {
     if (!pendingAssignments) return;
-    setAssignments(Object.fromEntries(pendingAssignments.map((item) => [item.agentId, item])));
-    setTeamSaved(false);
-    setPendingAssignments(null);
-    setRecommendationStatus("accepted");
-    setNotice("Propuesta aplicada a las tarjetas de agentes. Pulsa «Guardar equipo» para conservarla.");
-    recordActivity("ROUTER", "Propuesta de motores y modelos aceptada por el usuario.", "success");
+    setError("");
+    try {
+      await api<{ saved: boolean; decision: "accepted" }>("/api/projects/preflight/decision", {
+        method: "POST",
+        body: JSON.stringify({ path: projectPath, instructions: projectInstructions, decision: "accepted" })
+      });
+      setAssignments(Object.fromEntries(pendingAssignments.map((item) => [item.agentId, item])));
+      setTeamSaved(false);
+      setPendingAssignments(null);
+      setRecommendationStatus("accepted");
+      setNotice("Propuesta aceptada y registrada. Pulsa «Guardar equipo» para conservar las asignaciones.");
+      recordActivity("ROUTER", "Propuesta de motores y modelos aceptada por el usuario.", "success");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
-  function chooseManualConfiguration() {
-    setTeamSaved(false);
-    setPendingAssignments(null);
-    setRecommendationStatus("manual");
-    setNotice("Propuesta descartada. Puedes configurar cada agente manualmente en Equipo de agentes.");
-    recordActivity("ROUTER", "El usuario eligió configurar manualmente el equipo.", "info");
+  async function chooseManualConfiguration() {
+    setError("");
+    try {
+      await api<{ saved: boolean; decision: "manual" }>("/api/projects/preflight/decision", {
+        method: "POST",
+        body: JSON.stringify({ path: projectPath, instructions: projectInstructions, decision: "manual" })
+      });
+      setTeamSaved(false);
+      setPendingAssignments(null);
+      setRecommendationStatus("manual");
+      setNotice("Configuración manual registrada. Conserva o ajusta los siete agentes y pulsa «Guardar equipo».");
+      recordActivity("ROUTER", "El usuario eligió configurar manualmente el equipo.", "info");
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
   }
 
   async function selectProjectDirectory() {
@@ -490,6 +546,8 @@ export default function App() {
         setAnalysis(null);
         setPendingAssignments(null);
         setRecommendationStatus(null);
+        setTeamSaved(false);
+        setPreflightConsumed(false);
         setNotice("Carpeta seleccionada. Revisa la ruta y pulsa «Analizar proyecto» cuando estés listo.");
       }
     } catch (cause) {
@@ -530,6 +588,7 @@ export default function App() {
       setExecution(result.execution);
       setWorkThread(result.workflow);
       setContinuationText("");
+      setPreflightConsumed(true);
       setNotice(`Proceso ${result.threadId.slice(0, 8)} iniciado. El historial y las siguientes rondas quedarán agrupados en este proceso.`);
       recordActivity("ORCHESTRATOR", `Ejecución real iniciada: ${result.runId}.`, "success");
     } catch (cause) {
@@ -623,6 +682,8 @@ export default function App() {
     setAnalysis(null);
     setPendingAssignments(null);
     setRecommendationStatus(null);
+    setTeamSaved(false);
+    setPreflightConsumed(false);
     recordActivity("PRECHECK", "Preconsulta iniciada; exploración estructural en modo de solo lectura.");
     try {
       const result = await api<ProjectAnalysis>("/api/projects/analyze", {
@@ -630,6 +691,8 @@ export default function App() {
         body: JSON.stringify({ path: projectPath, instructions: projectInstructions })
       });
       setAnalysis(result);
+      // Keep the visible selection aligned with the backend's canonical real path.
+      setProjectPath(result.path);
       if (result.recommendationReady) {
         setPendingAssignments(result.suggestedAssignments);
         setRecommendationStatus("pending");
@@ -656,7 +719,7 @@ export default function App() {
   const canStartExecution = Boolean(
     apiReady && analysis && ["accepted", "manual"].includes(recommendationStatus ?? "") &&
     teamSaved && projectPath.trim() && projectInstructions.trim() && configuredCount > 0 &&
-    !activeExecution && !executionStarting
+    !activeExecution && !executionStarting && !preflightConsumed
   );
   const statusLabels: Record<string, string> = {
     queued: "En cola", running: "Trabajando", waiting: "Esperando tu decisión",
@@ -697,7 +760,10 @@ export default function App() {
                       <span className="terminal-kicker">{item.engine === "claude" ? "CLAUDE CODE" : "OPENCODE"} · {item.kind === "permission" ? "AUTORIZACIÓN" : "ACLARACIÓN"}</span>
                       <h3>{item.title}</h3>
                     </div>
-                    <span className="pending-tag">{roleNames[execution.agents.find((runAgent) => runAgent.id === item.agentRunId)?.agentId ?? ""] ?? "Agente"}</span>
+                    <span className="pending-tag">
+                      {roleNames[execution.agents.find((runAgent) => runAgent.id === item.agentRunId)?.agentId ?? ""] ?? "Agente"}
+                      {item.status === "responding" ? " · ENVIANDO RESPUESTA" : ""}
+                    </span>
                   </div>
                   <p>{item.description}</p>
                   <details className="decision-details">
@@ -707,13 +773,13 @@ export default function App() {
                   {item.kind === "permission" ? (
                     <>
                     <div className="decision-actions">
-                      <button className="primary-button" type="button" disabled={decisionBusyId === item.id} onClick={() => void respondToDecision(item.id, "allow")}>
+                      <button className="primary-button" type="button" disabled={decisionBusyId === item.id || item.status === "responding"} onClick={() => void respondToDecision(item.id, "allow")}>
                         {decisionBusyId === item.id ? "Enviando..." : "Aprobar una vez"}
                       </button>
                       <button
                         className="secondary-button"
                         type="button"
-                        disabled={decisionBusyId === item.id || !canApproveDuringRun(item)}
+                        disabled={decisionBusyId === item.id || item.status === "responding" || !canApproveDuringRun(item)}
                         title={canApproveDuringRun(item)
                           ? "Recordar únicamente los recursos o argumentos propuestos por el motor durante esta ejecución"
                           : "El motor no proporcionó un patrón o una operación exacta que pueda recordarse de forma segura"}
@@ -721,7 +787,7 @@ export default function App() {
                       >
                         Aprobar durante esta ejecución
                       </button>
-                      <button className="secondary-button" type="button" disabled={decisionBusyId === item.id} onClick={() => void respondToDecision(item.id, "deny")}>Rechazar</button>
+                      <button className="secondary-button" type="button" disabled={decisionBusyId === item.id || item.status === "responding"} onClick={() => void respondToDecision(item.id, "deny")}>Rechazar</button>
                     </div>
                     <span className="decision-scope-note">
                       {item.engine === "opencode"
@@ -731,8 +797,8 @@ export default function App() {
                     </>
                   ) : (
                     <div className="decision-answer">
-                      <textarea value={decisionAnswers[item.id] ?? ""} onChange={(event) => setDecisionAnswers((current) => ({ ...current, [item.id]: event.target.value }))} rows={3} placeholder="Escribe la aclaración para el agente. Para formularios de varios campos de OpenCode, envía un objeto JSON con las claves del formulario." />
-                      <button className="primary-button" type="button" disabled={decisionBusyId === item.id || !(decisionAnswers[item.id] ?? "").trim()} onClick={() => void respondToDecision(item.id, "answer")}>
+                      <textarea disabled={item.status === "responding"} value={decisionAnswers[item.id] ?? ""} onChange={(event) => setDecisionAnswers((current) => ({ ...current, [item.id]: event.target.value }))} rows={3} placeholder="Escribe la aclaración para el agente. Para formularios de varios campos de OpenCode, envía un objeto JSON con las claves del formulario." />
+                      <button className="primary-button" type="button" disabled={decisionBusyId === item.id || item.status === "responding" || !(decisionAnswers[item.id] ?? "").trim()} onClick={() => void respondToDecision(item.id, "answer")}>
                         {decisionBusyId === item.id ? "Enviando..." : "Enviar respuesta"}
                       </button>
                     </div>
@@ -829,9 +895,10 @@ export default function App() {
               <h1>Centro de operaciones</h1>
               <p className="page-lead">Configura OpenCode y Claude Code dentro de una sola fábrica. Define el motor, modelo y permisos de cada especialista.</p>
             </div>
-            <div className="version-tag"><span className="pulse-dot" /> PROTOTIPO LOCAL</div>
+            <div className="version-tag"><span className="pulse-dot" /> CONTROL CENTER LOCAL</div>
           </section>
 
+          {runtimeBuildWarning && <div className="notice error-notice"><strong>Integridad del runtime</strong><span>{runtimeBuildWarning}</span></div>}
           {error && <div className="notice error-notice"><strong>Atención</strong><span>{error}</span></div>}
           {notice && <div className="notice success-notice"><strong>Listo</strong><span>{notice}</span></div>}
 
@@ -991,6 +1058,8 @@ export default function App() {
                     setAnalysis(null);
                     setPendingAssignments(null);
                     setRecommendationStatus(null);
+                    setTeamSaved(false);
+                    setPreflightConsumed(false);
                   }}
                   placeholder="/home/usuario/proyectos/mi-aplicacion"
                   required
@@ -1019,6 +1088,8 @@ export default function App() {
                   setAnalysis(null);
                   setPendingAssignments(null);
                   setRecommendationStatus(null);
+                  setTeamSaved(false);
+                  setPreflightConsumed(false);
                 }}
                 rows={5}
                 maxLength={12000}
@@ -1260,7 +1331,7 @@ export default function App() {
                     <span>{executionStarting ? "Preparando..." : "COMENZAR INSTRUCCIONES"}</span>
                   </button>
                 )}
-                <small>{canStartExecution ? "Listo para iniciar una ejecución real." : activeExecution ? "La ejecución está en curso." : "Completa los pasos pendientes para habilitar el inicio."}</small>
+                <small>{canStartExecution ? "Listo para iniciar una ejecución real." : activeExecution ? "La ejecución está en curso." : preflightConsumed ? "La preconsulta ya se utilizó. Ejecuta una nueva preconsulta para iniciar otra ejecución." : "Completa los pasos pendientes para habilitar el inicio."}</small>
               </div>
             </div>
 

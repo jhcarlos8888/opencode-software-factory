@@ -72,13 +72,16 @@ instalando la fábrica sobre un proyecto consumidor de ese stack, y el
 
 | Requisito | Versión en esta máquina | Comprobación |
 | --- | --- | --- |
-| Python 3 | 3.14.4 | `python3 --version` |
-| CLI de OpenCode v2 | v2.0.31 | `opencode --version` |
-| git | 2.53.0 | `git --version` |
-| Plan OpenCode Go | conectado con `/connect` → **OpenCode Go** | comprobación interactiva en la CLI |
-| JDK (para la batería Java) | `java -version` → OpenJDK 17.0.20 (Temurin 17.0.20+8); hay además instalados `21.0.12+1.1-tem` y `25.0.4-tem` | `java -version` |
-| Maven / Gradle | 3.9.16 / 8.14.5 | `mvn -version`, `gradle --version` |
-| Docker | **no instalado** | `docker --version` → 127 (command not found) |
+| Python 3 | 3.14.4 | python3 --version |
+| Node.js / npm | 24.21.0 / 11.19.0 | node --version, npm --version |
+| OpenCode CLI | v2.1.4 (binario en ~/.opencode/bin/opencode) | ~/.opencode/bin/opencode --version |
+| Claude Code CLI | instalado en ~/.local/bin/claude | claude --version |
+| git | 2.53.0 | git --version |
+| JDK | Temurin 17.0.20 activo; también instalados 21.0.12 y 25.0.4 mediante SDKMAN | $JAVA_HOME/bin/java -version, $JAVA_HOME/bin/javac -version |
+| Maven / Gradle | 3.9.16 / 8.14.5 mediante SDKMAN | mvn -version, gradle --version con JAVA_HOME y PATH SDKMAN |
+| Docker / Podman | Docker 29.9.3 (daemon accesible) / Podman 5.7.0 | docker info, podman info |
+| TypeScript / ESLint | tsc 7.0.2 / ESLint 10.12.0 | tsc -v, eslint -v |
+| Python quality | pytest 9.0.2 / ruff 0.17.0 | python3 -m pytest --version, ruff --version |
 
 - El instalador usa solo la librería estándar de Python: no hay
   dependencias que instalar con `pip`, y **la fábrica no instala ninguna
@@ -90,9 +93,13 @@ instalando la fábrica sobre un proyecto consumidor de ese stack, y el
 - Sin plan de modelo conectado la instalación funciona, pero los agentes no
   podrán responder: conecta con `/connect` → **OpenCode Go** antes de
   delegar.
-- Docker ausente implica que Testcontainers y cualquier prueba que necesite
-  contenedores no puede ejecutarse en esta máquina (se marca como no
-  ejecutable, nunca como pasada).
+- Docker y Podman están instalados. La mera presencia de sus CLIs no implica
+  que un proyecto disponga de imágenes, servicios o fixtures necesarios para
+  Testcontainers; esa disponibilidad se valida en cada prueba.
+- Java, Maven y Gradle están instalados mediante SDKMAN. El servicio
+  factory-control-center.service recibe un drop-in con JAVA_HOME y las
+  rutas de SDKMAN; en terminales interactivas nuevas puede ser necesario
+  exportar JAVA_HOME y anteponer los directorios SDKMAN al PATH.
 
 ### Comandos del instalador
 
@@ -209,13 +216,13 @@ un respaldo externo al repositorio).
 
 | Agente | Modo | Función |
 | --- | --- | --- |
-| `build` | `primary` | Coordinador por defecto (`default_agent: build`): recibe la tarea, detecta el proyecto, delega y entrega resultados verificados |
+| `build` | `primary` | Coordinador por defecto (`default_agent: build`): planifica y delega; no escribe ni ejecuta shell y solo puede lanzar los seis especialistas autorizados |
 | `architect` | `all` | Planificación en solo lectura con evidencia verificable: inspecciona instrucciones, manifiestos, código y pruebas, y distingue hechos verificados, inferencias y datos desconocidos |
 | `implementer` | `all` | Implementación con cambios pequeños, tests añadidos y verificación ejecutada |
 | `reviewer` | `all` | Revisión independiente del diff (`git status` + `git diff HEAD`), sin modificar nada |
 | `tester` | `all` | Ejecución real de build, tests y análisis estático, con evidencia: comando exacto, código de salida y pruebas no ejecutadas |
 | `cloud-arbiter` | `subagent` | Árbitro para discrepancias difíciles o fallos persistentes; no usar de forma rutinaria |
-| `reverse` | `primary` | Ingeniería inversa sobre binarios y artefactos ya compilados, con el MCP `rea` y las herramientas `rea_*` |
+| `reverse` | `all` | Ingeniería inversa estática de flujos y dependencias; puede operar como principal o subagente, siempre en solo lectura |
 
 Los siete fijan `opencode-go/mimo-v2.6-flash` en su frontmatter; `doctor`
 lo comprueba agente por agente.
@@ -405,7 +412,7 @@ Los informes solo existen tras ejecutar la herramienta correspondiente:
 | --- | --- |
 | Maven 3.9.16, Gradle 8.14.5, JDK 17 (además 21 y 25) | instalados |
 | Plugins de calidad (checkstyle, PMD, SpotBugs, JaCoCo, OWASP) | la fábrica **no** los instala: el build los declara y Maven/Gradle los descargan a `~/.m2` o `~/.gradle` en la primera ejecución |
-| Docker | no instalado → sin Testcontainers |
+| Docker 29.9.3 / Podman 5.7.0 | instalados; validar disponibilidad de los servicios/contenedores requeridos por cada proyecto |
 | `semgrep`, `bandit`, `sonar-scanner`, `codeql`, `truffleHog`, `detect-secrets` | no instalados (`command -v <herramienta>` no los encuentra) |
 
 Si el proyecto no declara una herramienta, el resultado es
@@ -644,23 +651,31 @@ duda.
   Node/TypeScript y `make`; otros stacks quedan en `ask`.
 
 
-## Centro de operaciones multi-motor (en desarrollo)
+## Centro de operaciones multi-motor
 
-La fábrica conserva sus agentes, comandos y Skills actuales. La evolución multi-motor se documenta en [docs/multi-engine](docs/multi-engine/00-auditoria-inicial.md).
+El [Control Center](control-center/README.md) ya coordina OpenCode y Claude Code, con configuración independiente por agente, preconsulta del proyecto, decisiones humanas, ejecución por olas, handoffs verificables, revisión cruzada, arbitraje final y persistencia SQLite.
 
-Se está construyendo una interfaz local para asignar OpenCode o Claude Code y un modelo independiente a cada agente. El primer prototipo está en [control-center](control-center/README.md).
+Para desarrollar:
 
-Para iniciar el panel en desarrollo:
-
-```bash
+~~~bash
 cd control-center
 npm install
 npm run dev
-```
+~~~
 
-Abrir http://127.0.0.1:5173. La API queda en 127.0.0.1:4141. La versión inicial detecta motores y catálogos, configura asignaciones por agente y analiza proyectos en modo de solo lectura; todavía no ejecuta tareas ni permite modificaciones automáticas.
+Abrir http://127.0.0.1:5173. La API escucha exclusivamente en 127.0.0.1:4141.
+
+Antes de desplegar cambios:
+
+~~~bash
+cd control-center
+npm run verify
+npm run deploy
+~~~
+
+verify ejecuta las pruebas automatizadas, typecheck, verificación del instalador y registro real de los siete agentes. deploy no solo compila: reinicia el servicio systemd y comprueba que el fingerprint cargado en memoria coincide con el artefacto del disco. Consulta el README del Control Center y docs/SECURITY-BASELINE.md para los detalles de permisos, dependencias, recuperación, decisiones y operación.
 
 
 ## Uso del Centro de Control
 
-Consulta [la guía de usuario](docs/GUIA-USUARIO-CONTROL-CENTER.md) para iniciar la interfaz, configurar los agentes, analizar proyectos y conocer los límites de la versión 0.1.0.
+Consulta [la guía de operación vigente](docs/GUIA-USUARIO-CONTROL-CENTER.md) para iniciar la interfaz, completar la preconsulta, configurar los agentes, atender decisiones y continuar procesos de trabajo. La hoja de ruta registra las capacidades implementadas y las validaciones end-to-end pendientes.

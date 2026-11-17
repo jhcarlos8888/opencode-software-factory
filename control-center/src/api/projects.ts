@@ -1,8 +1,8 @@
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { basename, resolve } from "node:path";
+import { basename, isAbsolute, relative, resolve, sep } from "node:path";
+import { readdir, realpath, stat } from "node:fs/promises";
 import { planTask, type TaskPlan } from "./task-planner.js";
-import { readdir, readFile, stat } from "node:fs/promises";
 
 const execFileAsync = promisify(execFile);
 
@@ -21,6 +21,7 @@ const manifests = [
 
 export interface ProjectAnalysis {
   name: string;
+  /** Canonical real path; symlink aliases are never used as the execution root. */
   path: string;
   stacks: string[];
   manifests: string[];
@@ -33,22 +34,44 @@ export interface ProjectAnalysis {
   taskPlan: TaskPlan;
 }
 
+function isWithinDirectory(directory: string, candidate: string): boolean {
+  const rel = relative(directory, candidate);
+  return rel === "" || (rel !== ".." && !rel.startsWith(".." + sep) && !isAbsolute(rel));
+}
+
+async function safeDirectoryEntries(projectRoot: string, name: string): Promise<string[]> {
+  const candidate = resolve(projectRoot, name);
+  const canonical = await realpath(candidate).catch(() => null);
+  if (!canonical || !isWithinDirectory(projectRoot, canonical)) return [];
+  const info = await stat(canonical).catch(() => null);
+  if (!info?.isDirectory()) return [];
+  const entries = await readdir(canonical, { withFileTypes: true }).catch(() => []);
+  return entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
+}
+
 export async function analyzeProject(rawPath: string, objective = ""): Promise<ProjectAnalysis> {
-  if (!rawPath || !resolve(rawPath)) {
-    throw new Error("Indica una ruta de proyecto válida.");
+  if (
+    typeof rawPath !== "string" ||
+    !rawPath ||
+    rawPath.length > 4096 ||
+    rawPath.trim() !== rawPath ||
+    !isAbsolute(rawPath)
+  ) {
+    throw new Error("La ruta del proyecto debe ser absoluta, válida y no contener espacios al inicio o final.");
   }
 
-  const projectPath = resolve(rawPath);
-  if (!projectPath.startsWith("/") || rawPath.trim() !== rawPath) {
-    throw new Error("La ruta del proyecto debe ser absoluta y no contener espacios al inicio o final.");
-  }
+  // Canonicalize once before inspecting anything. A symlink may be selected as
+  // the project root, but subsequent execution and permission checks use its
+  // real target, never the alias.
+  const projectPath = await realpath(rawPath).catch(() => null);
+  if (!projectPath) throw new Error("La ruta del proyecto no existe o no es accesible.");
+  const info = await stat(projectPath).catch(() => null);
+  if (!info?.isDirectory()) throw new Error("La ruta indicada no es un directorio.");
 
-  const info = await stat(projectPath);
-  if (!info.isDirectory()) {
-    throw new Error("La ruta indicada no es un directorio.");
-  }
+  const rootEntries = await readdir(projectPath, { withFileTypes: true });
+  const regularFiles = new Set(rootEntries.filter((entry) => entry.isFile()).map((entry) => entry.name));
+  const directories = new Set(rootEntries.filter((entry) => entry.isDirectory()).map((entry) => entry.name));
 
-  const entries = new Set(await readdir(projectPath));
   const ignored = new Set([".git", "node_modules", "build", "dist", ".gradle", ".idea", "target", ".next", "vendor", ".venv"]);
   let fileCount = 0;
   const countFiles = async (dir: string, depth: number): Promise<void> => {
@@ -57,37 +80,43 @@ export async function analyzeProject(rawPath: string, objective = ""): Promise<P
     try { children = await readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const child of children) {
       if (fileCount >= 5000) break;
+      // Dirent.isDirectory/isFile are false for symlinks: never follow project
+      // links while counting the tree.
       if (child.isDirectory()) {
         if (!ignored.has(child.name)) await countFiles(resolve(dir, child.name), depth + 1);
-      } else if (child.isFile()) fileCount++;
+      } else if (child.isFile()) {
+        fileCount++;
+      }
     }
   };
   await countFiles(projectPath, 0);
-  const presentManifests = manifests.filter((name) => entries.has(name));
+
+  // Only regular files directly inside the canonical project root are treated
+  // as manifests or agent instruction documents. Symlinks are ignored.
+  const presentManifests = manifests.filter((name) => regularFiles.has(name));
   const instructions = ["AGENTS.md", "CLAUDE.md", "README.md"]
-    .filter((name) => entries.has(name));
+    .filter((name) => regularFiles.has(name));
 
   const stacks: string[] = [];
-  if (entries.has("pom.xml")) stacks.push("Java / Maven");
-  if (entries.has("build.gradle") || entries.has("build.gradle.kts")) stacks.push("Java / Gradle");
-  if (entries.has("package.json")) stacks.push("Node.js / JavaScript / TypeScript");
-  let pythonSources = [...entries].some((name) => name.endsWith(".py"));
+  if (presentManifests.includes("pom.xml")) stacks.push("Java / Maven");
+  if (presentManifests.includes("build.gradle") || presentManifests.includes("build.gradle.kts")) stacks.push("Java / Gradle");
+  if (presentManifests.includes("package.json")) stacks.push("Node.js / JavaScript / TypeScript");
+
+  let pythonSources = [...regularFiles].some((name) => name.endsWith(".py"));
   for (const directory of ["scripts", "src"]) {
-    if (!pythonSources && entries.has(directory)) {
-      try {
-        pythonSources = (await readdir(resolve(projectPath, directory))).some((name) => name.endsWith(".py"));
-      } catch {
-        // La detección continúa con los manifiestos que sí pudieron consultarse.
-      }
+    if (!pythonSources && directories.has(directory)) {
+      const childFiles = await safeDirectoryEntries(projectPath, directory);
+      pythonSources = childFiles.some((name) => name.endsWith(".py"));
     }
   }
-  if (entries.has("pyproject.toml") || entries.has("requirements.txt") || entries.has("Pipfile") || entries.has("setup.py") || pythonSources) {
+  if (presentManifests.includes("pyproject.toml") || presentManifests.includes("requirements.txt") ||
+      regularFiles.has("Pipfile") || regularFiles.has("setup.py") || pythonSources) {
     stacks.push("Python");
   }
-  if (entries.has("Cargo.toml")) stacks.push("Rust");
-  if (entries.has("go.mod")) stacks.push("Go");
-  if ([...entries].some((name) => name.endsWith(".sln") || name.endsWith(".csproj"))) stacks.push(".NET");
-  if (stacks.length === 0 && entries.has("src")) stacks.push("Proyecto con directorio src (stack por confirmar)");
+  if (presentManifests.includes("Cargo.toml")) stacks.push("Rust");
+  if (presentManifests.includes("go.mod")) stacks.push("Go");
+  if ([...regularFiles].some((name) => name.endsWith(".sln") || name.endsWith(".csproj"))) stacks.push(".NET");
+  if (stacks.length === 0 && directories.has("src")) stacks.push("Proyecto con directorio src (stack por confirmar)");
   if (stacks.length === 0) stacks.push("Stack no identificado");
 
   let gitStatus: string[] = [];
@@ -109,15 +138,8 @@ export async function analyzeProject(rawPath: string, objective = ""): Promise<P
     "Revisor: recibir el diff y criterios de aceptación en modo de solo lectura.",
     "QA: ejecutar los comandos reales del proyecto y adjuntar código de salida y evidencia."
   ];
-
-  // Se lee únicamente documentación no sensible y limitada; nunca .env ni credenciales.
-  const readmePath = instructions.includes("README.md")
-    ? resolve(projectPath, "README.md")
-    : null;
-  let readmePreview = "";
-  if (readmePath) {
-    const text = await readFile(readmePath, "utf8");
-    readmePreview = text.split(/\r?\n/).slice(0, 80).join("\n").slice(0, 12000);
+  if (instructions.includes("README.md")) {
+    recommendations.push("README.md disponible como documentación dentro del proyecto para la fase de descubrimiento.");
   }
 
   const complexityReasons: string[] = [];
@@ -141,9 +163,7 @@ export async function analyzeProject(rawPath: string, objective = ""): Promise<P
     manifests: presentManifests,
     instructions,
     git: { isRepository, status: gitStatus },
-    recommendations: readmePreview
-      ? [...recommendations, "README.md leído parcialmente (primeras 80 líneas) para contexto."]
-      : recommendations,
+    recommendations,
     mode: "read-only",
     objective: objective.trim(),
     complexity: { level: complexityLevel, score: complexityScore, reasons: complexityReasons, fileCount },

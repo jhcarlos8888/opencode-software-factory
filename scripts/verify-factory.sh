@@ -3,6 +3,25 @@ set -Eeuo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
+# systemd and non-interactive shells may not load the user's PATH additions.
+# Prefer an explicit override, then PATH, then OpenCode's documented local bin.
+if [[ -z "${OPENCODE_BIN:-}" ]]; then
+    if command -v opencode >/dev/null 2>&1; then
+        OPENCODE_BIN="$(command -v opencode)"
+    elif [[ -x "$HOME/.opencode/bin/opencode" ]]; then
+        OPENCODE_BIN="$HOME/.opencode/bin/opencode"
+    else
+        echo "ERROR: no se encontró OpenCode. Instálalo o define OPENCODE_BIN con la ruta al ejecutable."
+        exit 1
+    fi
+fi
+if [[ ! -x "$OPENCODE_BIN" ]]; then
+    echo "ERROR: OPENCODE_BIN no es ejecutable: $OPENCODE_BIN"
+    exit 1
+fi
+
+echo "OpenCode: $OPENCODE_BIN"
+
 echo "== 1. Validar configuración JSON =="
 jq -e '
   .default_agent == "build"
@@ -54,8 +73,13 @@ newline_targets=()
 while IFS= read -r -d '' target_file; do
     newline_targets+=("$target_file")
 done < <(
-    printf '%s\0' opencode.json .gitignore templates/AGENTS.md \
-        templates/quality/README.md \
+    printf '%s\0' README.md AGENTS.md opencode.json .gitignore \
+        control-center/README.md docs/GUIA-USUARIO-CONTROL-CENTER.md \
+        docs/SECURITY-BASELINE.md docs/multi-engine/00-auditoria-inicial.md \
+        docs/multi-engine/01-arquitectura-multimotor.md \
+        docs/multi-engine/02-hoja-de-ruta.md \
+        docs/multi-engine/03-pruebas-iniciales-y-bloqueos.md \
+        templates/AGENTS.md templates/quality/README.md \
         templates/quality/maven-quality-plugins.xml \
         templates/quality/gradle-quality.gradle
     find .opencode/agents .opencode/commands .opencode/skills .agents/skills \
@@ -244,54 +268,31 @@ print("PASS: instantánea de agentes disponible")
 PYTHON
 
 echo
-echo "== 3. Verificar configuración efectiva de OpenCode =="
-config_tmp="$(mktemp)"
-agents_tmp="$(mktemp)"
-errors_tmp="$(mktemp)"
-trap 'rm -f "$config_tmp" "$agents_tmp" "$errors_tmp"' EXIT
+echo "== 3. Validar configuración efectiva esperada =="
+python3 - <<'PYTHON'
+import json
+from pathlib import Path
 
-if ! opencode debug config >"$config_tmp" 2>"$errors_tmp"; then
-    cat "$errors_tmp"
-    exit 1
-fi
-
-jq -e --arg cfg "$PWD/opencode.json" '
-  any(.[];
-    .type == "document"
-    and .path == $cfg
-    and .info.default_agent == "build"
-    and .info.model.providerID == "opencode-go"
-    and .info.model.model == "mimo-v2.6-flash"
-  )
-' "$config_tmp" >/dev/null
-echo "PASS: OpenCode carga la configuración del repositorio"
+config = json.loads(Path("opencode.json").read_text(encoding="utf-8"))
+assert config.get("default_agent") == "build", "default_agent debe ser build"
+assert config.get("model") == "opencode-go/mimo-v2.6-flash", "modelo predeterminado inesperado"
+compaction = config.get("compaction") or {}
+assert compaction.get("auto") is True, "compaction.auto debe ser true"
+assert (compaction.get("keep") or {}).get("tokens") == 15000, "compaction.keep.tokens debe ser 15000"
+print("PASS: default agent, modelo y compactación de la fábrica")
+PYTHON
 
 echo
-echo "== 4. Verificar agentes efectivos =="
-if ! opencode debug agents >"$agents_tmp" 2>"$errors_tmp"; then
-    cat "$errors_tmp"
-    exit 1
-fi
+echo "== 3b. Probar límites anti-symlink y contratos de permisos de los agentes =="
+python3 scripts/verify-opencode-agents.test.py
 
-jq -e '
-  def has_agent($id; $mode):
-    any(.[]; .id == $id and .mode == $mode);
-
-  has_agent("build"; "primary")
-  and has_agent("architect"; "all")
-  and has_agent("implementer"; "all")
-  and has_agent("reviewer"; "all")
-  and has_agent("tester"; "all")
-  and has_agent("cloud-arbiter"; "subagent")
-  and has_agent("reverse"; "primary")
-' "$agents_tmp" >/dev/null
-
-echo "PASS: coordinador, reverse y cinco agentes especializados reconocidos"
+echo "== 4. Verificar el registro real de los agentes OpenCode =="
+python3 scripts/verify-opencode-agents.py --project "$PWD" --binary "$OPENCODE_BIN"
 
 echo
 echo "== 5. Ejecutar self-test del instalador =="
 selftest_out="$(mktemp)"
-trap 'rm -f "$config_tmp" "$agents_tmp" "$errors_tmp" "$selftest_out"' EXIT
+trap 'rm -f "$selftest_out"' EXIT
 if ! python3 scripts/factory.py self-test >"$selftest_out" 2>&1; then
     echo "ERROR: 'python3 scripts/factory.py self-test' devolvió un código distinto de 0"
     tail -20 "$selftest_out"

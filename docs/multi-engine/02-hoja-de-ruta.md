@@ -1,84 +1,123 @@
 # Hoja de ruta — Factory Control Center
 
+Estado actualizado: 17 de noviembre de 2026.
+
+La documentación inicial de diseño y los registros de bloqueos se conservan como historial. El estado operativo vigente está descrito en control-center/README.md y docs/GUIA-USUARIO-CONTROL-CENTER.md.
+
 ## Principios de ejecución
 
 - Incrementos pequeños, ejecutables y reversibles.
 - No alterar la instalación CLI existente ni la configuración global del usuario.
-- No mover ni renombrar los siete agentes, las Skills o los comandos existentes sin pruebas de equivalencia.
-- Conservar el diff local preexistente de `scripts/factory.py`.
+- No mover ni renombrar los siete agentes, Skills o comandos sin pruebas de equivalencia.
+- No modificar proyectos consumidores durante el mantenimiento de la fábrica.
 - Cada fase incluye pruebas y evidencia; ningún resultado se declara por intuición.
+- Una aprobación temporal nunca se convierte en autorización global.
 
 ## Fase 0 — Auditoría y decisiones
 
+**COMPLETADA**
+
 - [x] Auditar estructura, agentes, Skills, configuración MCP e instalador.
-- [x] Comprobar estado Git y registrar cambio local preexistente.
-- [x] Ejecutar las verificaciones estructurales actuales.
+- [x] Comprobar estado Git y preservar el trabajo local preexistente.
+- [x] Ejecutar verificaciones estructurales.
 - [x] Documentar arquitectura, límites y opciones tecnológicas.
-- [ ] Validar la arquitectura con un primer prototipo de los dos adaptadores.
 
 ## Fase 1 — Núcleo y catálogo
 
-- Definir contratos TypeScript para Engine, Model, AgentRole, Project, Task, Run, Message, Approval y Event.
-- Implementar registro de motores y comprobación de disponibilidad.
-- Descubrir modelos OpenCode desde su catálogo real y normalizarlos.
-- Crear allowlist inicial de modelos Claude y validar cuáles acepta la sesión autenticada.
-- Leer agentes y Skills de la fábrica; generar informe de compatibilidad por motor.
-- No iniciar todavía trabajos que escriban archivos.
+**IMPLEMENTADA**
+
+- [x] Contratos TypeScript para motores, modelos, agentes, ejecuciones, mensajes, decisiones y eventos.
+- [x] Detección de OpenCode y Claude Code.
+- [x] Descubrimiento y validación de modelos favoritos por motor/proveedor.
+- [x] Lectura de los siete agentes, Skills, comandos y activos de la fábrica.
+- [x] Validación que impide asignar modelos que no estén en los favoritos/catálogos correspondientes.
+- [x] Persistencia local SQLite de preferencias, asignaciones, hilos, rondas, eventos y decisiones.
 
 ## Fase 2 — Adaptadores y ejecución controlada
 
-- Adaptador OpenCode: iniciar/parar servidor local, sesiones, selección de agente/modelo, prompt y eventos.
-- Adaptador Claude Code: sesiones del Agent SDK, subagentes dinámicos y modelo por subagente.
-- Propagar cancelación, timeouts, errores, uso y costes disponibles.
-- Añadir perfiles de permisos y pedir confirmación para acciones sensibles.
-- Prueba de ida y vuelta: ambos motores analizan y responden a una misma tarea en solo lectura.
+**IMPLEMENTADA CON VALIDACIÓN OPERATIVA PENDIENTE**
+
+- [x] Adaptador OpenCode con servidor local aislado, catálogo de agentes, sesiones, eventos y cancelación.
+- [x] Adaptador Claude Code basado en Claude Agent SDK.
+- [x] Modelo y motor independientes por agente.
+- [x] Perfiles de permisos y solicitudes de aprobación humana.
+- [x] Comprobación de que OpenCode haya registrado los siete agentes con sus modos esperados antes de crear sesiones.
+- [x] MCP de archivos local, de solo lectura, limitado al proyecto.
+- [x] Timeouts, cancelación y registro de errores.
+- [x] Pruebas automatizadas para los límites principales.
+- [ ] Repetir prueba operativa bidireccional Claude ↔ OpenCode después del endurecimiento de permisos.
 
 ## Fase 3 — Orquestador y colaboración
 
-- Planner que inspecciona proyecto y propone equipo/roles/modelos.
-- Panel de propuesta editable antes de ejecutar.
-- Mensajería estructurada entre agentes y memoria por tarea.
-- Debate con límite de rondas y condición de consenso/escalamiento.
-- Detección de contradicciones y cierre con recomendación fundamentada.
-- Auditoría de mensajes, herramientas, decisiones y aprobaciones.
+**IMPLEMENTADA CON VALIDACIÓN BIDIRECCIONAL PARCIAL**
+
+- [x] Planner que inspecciona el proyecto y clasifica complejidad/profundidad.
+- [x] Preconsulta obligatoria del proyecto.
+- [x] Propuesta de equipo/modelos basada exclusivamente en favoritos.
+- [x] Decisión entre aceptar la recomendación y configuración manual.
+- [x] Guardado obligatorio del equipo antes de iniciar.
+- [x] Hilos de trabajo persistentes, mensajes, rondas y contexto de continuidad.
+- [x] Handoffs estructurados, IDs, hashes, longitudes, recepción y evidencia de utilización.
+- [x] Revisión cruzada y Cloud Arbiter como fase de consolidación.
+- [x] Ledger de decisiones/aprobaciones y eventos completo.
+- [x] Reserva atómica de decisiones para impedir doble respuesta.
+- [x] Aislamiento de autorizaciones temporales por ejecución de agente y recurso concreto.
+- [ ] Acreditar ambas direcciones de handoff en una sola prueba end-to-end posterior a las correcciones recientes.
+- [ ] Incorporar controles explícitos para el presupuesto total de rondas, tokens/coste y tiempo, si los proveedores exponen esos datos.
+
+### Evidencia de la Ronda 4 — 17 de noviembre de 2026
+
+La ronda real de sandbox terminó con los siete agentes en estado succeeded, 18 handoffs y solapamiento temporal entre motores. Los siete informes llegaron y pasaron la comprobación de integridad. Sin embargo, el veredicto fue observations: el Árbitro no acreditó Claude → OpenCode, aunque sí OpenCode → Claude. También detectó dos autorizaciones con patrones más amplios de lo solicitado (edit: * y rm * ) y desviaciones fuera del sandbox para herramientas temporales/JDK.
+
+Estas evidencias motivaron el endurecimiento posterior: recursos concretos para autorizaciones temporales, aislamiento por agentRunId, reserva atómica de decisiones, reconciliación de estados del motor y pruebas de regresión. No se debe presentar la Ronda 4 como prueba bidireccional aprobada: sus propios datos dicen lo contrario.
 
 ## Fase 4 — Interfaz de usuario
 
-- Dashboard local con proyectos, estado de motores y actividad.
-- Selector de motor y modelo independiente para cada agente/rol.
-- Modo manual y modo recomendar equipo automáticamente.
-- Vista de conversaciones/debate, timeline, costes, errores y permisos.
-- Bandeja de aprobaciones y diff antes de integrar cambios.
+**IMPLEMENTADA**
 
-## Fase 5 — Escritura, aislamiento y calidad
+- [x] Dashboard local con motores, proyecto, configuración y estado de ejecución.
+- [x] Selector independiente de motor/modelo/perfil por agente.
+- [x] Configuración manual y recomendación automática.
+- [x] Consola de actividad y estado de especialistas.
+- [x] Centro de decisiones humanas.
+- [x] Resumen de ejecución y continuidad de trabajo.
+- [x] Advertencia de build cuando el runtime no coincide con el artefacto en disco.
+- [ ] Mejorar visualización de diffs previos a integración cuando exista un flujo de worktrees.
 
-- Crear Git Worktrees por rama de trabajo/agente escritor.
-- Prohibir escrituras simultáneas en el mismo worktree.
-- Ejecutar build/tests con evidencia, integrar solo después de autorización.
-- Revisión cruzada usando el motor/modelo independiente cuando sea conveniente.
-- Probar recuperación ante caída de motor, timeout, cancelación y conflicto Git.
+## Fase 5 — Aislamiento de cambios y calidad
 
-## Primer entregable funcional
+**PARCIAL**
 
-Un panel local donde se registre un proyecto, se compruebe OpenCode y Claude Code, se visualicen catálogos separados, se asigne un modelo distinto a cada agente y ambos realicen un análisis independiente de solo lectura. No se escribirá en el proyecto consumidor en este primer entregable.
+- [x] Perfiles de permisos aplicados por motor.
+- [x] Bloqueo de rutas sensibles, traversal y symlinks.
+- [x] MCP de lectura con límites de tamaño/profundidad y apertura sin seguir symlinks.
+- [x] Autorización de escritura/shell bajo los perfiles correspondientes.
+- [x] Cancelación de sesiones y exclusión de ejecuciones simultáneas.
+- [x] Verificación automatizada integral y despliegue con fingerprint.
+- [x] Instalador reversible con manifiesto y protección frente a conflictos.
+- [x] Pruebas del instalador, del verificador de agentes y de las herramientas MCP.
+- [ ] Git Worktrees por ejecución/agente para aislar cambios y poder comparar diffs antes de integrar.
+- [ ] Asegurar integración de cambios únicamente después de revisión y autorización.
+- [ ] Pruebas de recuperación ante caída real de proceso/proveedor y reinicio durante una decisión pendiente.
+- [ ] Prueba completa con los dos motores que acredite ambas direcciones de handoff después de los cambios recientes.
 
+## Nueva línea base de calidad y despliegue
 
-## Estado real tras el primer prototipo (0.1.0)
+- [x] 90 pruebas automatizadas en la suite del Control Center (77 de API y 13 auxiliares).
+- [x] 11 pruebas Python para límites anti-symlink, contratos de permisos y precedencia efectiva de reglas por agente.
+- [x] Typecheck API y frontend.
+- [x] Self-test del instalador.
+- [x] Verificación del registro real de los siete agentes OpenCode sin llamadas a modelos.
+- [x] Verificación estática de los permisos de los siete agentes: Build solo delega en especialistas nombrados; los perfiles de análisis bloquean edición/shell; Tester no edita; Implementer bloquea comandos peligrosos.
+- [x] Auditoría npm obligatoria: producción debe tener cero vulnerabilidades; solo se permite la excepción temporal identificada para picomatch en desarrollo.
+- [x] Build fingerprint SHA-256 de código/configuración/activos operativos.
+- [x] Despliegue de un solo comando que verifica, compila, reinicia systemd y confirma el fingerprint activo.
+- [x] Advertencia de runtime desfasado en el endpoint de salud y en la interfaz.
 
-- [x] Aplicación local `control-center` con API Fastify y UI React/Vite.
-- [x] Detección de los CLI y versiones instaladas.
-- [x] Catálogo dinámico de OpenCode y catálogo de alias Claude separado.
-- [x] Asignación individual de motor, modelo y perfil de permisos por agente.
-- [x] Persistencia local SQLite fuera del repositorio.
-- [x] Preanálisis estructural de proyecto en modo de solo lectura.
-- [x] Validación para impedir que se guarde un ID de modelo de un motor en el otro.
-- [ ] Sesiones reales de ambos motores y verificación de autenticación/modelos.
-- [ ] Intercambio autónomo de mensajes, debate y decisiones.
-- [ ] Git Worktrees y ejecución de cambios.
+## Próxima prioridad
 
-El preanálisis 0.1.0 detecta manifiestos, stack probable, archivos de contexto y estado Git; no equivale todavía a un análisis semántico con un modelo. La fase siguiente debe conectar los adaptadores reales y ejecutar primero tareas de solo lectura.
-
-
-## Entrega del planificador (primera iteración)
-
-La clasificación determinista, los límites por agente y el caso de regresión están documentados en [06-planificador-inteligente.md](06-planificador-inteligente.md). La selección de agentes recomendados se refleja en enabled; la propuesta sigue requiriendo aceptación y guardado explícitos.
+1. Desplegar el último endurecimiento y comprobar el endpoint real de salud, los permisos SQLite y la protección de origen desde HTTP.
+2. Ejecutar una nueva ronda controlada de dos motores en sandbox y exigir evidencia Claude → OpenCode y OpenCode → Claude.
+3. Verificar que todas las aprobaciones temporales se serializan con recurso exacto y que un agente no hereda permisos de otro.
+4. Diseñar e implementar el aislamiento por worktree para proyectos que ya tengan Git, sin inicializar Git en carpetas que no lo tengan.
+5. Añadir escenarios de recuperación real para caída/cancelación/reinicio y decisiones ambiguas del proveedor.

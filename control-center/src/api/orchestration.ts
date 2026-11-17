@@ -82,6 +82,7 @@ export interface ApprovalAuditSummary {
   recordedDecisions: number;
   recordedApprovalEvents: number;
   pending: number;
+  responding: number;
   approved: number;
   rejected: number;
   answered: number;
@@ -157,6 +158,7 @@ export function buildApprovalAuditSummary(
     recordedDecisions: decisions.length,
     recordedApprovalEvents,
     pending: decisions.filter((decision) => decision.status === "pending").length,
+    responding: decisions.filter((decision) => decision.status === "responding").length,
     approved: decisions.filter((decision) => decision.status === "approved").length,
     rejected: decisions.filter((decision) => decision.status === "rejected").length,
     answered: decisions.filter((decision) => decision.status === "answered").length,
@@ -179,6 +181,7 @@ export function formatApprovalAuditContext(
       " | rechazadas: " + counts.rejected +
       " | aclaraciones respondidas: " + counts.answered +
       " | pendientes: " + counts.pending +
+      " | respuestas en curso: " + counts.responding +
       " | huérfanas: " + counts.orphaned +
       " | autorizaciones temporales aplicadas automáticamente: " + counts.automaticApprovals
   ];
@@ -190,27 +193,28 @@ export function formatApprovalAuditContext(
   }
 
   for (const decision of decisions) {
-    lines.push([
-      "DECISIÓN " + decision.id,
-      "agente=" + decision.agentId,
-      "motor=" + decision.engine,
-      "tipo=" + decision.kind,
-      "estado=" + decision.status,
-      "creada=" + decision.createdAt,
-      "resuelta=" + (decision.resolvedAt ?? "pendiente"),
-      "título=" + decision.title.slice(0, 300),
-      "alcance/solicitud=" + decision.description.slice(0, 600),
-      "respuesta registrada=" + (decision.response ?? "sin respuesta").slice(0, 500)
-    ].join(" | "));
+    lines.push("DECISIÓN_JSON " + JSON.stringify({
+      id: decision.id,
+      agentId: decision.agentId,
+      engine: decision.engine,
+      kind: decision.kind,
+      status: decision.status,
+      createdAt: decision.createdAt,
+      resolvedAt: decision.resolvedAt,
+      title: decision.title.slice(0, 300),
+      description: decision.description.slice(0, 600),
+      response: (decision.response ?? "sin respuesta").slice(0, 500)
+    }));
   }
   for (const event of approvalEvents) {
-    lines.push([
-      isAutomaticApprovalEvent(event) ? "AUTORIZACIÓN TEMPORAL AUTOMÁTICA" : "EVENTO DE REVISIÓN / APROBACIÓN",
-      "área=" + event.area,
-      "agenteRun=" + (event.agentRunId ?? "no disponible"),
-      "fecha=" + event.createdAt,
-      event.message.slice(0, 600)
-    ].join(" | "));
+    lines.push((isAutomaticApprovalEvent(event)
+      ? "AUTORIZACIÓN_TEMPORAL_AUTOMÁTICA_JSON "
+      : "EVENTO_REVISIÓN_APROBACIÓN_JSON ") + JSON.stringify({
+        area: event.area,
+        agentRunId: event.agentRunId,
+        createdAt: event.createdAt,
+        message: event.message.slice(0, 600)
+      }));
   }
   lines.push("Fuente de verdad: decisionHistory y eventos persistidos de la ejecución actual; no mezclar con otras rondas.");
   lines.push("Contrasta el resumen con cada DECISIÓN y AUTORIZACIÓN TEMPORAL AUTOMÁTICA enumerada. No afirmes que no hubo aprobaciones si estos registros contienen decisiones aprobadas.");
@@ -631,7 +635,7 @@ export function buildExecutionSummary(input: {
   const nextSteps = extractNextSteps(nextStepsSection);
   const failedPipeline = failed.length > 0;
   const collaborationIncomplete = collaborationExpected && (!collaborationVerified || !concurrentCrossEngineVerified);
-  const approvalAuditIncomplete = approvals.pending > 0 || approvals.orphaned > 0;
+  const approvalAuditIncomplete = approvals.pending > 0 || approvals.responding > 0 || approvals.orphaned > 0;
   const verdict: ExecutionSummary["verdict"] =
     failedPipeline || mandatoryUnavailable ? "failed" :
       skipped.length > 0 || collaborationIncomplete || integrity.status === "observations" || approvalAuditIncomplete ? "observations" : "completed";

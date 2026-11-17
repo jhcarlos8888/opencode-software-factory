@@ -1,3 +1,5 @@
+> **Registro histórico — 13 de noviembre de 2026.** Este documento conserva los resultados de las primeras pruebas del prototipo. Sus conclusiones sobre la ausencia de ejecución real, aprobaciones y permisos dejaron de describir el estado actual del Control Center. Consulta la guía operativa vigente, la hoja de ruta actualizada y la línea base de seguridad.
+
 
 # Pruebas de integración iniciales — 2026-11-13
 

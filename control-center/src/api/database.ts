@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
-import { mkdirSync } from "node:fs";
+import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { ExecutionSummary, HandoffDescriptor, HandoffOutputMetadata, HandoffOutputRecord } from "./orchestration.js";
 
@@ -23,9 +23,37 @@ const stateDir = process.env.FACTORY_STATE_DIR
   ? join(process.env.FACTORY_STATE_DIR, "control-center")
   : join(homedir(), ".local", "state", "opencode-software-factory", "control-center");
 
-mkdirSync(stateDir, { recursive: true });
+// Secure the factory-owned default state directory. FACTORY_STATE_DIR is an
+// externally managed base path and may be shared (for example /tmp); never
+// change its permissions, only the private control-center child directory.
+if (!process.env.FACTORY_STATE_DIR) {
+  const stateRoot = dirname(stateDir);
+  mkdirSync(stateRoot, { recursive: true, mode: 0o700 });
+  const stateRootInfo = lstatSync(stateRoot);
+  if (!stateRootInfo.isDirectory() || stateRootInfo.isSymbolicLink()) {
+    throw new Error("El directorio raíz del estado de Control Center debe ser real y privado, no un enlace simbólico.");
+  }
+  chmodSync(stateRoot, 0o700);
+}
+
+mkdirSync(stateDir, { recursive: true, mode: 0o700 });
+const stateDirInfo = lstatSync(stateDir);
+if (!stateDirInfo.isDirectory() || stateDirInfo.isSymbolicLink()) {
+  throw new Error("El directorio de estado de Control Center debe ser un directorio real, no un enlace simbólico.");
+}
+chmodSync(stateDir, 0o700);
+
 const databasePath = join(stateDir, "control-center.sqlite");
+try {
+  const databaseInfo = lstatSync(databasePath);
+  if (!databaseInfo.isFile() || databaseInfo.isSymbolicLink()) {
+    throw new Error("El archivo SQLite de Control Center debe ser un archivo regular, no un enlace simbólico.");
+  }
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+}
 const db = new DatabaseSync(databasePath);
+chmodSync(databasePath, 0o600);
 
 db.exec(`
   PRAGMA journal_mode = WAL;
@@ -50,6 +78,17 @@ db.exec(`
     id INTEGER PRIMARY KEY CHECK (id = 1),
     project_path TEXT NOT NULL DEFAULT '',
     instructions TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS project_preflight (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    project_path TEXT NOT NULL,
+    instructions_sha256 TEXT NOT NULL,
+    analysis_json TEXT NOT NULL,
+    decision TEXT CHECK (decision IN ('accepted', 'manual') OR decision IS NULL),
+    team_fingerprint TEXT,
+    consumed_at TEXT,
+    created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   );
   INSERT INTO project_preferences (id, project_path, instructions, updated_at)
@@ -139,6 +178,9 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_execution_events_run ON execution_events(run_id, id);
   CREATE INDEX IF NOT EXISTS idx_execution_decisions_pending ON execution_decisions(run_id, status);
 `);
+for (const sidecar of [databasePath + "-wal", databasePath + "-shm"]) {
+  try { chmodSync(sidecar, 0o600); } catch { /* SQLite may not have created this sidecar yet. */ }
+}
 
 // Additive migrations for structured orchestration metadata.
 function ensureColumn(table: string, column: string, definition: string): void {
@@ -261,6 +303,8 @@ export function saveAssignments(assignments: AgentAssignment[]): void {
         now
       );
     }
+    // Keep the exact team fingerprint in the same transaction as its assignments.
+    recordProjectPreflightTeamSave();
     db.exec("COMMIT");
   } catch (error) {
     db.exec("ROLLBACK");
@@ -393,10 +437,136 @@ export function saveProjectPreferences(path: string, instructions: string): void
   `).run(path, instructions, new Date().toISOString());
 }
 
+export type ProjectPreflightDecision = "accepted" | "manual";
+
+export interface ProjectPreflightSnapshot {
+  path: string;
+  analysis: Record<string, unknown>;
+  decision: ProjectPreflightDecision | null;
+  teamSaved: boolean;
+  consumed: boolean;
+  preconsultedAt: string;
+}
+
+function hashPreflightInstructions(instructions: string): string {
+  return createHash("sha256").update(instructions.trim(), "utf8").digest("hex");
+}
+
+function currentAssignmentsFingerprint(): string {
+  const assignments = db.prepare(
+    "SELECT agent_id AS agentId, engine, model_id AS modelId, permission_profile AS permissionProfile, enabled FROM agent_assignments ORDER BY agent_id"
+  ).all() as Array<{
+    agentId: string; engine: string; modelId: string; permissionProfile: string; enabled: number;
+  }>;
+  return createHash("sha256").update(JSON.stringify(assignments), "utf8").digest("hex");
+}
+
+/** Persist read-only discovery and invalidate any older decision/team approval. */
+export function recordProjectPreflight(path: string, instructions: string, analysis: Record<string, unknown>): void {
+  const now = new Date().toISOString();
+  db.prepare(`
+    INSERT INTO project_preflight
+      (id, project_path, instructions_sha256, analysis_json, decision, team_fingerprint, consumed_at, created_at, updated_at)
+    VALUES (1, ?, ?, ?, NULL, NULL, NULL, ?, ?)
+    ON CONFLICT(id) DO UPDATE SET
+      project_path = excluded.project_path,
+      instructions_sha256 = excluded.instructions_sha256,
+      analysis_json = excluded.analysis_json,
+      decision = NULL,
+      team_fingerprint = NULL,
+      consumed_at = NULL,
+      created_at = excluded.created_at,
+      updated_at = excluded.updated_at
+  `).run(path.trim(), hashPreflightInstructions(instructions), JSON.stringify(analysis), now, now);
+}
+
+/** Return only a preflight matching the exact project path and instruction text. */
+export function getProjectPreflight(path: string, instructions: string): ProjectPreflightSnapshot | null {
+  const row = db.prepare(`
+    SELECT project_path AS path, instructions_sha256 AS instructionsHash,
+           analysis_json AS analysisJson, decision, team_fingerprint AS teamFingerprint,
+           consumed_at AS consumedAt, created_at AS createdAt
+    FROM project_preflight WHERE id = 1
+  `).get() as {
+    path: string; instructionsHash: string; analysisJson: string; decision: ProjectPreflightDecision | null;
+    teamFingerprint: string | null; consumedAt: string | null; createdAt: string;
+  } | undefined;
+  if (!row || row.path !== path.trim() || row.instructionsHash !== hashPreflightInstructions(instructions)) return null;
+  return {
+    path: row.path,
+    analysis: JSON.parse(row.analysisJson) as Record<string, unknown>,
+    decision: row.decision,
+    teamSaved: Boolean(row.teamFingerprint && row.teamFingerprint === currentAssignmentsFingerprint()),
+    consumed: Boolean(row.consumedAt),
+    preconsultedAt: row.createdAt
+  };
+}
+
+/** Record the user's explicit accept/manual choice for the matching preconsultation. */
+export function decideProjectPreflight(
+  path: string,
+  instructions: string,
+  decision: ProjectPreflightDecision
+): boolean {
+  const result = db.prepare(`
+    UPDATE project_preflight
+    SET decision = ?, team_fingerprint = NULL, consumed_at = NULL, updated_at = ?
+    WHERE id = 1 AND project_path = ? AND instructions_sha256 = ?
+  `).run(decision, new Date().toISOString(), path.trim(), hashPreflightInstructions(instructions));
+  return Number(result.changes) === 1;
+}
+
+/** Bind a saved team to the current preflight only after an explicit decision. */
+export function recordProjectPreflightTeamSave(): void {
+  const row = db.prepare("SELECT decision FROM project_preflight WHERE id = 1").get() as { decision: string | null } | undefined;
+  if (!row?.decision) return;
+  db.prepare("UPDATE project_preflight SET team_fingerprint = ?, updated_at = ? WHERE id = 1")
+    .run(currentAssignmentsFingerprint(), new Date().toISOString());
+}
+
+/** Atomically consume the preflight so one approval cannot start multiple initial runs. */
+export function consumeProjectPreflight(path: string, instructions: string): { consumed: boolean; reason?: string } {
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    const row = db.prepare(`
+      SELECT project_path AS path, instructions_sha256 AS instructionsHash, decision,
+             team_fingerprint AS teamFingerprint, consumed_at AS consumedAt
+      FROM project_preflight WHERE id = 1
+    `).get() as {
+      path: string; instructionsHash: string; decision: ProjectPreflightDecision | null;
+      teamFingerprint: string | null; consumedAt: string | null;
+    } | undefined;
+    if (!row || row.path !== path.trim() || row.instructionsHash !== hashPreflightInstructions(instructions)) {
+      db.exec("ROLLBACK");
+      return { consumed: false, reason: "La ruta o las instrucciones cambiaron. Ejecuta nuevamente la preconsulta del proyecto." };
+    }
+    if (!row.decision) {
+      db.exec("ROLLBACK");
+      return { consumed: false, reason: "Completa la preconsulta y registra la aceptación de la propuesta o la configuración manual." };
+    }
+    if (row.consumedAt) {
+      db.exec("ROLLBACK");
+      return { consumed: false, reason: "Esta preconsulta ya fue utilizada. Ejecuta una nueva preconsulta para iniciar otra ejecución inicial." };
+    }
+    const fingerprint = currentAssignmentsFingerprint();
+    if (!row.teamFingerprint || row.teamFingerprint !== fingerprint) {
+      db.exec("ROLLBACK");
+      return { consumed: false, reason: "Guarda el equipo después de aceptar la propuesta o elegir la configuración manual." };
+    }
+    const now = new Date().toISOString();
+    db.prepare("UPDATE project_preflight SET consumed_at = ?, updated_at = ? WHERE id = 1").run(now, now);
+    db.exec("COMMIT");
+    return { consumed: true };
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
+}
+
 
 export type ExecutionStatus = "queued" | "running" | "waiting" | "succeeded" | "failed" | "cancelled" | "interrupted";
 export type ExecutionAgentStatus = ExecutionStatus | "skipped";
-export type ExecutionDecisionStatus = "pending" | "approved" | "rejected" | "answered" | "orphaned";
+export type ExecutionDecisionStatus = "pending" | "responding" | "approved" | "rejected" | "answered" | "orphaned";
 
 export interface ExecutionConfigurationSnapshot {
   capturedAt: string;
@@ -599,11 +769,34 @@ export function createExecutionDecision(decision: Omit<ExecutionDecisionRecord, 
     JSON.stringify(decision.details ?? {}), new Date().toISOString()
   );
 }
-export function resolveExecutionDecision(id: string, status: Exclude<ExecutionDecisionStatus, "pending">, response: string): void {
-  db.prepare(`
-    UPDATE execution_decisions SET status = ?, response = ?, resolved_at = ?
+/** Atomically reserve a pending decision so simultaneous UI submissions cannot answer it twice. */
+export function claimExecutionDecision(id: string): boolean {
+  const result = db.prepare(`
+    UPDATE execution_decisions SET status = 'responding'
     WHERE id = ? AND status = 'pending'
+  `).run(id);
+  return Number(result.changes) === 1;
+}
+
+/** Return a failed claim to the queue only when the engine did not consume the request. */
+export function releaseExecutionDecisionClaim(id: string): boolean {
+  const result = db.prepare(`
+    UPDATE execution_decisions SET status = 'pending'
+    WHERE id = ? AND status = 'responding'
+  `).run(id);
+  return Number(result.changes) === 1;
+}
+
+export function resolveExecutionDecision(
+  id: string,
+  status: Exclude<ExecutionDecisionStatus, "pending" | "responding">,
+  response: string
+): boolean {
+  const result = db.prepare(`
+    UPDATE execution_decisions SET status = ?, response = ?, resolved_at = ?
+    WHERE id = ? AND status IN ('pending', 'responding')
   `).run(status, response.slice(0, 12000), new Date().toISOString(), id);
+  return Number(result.changes) === 1;
 }
 export function getExecutionDecision(id: string): ExecutionDecisionRecord | null {
   const row = db.prepare(`
@@ -670,7 +863,7 @@ export function getExecutionSnapshot(runId: string): ExecutionSnapshot | null {
       message LIKE '%Autorización temporal reutilizada para la misma operación%' OR
       message LIKE '%Autorización temporal reutilizada durante esta ejecución por el mismo agente:%' OR
       message LIKE '%Autorización limitada a esta ejecución:%' OR
-      message LIKE '%Autorización limitada a la misma operación:%' OR
+      message LIKE '%Autorización limitada a la misma operación%' OR
       message LIKE '%Solicitud atendida:%' OR
       message LIKE '%Solicitud pendiente:%' OR
       message LIKE '%Solicitud rechazada%' OR
@@ -692,7 +885,7 @@ export function getExecutionSnapshot(runId: string): ExecutionSnapshot | null {
     run,
     agents: normalizedAgents,
     events,
-    decisions: decisionHistory.filter((item) => item.status === "pending"),
+    decisions: decisionHistory.filter((item) => item.status === "pending" || item.status === "responding"),
     decisionHistory
   };
 }
@@ -711,7 +904,7 @@ export function getExecutionApprovalEvents(runId: string): ExecutionEventRecord[
       message LIKE '%Autorización temporal reutilizada para la misma operación%' OR
       message LIKE '%Autorización temporal reutilizada durante esta ejecución por el mismo agente:%' OR
       message LIKE '%Autorización limitada a esta ejecución:%' OR
-      message LIKE '%Autorización limitada a la misma operación:%' OR
+      message LIKE '%Autorización limitada a la misma operación%' OR
       message LIKE '%Solicitud atendida:%' OR
       message LIKE '%Solicitud pendiente:%' OR
       message LIKE '%Solicitud rechazada%' OR
@@ -735,26 +928,75 @@ export function getLatestExecutionId(): string | null {
   return row?.id ?? null;
 }
 export function orphanExecutionDecisions(runId: string): void {
-  db.prepare("UPDATE execution_decisions SET status = 'orphaned', resolved_at = ? WHERE run_id = ? AND status = 'pending'")
+  db.prepare("UPDATE execution_decisions SET status = 'orphaned', resolved_at = ? WHERE run_id = ? AND status IN ('pending', 'responding')")
     .run(new Date().toISOString(), runId);
 }
 
 export function orphanExecutionDecisionsForAgent(runId: string, agentRunId: string): void {
-  db.prepare("UPDATE execution_decisions SET status = 'orphaned', resolved_at = ? WHERE run_id = ? AND agent_run_id = ? AND status = 'pending'")
+  db.prepare("UPDATE execution_decisions SET status = 'orphaned', resolved_at = ? WHERE run_id = ? AND agent_run_id = ? AND status IN ('pending', 'responding')")
     .run(new Date().toISOString(), runId, agentRunId);
 }
 
 export function markUnfinishedExecutionsInterrupted(): void {
   const now = new Date().toISOString();
-  db.prepare(`
-    UPDATE execution_runs SET status = 'interrupted', updated_at = ?, finished_at = ?
-    WHERE status IN ('queued', 'running', 'waiting')
-  `).run(now, now);
-  db.prepare(`
-    UPDATE execution_agents SET status = 'interrupted', error = COALESCE(error, 'El servicio se reinició; la sesión puede recuperarse desde el motor.')
-    WHERE status IN ('queued', 'running', 'waiting')
-  `).run();
-  db.prepare("UPDATE execution_decisions SET status = 'orphaned' WHERE status = 'pending'").run();
+  db.exec("BEGIN IMMEDIATE");
+  try {
+    // Persist the interruption in the parent workflow before changing the run
+    // status, and only for the latest unfinished round in each thread.
+    db.prepare(`
+      INSERT INTO work_messages (id, thread_id, run_id, round_number, role, kind, content, created_at)
+      SELECT 'recovery-' || lower(hex(randomblob(16))), active.thread_id, active.id,
+        active.round_number, 'system', 'execution-interrupted',
+        'El servicio se reinició mientras esta ronda estaba activa. La ejecución quedó interrumpida; revisa el estado antes de continuar.',
+        ?
+      FROM execution_runs AS active
+      WHERE active.status IN ('queued', 'running', 'waiting')
+        AND active.thread_id IS NOT NULL
+        AND NOT EXISTS (
+          SELECT 1 FROM execution_runs AS newer
+          WHERE newer.thread_id = active.thread_id
+            AND newer.round_number > active.round_number
+        )
+    `).run(now);
+    db.prepare(`
+      UPDATE work_threads
+      SET status = 'failed', updated_at = ?
+      WHERE status = 'active' AND id IN (
+        SELECT active.thread_id
+        FROM execution_runs AS active
+        WHERE active.status IN ('queued', 'running', 'waiting')
+          AND active.thread_id IS NOT NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM execution_runs AS newer
+            WHERE newer.thread_id = active.thread_id
+              AND newer.round_number > active.round_number
+          )
+      )
+    `).run(now);
+    db.prepare(`
+      UPDATE execution_runs
+      SET status = 'interrupted', updated_at = ?, finished_at = COALESCE(finished_at, ?)
+      WHERE status IN ('queued', 'running', 'waiting')
+    `).run(now, now);
+    db.prepare(`
+      UPDATE execution_agents
+      SET status = 'interrupted',
+          error = COALESCE(error, 'El servicio se reinició; la sesión puede recuperarse desde el motor.'),
+          finished_at = COALESCE(finished_at, ?)
+      WHERE status IN ('queued', 'running', 'waiting')
+    `).run(now);
+    db.prepare(`
+      UPDATE execution_decisions
+      SET status = 'orphaned',
+          response = COALESCE(response, 'La solicitud quedó huérfana porque el servicio se reinició.'),
+          resolved_at = COALESCE(resolved_at, ?)
+      WHERE status IN ('pending', 'responding')
+    `).run(now);
+    db.exec("COMMIT");
+  } catch (error) {
+    db.exec("ROLLBACK");
+    throw error;
+  }
 }
 
 
