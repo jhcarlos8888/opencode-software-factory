@@ -658,44 +658,6 @@ export default function App() {
 
   const executionMonitoringPanels = (
     <>
-          <section className="section-block activity-section" id="activity">
-            <div className="section-title-row">
-              <div>
-                <div className="eyebrow">SYSTEM TRACE / LIVE ENGINE STREAMS</div>
-                <h2>Consola de actividad</h2>
-                <p>Eventos reales de las sesiones: inicio de agentes, herramientas ejecutadas, fragmentos de respuesta y resultado de cada fase. Las credenciales se filtran antes de guardar los registros.</p>
-              </div>
-              <span className="terminal-status"><span /> {activeExecution ? "LIVE EXECUTION" : "LOCAL JOURNAL"}</span>
-            </div>
-            <div className="terminal-window" role="log" aria-live="polite" aria-label="Registro de actividad de motores y agentes">
-              <div className="terminal-bar"><span /><span /><span /><small>factory://engine-streams/{execution?.run.id.slice(0, 8) ?? "idle"}</small></div>
-              <div className="terminal-lines">
-                {terminalEvents.length === 0 && activityLogs.length === 0 && (
-                  <div className="terminal-empty">
-                    <span>FACTORY CONTROL CENTER :: MONITOR READY</span>
-                    <span>Esperando el comienzo de una ejecución...</span>
-                    <span className="terminal-dim">ENGINE STREAMS: STANDBY</span>
-                  </div>
-                )}
-                {terminalEvents.length > 0 ? terminalEvents.map((item) => (
-                  <div className={`terminal-line terminal-${item.kind === "success" ? "success" : item.kind === "warning" ? "warning" : "info"}`} key={item.id}>
-                    <time>{new Date(item.createdAt).toLocaleTimeString("es-CO", { hour12: false })}</time>
-                    <b>[{item.area}]</b><span>{item.message}</span>
-                  </div>
-                )) : activityLogs.map((item, index) => (
-                  <div className={`terminal-line terminal-${item.kind}`} key={`${item.time}-${index}`}>
-                    <time>{item.time}</time><b>[{item.area}]</b><span>{item.message}</span>
-                  </div>
-                ))}
-              </div>
-              <div className="terminal-footer">
-                <span>{execution ? `RUN ${execution.run.id.slice(0, 8)} · ${statusLabels[execution.run.status] ?? execution.run.status}` : "LOCAL EVENT JOURNAL"}</span>
-                <span>{terminalEvents.length || activityLogs.length} EVENTOS</span>
-              </div>
-            </div>
-            <div className="terminal-disclaimer">La consola conserva eventos y actividad de herramientas; no muestra cadenas de pensamiento privadas ni credenciales.</div>
-          </section>
-
           <section className="section-block decision-section" id="decisions">
             <div className="section-title-row">
               <div>
@@ -764,7 +726,45 @@ export default function App() {
                 </article>
               ))}
             </div>
+          </section>          <section className="section-block activity-section" id="activity">
+            <div className="section-title-row">
+              <div>
+                <div className="eyebrow">SYSTEM TRACE / LIVE ENGINE STREAMS</div>
+                <h2>Consola de actividad</h2>
+                <p>Eventos reales de las sesiones: inicio de agentes, herramientas ejecutadas, fragmentos de respuesta y resultado de cada fase. Las credenciales se filtran antes de guardar los registros.</p>
+              </div>
+              <span className="terminal-status"><span /> {activeExecution ? "LIVE EXECUTION" : "LOCAL JOURNAL"}</span>
+            </div>
+            <div className="terminal-window" role="log" aria-live="polite" aria-label="Registro de actividad de motores y agentes">
+              <div className="terminal-bar"><span /><span /><span /><small>factory://engine-streams/{execution?.run.id.slice(0, 8) ?? "idle"}</small></div>
+              <div className="terminal-lines">
+                {terminalEvents.length === 0 && activityLogs.length === 0 && (
+                  <div className="terminal-empty">
+                    <span>FACTORY CONTROL CENTER :: MONITOR READY</span>
+                    <span>Esperando el comienzo de una ejecución...</span>
+                    <span className="terminal-dim">ENGINE STREAMS: STANDBY</span>
+                  </div>
+                )}
+                {terminalEvents.length > 0 ? terminalEvents.map((item) => (
+                  <div className={`terminal-line terminal-${item.kind === "success" ? "success" : item.kind === "warning" ? "warning" : "info"}`} key={item.id}>
+                    <time>{new Date(item.createdAt).toLocaleTimeString("es-CO", { hour12: false })}</time>
+                    <b>[{item.area}]</b><span>{item.message}</span>
+                  </div>
+                )) : activityLogs.map((item, index) => (
+                  <div className={`terminal-line terminal-${item.kind}`} key={`${item.time}-${index}`}>
+                    <time>{item.time}</time><b>[{item.area}]</b><span>{item.message}</span>
+                  </div>
+                ))}
+              </div>
+              <div className="terminal-footer">
+                <span>{execution ? `RUN ${execution.run.id.slice(0, 8)} · ${statusLabels[execution.run.status] ?? execution.run.status}` : "LOCAL EVENT JOURNAL"}</span>
+                <span>{terminalEvents.length || activityLogs.length} EVENTOS</span>
+              </div>
+            </div>
+            <div className="terminal-disclaimer">La consola conserva eventos y actividad de herramientas; no muestra cadenas de pensamiento privadas ni credenciales.</div>
           </section>
+
+
     </>
   );
 
@@ -785,8 +785,8 @@ export default function App() {
           <a className="nav-item" href="#project"><span>⌘</span> Proyectos</a>
           <a className="nav-item" href="#team"><span>◇</span> Equipo de agentes</a>
           <a className="nav-item" href="#skills"><span>▤</span> Skills</a>
-          <a className="nav-item" href="#activity"><span>▣</span> Consola de actividad</a>
           <a className="nav-item" href="#decisions"><span>⚑</span> Centro de decisiones</a>
+          <a className="nav-item" href="#activity"><span>▣</span> Consola de actividad</a>
           <a className="nav-item" href="#roadmap"><span>⌁</span> Orquestación</a>
         </nav>
 
