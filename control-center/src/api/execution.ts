@@ -15,6 +15,7 @@ import { inspectFactoryFilesystemMcp, inspectOpenCodeAgentRegistry } from "./ope
 import { buildOpenCodePermissionRules } from "./opencode-permissions.js";
 import { EXECUTION_WAVES } from "./execution-waves.js";
 import { summarizeOpenCodeToolResult } from "./opencode-tool-audit.js";
+import { formatShellExecutionAuditContext } from "./execution-audit.js";
 import { redactSecrets, safeJson, sanitizeText } from "./redaction.js";
 import { claudeToolPathIsAllowed, OPENCODE_SENSITIVE_PATH_GLOBS, requireCanonicalProjectRoot } from "./filesystem-guards.js";
 import { createClaudeFactoryMcpConfig, isAllowedFactoryFilesystemMcpTool, isFactoryFilesystemToolName } from "./claude-mcp.js";
@@ -25,7 +26,7 @@ import {
 } from "./orchestration.js";
 import {
   addExecutionEvent, addWorkMessage, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
-  getExecutionApprovalEvents, getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, listFavoriteModels,
+  getExecutionApprovalEvents, getExecutionShellToolEvents, getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, listFavoriteModels,
   claimExecutionDecision, markUnfinishedExecutionsInterrupted, orphanExecutionDecisions, orphanExecutionDecisionsForAgent,
   releaseExecutionDecisionClaim, resolveExecutionDecision, updateExecutionAgent, updateExecutionRun, updateExecutionSummary,
   updateWorkThreadStatus,
@@ -426,7 +427,7 @@ function parseTextParts(messages: unknown): Array<{ key: string; text: string; t
         const toolName = String(part.tool ?? part.name ?? "herramienta");
         const status = String(state.status ?? "en ejecución");
         const input = state.input && typeof state.input === "object" ? JSON.stringify(safeJson(state.input)).slice(0, 700) : "";
-        const resultAudit = summarizeOpenCodeToolResult(toolName, state);
+        const resultAudit = summarizeOpenCodeToolResult(toolName, state, part.time);
         result.push({ key: `${messageId}:tool:${String(part.id ?? index)}:${status}`, text: `TOOL ${toolName} · ${status}${input ? " · " + input : ""}${resultAudit}`, tool: true });
       }
     }
@@ -1155,23 +1156,24 @@ async function executeRun(
       try {
         const roleInstructions = workflow.roleInstructions[agent.agentId] ??
           await loadRoleInstructions(factoryRoot, agent.agentId);
-        const arbiterLedger = agent.agentId === "cloud-arbiter"
-          ? getExecutionSnapshot(state.runId)
-          : null;
-        const roster = arbiterLedger?.agents.map((item) =>
-          item.agentId + " | motor=" + item.engine + " | modelo=" + item.modelId +
-          " | estado=" + item.status + " | sesión=" + (item.sessionId ?? (item.agentId === "cloud-arbiter" && item.status === "running"
-            ? "se asignará durante la inicialización de esta fase; consultar el ledger final"
-            : "no disponible")) +
-          " | inicio=" + (item.startedAt ?? "no iniciado") + " | fin=" + (item.finishedAt ?? "pendiente") +
-          " | handoff-out=" + (item.handoffOut.map((handoff) => handoff.id + "→" + handoff.toAgent).join(", ") || "ninguno")
-        ).join("; ") ?? "registro no disponible";
-        const approvalEvents = arbiterLedger ? getExecutionApprovalEvents(state.runId) : [];
-        const approvalAudit = arbiterLedger
+        const requiresAuditLedger = agent.agentId === "reviewer" || agent.agentId === "cloud-arbiter";
+        const auditLedger = requiresAuditLedger ? getExecutionSnapshot(state.runId) : null;
+        const roster = agent.agentId === "cloud-arbiter"
+          ? auditLedger?.agents.map((item) =>
+              item.agentId + " | motor=" + item.engine + " | modelo=" + item.modelId +
+              " | estado=" + item.status + " | sesión=" + (item.sessionId ?? (item.agentId === "cloud-arbiter" && item.status === "running"
+                ? "se asignará durante la inicialización de esta fase; consultar el ledger final"
+                : "no disponible")) +
+              " | inicio=" + (item.startedAt ?? "no iniciado") + " | fin=" + (item.finishedAt ?? "pendiente") +
+              " | handoff-out=" + (item.handoffOut.map((handoff) => handoff.id + "→" + handoff.toAgent).join(", ") || "ninguno")
+            ).join("; ") ?? "registro no disponible"
+          : "";
+        const approvalEvents = auditLedger ? getExecutionApprovalEvents(state.runId) : [];
+        const approvalAudit = auditLedger
           ? formatApprovalAuditContext(
-              arbiterLedger.decisionHistory.map((decision) => ({
+              auditLedger.decisionHistory.map((decision) => ({
                 id: decision.id,
-                agentId: arbiterLedger.agents.find((item) => item.id === decision.agentRunId)?.agentId ?? "agente desconocido",
+                agentId: auditLedger.agents.find((item) => item.id === decision.agentRunId)?.agentId ?? "agente desconocido",
                 engine: decision.engine,
                 kind: decision.kind,
                 status: decision.status,
@@ -1189,14 +1191,25 @@ async function executeRun(
               }))
             )
           : "No se pudo recuperar el ledger de decisiones de esta ejecución.";
-        const agentStructuralContext = agent.agentId === "cloud-arbiter"
+        const shellAudit = auditLedger
+          ? formatShellExecutionAuditContext(getExecutionShellToolEvents(state.runId))
+          : "";
+        const agentStructuralContext = requiresAuditLedger
           ? [
               structuralContext,
-              "REGISTRO REAL DE PARTICIPACIÓN (FUENTE DE VERDAD): " + roster,
+              ...(agent.agentId === "cloud-arbiter"
+                ? ["REGISTRO REAL DE PARTICIPACIÓN (FUENTE DE VERDAD): " + roster]
+                : []),
               "REGISTRO DE DECISIONES Y APROBACIONES (FUENTE DE VERDAD):",
               approvalAudit,
+              "REGISTRO DE RECIBOS NATIVOS DE SHELL (FUENTE DE VERDAD SQLITE):",
+              shellAudit,
               "Estos registros pertenecen exclusivamente a la ejecución actual y prevalecen sobre las afirmaciones textuales de los handoffs.",
-              "La sesión propia del Cloud Arbiter se asigna después de construir este contexto. Si el roster dice que se asignará durante la inicialización, no informes que la sesión está ausente; el ledger final contiene el ID definitivo."
+              "No afirmes que no hubo solicitud, aprobación o ejecución si los registros contienen una decisión o un evento shell. Diferencia question, aprobación humana, shell running, shell completed y shell error.",
+              "Solo TOOL shell completed acredita finalización. Usa command, workdir, output y exitCode del evento persistido; nunca reconstruyas un resultado ausente desde el informe del agente.",
+              ...(agent.agentId === "cloud-arbiter"
+                ? ["La sesión propia del Cloud Arbiter se asigna después de construir este contexto. Si el roster dice que se asignará durante la inicialización, no informes que la sesión está ausente; el ledger final contiene el ID definitivo."]
+                : [])
             ].join(String.fromCharCode(10))
           : structuralContext;
         const prompt = makeAgentPrompt(

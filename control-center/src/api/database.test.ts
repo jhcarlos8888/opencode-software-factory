@@ -155,6 +155,50 @@ test("SQLite retains every approval event beyond the UI event window and recover
 });
 
 
+test("shell execution receipts are queried independently of the latest event window", () => {
+  const runId = "shell-receipt-ledger-run";
+  const threadId = "shell-receipt-ledger-thread";
+  const agentRunId = "shell-receipt-ledger-agent";
+  database.createWorkThread({
+    id: threadId,
+    projectPath: isolatedStateDir,
+    objective: "Probar recibos de shell persistidos."
+  });
+  database.createExecutionRecords({
+    id: runId,
+    threadId,
+    roundNumber: 1,
+    configurationSnapshot: null,
+    continuityContext: "",
+    projectPath: isolatedStateDir,
+    instructions: "Probar recibos de shell persistidos.",
+    status: "running",
+    startedAt: new Date().toISOString()
+  }, [{
+    id: agentRunId,
+    agentId: "tester",
+    engine: "opencode",
+    modelId: "test-model",
+    permissionProfile: "approval-required",
+    status: "running"
+  }]);
+
+  database.addExecutionEvent(runId, "TESTER", "info",
+    "TOOL shell · running · {\"command\":\"./run-tests.sh\",\"workdir\":\"/sandbox\"} · resultado-shell={\"exitCode\":null}", agentRunId);
+  database.addExecutionEvent(runId, "TESTER", "info",
+    "TOOL shell · completed · {\"command\":\"./run-tests.sh\",\"workdir\":\"/sandbox\"} · resultado-shell={\"exitCode\":1,\"output\":\"CONTRACT FAILURES: 3\"}", agentRunId);
+  for (let index = 0; index < 350; index++) {
+    database.addExecutionEvent(runId, "TEST", "info", "EVENT-" + index, null);
+  }
+
+  const receipts = database.getExecutionShellToolEvents(runId);
+  assert.equal(receipts.length, 2);
+  assert.match(receipts[0]!.message, /TOOL shell · running/);
+  assert.match(receipts[1]!.message, /TOOL shell · completed/);
+  assert.match(receipts[1]!.message, /"exitCode":1/);
+  assert.match(receipts[1]!.message, /CONTRACT FAILURES: 3/);
+});
+
 test("decision claims are atomic, can be released once, and cannot be resolved twice", () => {
   const runId = "decision-claim-run";
   const threadId = "decision-claim-thread";

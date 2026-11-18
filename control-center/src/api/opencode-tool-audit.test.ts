@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { summarizeOpenCodeToolResult } from "./opencode-tool-audit.js";
 
-test("records shell exit code, bounded output, and duration", () => {
+test("records shell exit code, bounded output, and duration in the legacy shape", () => {
   const summary = summarizeOpenCodeToolResult("shell", {
     status: "completed",
     title: "./run-tests.sh",
@@ -15,6 +15,20 @@ test("records shell exit code, bounded output, and duration", () => {
   assert.equal(audit.exitCode, 1);
   assert.equal(audit.durationMs, 35);
   assert.match(audit.output, /CONTRACT FAILURES: 3/);
+});
+
+test("captures OpenCode V2 content and structured exit status", () => {
+  const summary = summarizeOpenCodeToolResult("shell", {
+    status: "completed",
+    input: { command: "./run-tests.sh", workdir: "/sandbox" },
+    content: [{ type: "text", text: "Smoke PASS\nCONTRACT FAILURES: 3" }],
+    structured: { exit: 1, truncated: false }
+  }, { created: 0, ran: 1000, completed: 1042 });
+  const audit = JSON.parse(summary.replace(/^ · resultado-shell=/, ""));
+  assert.equal(audit.exitCode, 1);
+  assert.equal(audit.durationMs, 42);
+  assert.match(audit.output, /Smoke PASS/);
+  assert.equal(audit.outputTruncated, false);
 });
 
 test("extracts an explicit exit code from tool output when metadata omits it", () => {
@@ -34,6 +48,7 @@ test("redacts secrets and limits captured shell output", () => {
   const audit = JSON.parse(summary.replace(/^ · resultado-shell=/, ""));
   assert.ok(audit.output.length <= 5000);
   assert.doesNotMatch(audit.output, /secret-value/);
+  assert.equal(audit.outputTruncated, true);
 });
 
 test("does not duplicate raw output from non-shell tools", () => {

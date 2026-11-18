@@ -894,6 +894,18 @@ export function getExecutionSnapshot(runId: string): ExecutionSnapshot | null {
  * independent of getExecutionSnapshot(), whose event list is capped for UI polling.
  * Do not add a LIMIT here: missing approval evidence changes the security verdict.
  */
+export function getExecutionShellToolEvents(runId: string): ExecutionEventRecord[] {
+  return db.prepare(`
+    SELECT id, run_id AS runId, agent_run_id AS agentRunId, created_at AS createdAt,
+      area, kind, message
+    FROM execution_events
+    WHERE run_id = ? AND (
+      message LIKE '%TOOL shell%' OR message LIKE '%resultado-shell=%'
+    )
+    ORDER BY id ASC
+  `).all(runId) as unknown as ExecutionEventRecord[];
+}
+
 export function getExecutionApprovalEvents(runId: string): ExecutionEventRecord[] {
   return db.prepare(`
     SELECT id, run_id AS runId, agent_run_id AS agentRunId, created_at AS createdAt,
