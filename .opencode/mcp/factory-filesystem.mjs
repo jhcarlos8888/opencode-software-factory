@@ -12,7 +12,7 @@
 
 import { createInterface } from "node:readline";
 import { open, realpath, readdir, stat, lstat } from "node:fs/promises";
-import { constants as fsConstants } from "node:fs";
+import { constants as fsConstants, realpathSync } from "node:fs";
 import { basename, dirname, isAbsolute, relative, resolve, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -499,12 +499,20 @@ async function runMcpServer() {
   }
 }
 
-const invokedPath = process.argv[1] ? resolve(process.argv[1]) : "";
-const configuredEntryPoint = process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT
-  ? resolve(process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT)
-  : "";
-const isDirectEntryPoint = invokedPath && pathToFileURL(invokedPath).href === import.meta.url;
-const isConfiguredEntryPoint = configuredEntryPoint && pathToFileURL(configuredEntryPoint).href === import.meta.url;
+function isCurrentEntryPoint(candidate) {
+  if (!candidate) return false;
+  try {
+    // Node canonicalizes import.meta.url to the real file path. The factory
+    // runtime is a symlink, so compare canonical paths for both argv[1] and
+    // the environment-resolved entrypoint instead of their lexical aliases.
+    return pathToFileURL(realpathSync(candidate)).href === import.meta.url;
+  } catch {
+    return false;
+  }
+}
+
+const isDirectEntryPoint = isCurrentEntryPoint(process.argv[1]);
+const isConfiguredEntryPoint = isCurrentEntryPoint(process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT);
 if (isDirectEntryPoint || isConfiguredEntryPoint) {
   runMcpServer().catch((error) => {
     process.stderr.write("[factory-filesystem] " + (error instanceof Error ? error.message : String(error)) + "\n");

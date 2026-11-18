@@ -101,13 +101,17 @@ test("the exact OpenCode environment-resolved launcher starts the MCP in the sel
   const f = await fixture();
   try {
     const factoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+    // The installed runtime is a symlink to the repository. Test the exact
+    // lexical path the Control Center passes to OpenCode and Claude Code.
+    const runtimeAlias = join(f.base, "factory-runtime");
+    await symlink(factoryRoot, runtimeAlias, "dir");
     const config = JSON.parse(await readFile(join(factoryRoot, "opencode.json"), "utf8"));
     const server = config.mcp?.servers?.factory_filesystem;
     assert.equal(server?.type, "local");
     assert.deepEqual(server?.command, ["node", "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}"]);
     assert.equal(server?.environment?.FACTORY_FILESYSTEM_MCP_ENTRYPOINT, "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}");
 
-    const entryPoint = join(factoryRoot, ".opencode", "mcp", "factory-filesystem.mjs");
+    const entryPoint = join(runtimeAlias, ".opencode", "mcp", "factory-filesystem.mjs");
     const resolvedCommand = server.command.map((part) =>
       part.replaceAll("{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}", entryPoint)
     );
