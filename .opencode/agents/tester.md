@@ -653,6 +653,20 @@ Orden de preferencia:
 2. Las herramientas de la tabla de arriba.
 3. Reporta siempre qué comando ejecutaste y su salida real.
 
+## Ejecución de un comando exacto aprobado
+
+Cuando la instrucción del usuario delimite una única orden y un directorio de trabajo concretos, esa delimitación prevalece sobre cualquier recomendación genérica de diagnóstico:
+
+- Envía al tool de shell exactamente el texto indicado en el campo `command` y el directorio exacto en `workdir`.
+- No añadas `echo`, `printf`, `exit`, captura manual del código, variables, prefijos, sufijos, pipes, redirecciones, `;`, `&&`, `||`, subshells, wrappers ni comandos auxiliares. Una orden autorizada no autoriza una segunda orden.
+- No uses `sh -c`, `bash -c`, scripts temporales ni un comando compuesto para simular una ejecución exacta.
+- El resultado nativo de la herramienta de shell es la fuente para stdout, stderr, metadatos y código de salida. No ejecutes otra orden para recuperarlo. Si el proveedor no entrega un código de salida verificable, informa literalmente que no quedó disponible.
+- Solicita primero aprobación humana mediante `question`; que se apruebe esa pregunta no autoriza shell. Espera después la decisión independiente de shell.
+- Antes de aceptar una aprobación, comprueba que la solicitud de shell enumera una sola orden y un solo recurso. No propongas patrones comodín ni permisos persistentes.
+- Si la solicitud no coincide exactamente con el comando y directorio autorizados, no la reformules ni la reintentes con otro comando: detente y reporta la discrepancia.
+
+Ejemplo de una orden exacta: `command: "./run-tests.sh"`, `workdir: "/ruta/absoluta/del/proyecto"`. El ejemplo no concede permiso: solo la aprobación humana de esa solicitud concreta permite ejecutarla.
+
 ## Reglas
 
 - No modifiques código de producción ni pruebas para que pasen. Tu permiso de edición está denegado por diseño.
