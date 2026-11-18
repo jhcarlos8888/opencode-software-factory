@@ -13,6 +13,8 @@ import {
 } from "./execution-guards.js";
 import { inspectFactoryFilesystemMcp, inspectOpenCodeAgentRegistry } from "./opencode-agents.js";
 import { buildOpenCodePermissionRules } from "./opencode-permissions.js";
+import { EXECUTION_WAVES } from "./execution-waves.js";
+import { summarizeOpenCodeToolResult } from "./opencode-tool-audit.js";
 import { redactSecrets, safeJson, sanitizeText } from "./redaction.js";
 import { claudeToolPathIsAllowed, OPENCODE_SENSITIVE_PATH_GLOBS, requireCanonicalProjectRoot } from "./filesystem-guards.js";
 import { createClaudeFactoryMcpConfig, isAllowedFactoryFilesystemMcpTool, isFactoryFilesystemToolName } from "./claude-mcp.js";
@@ -424,7 +426,8 @@ function parseTextParts(messages: unknown): Array<{ key: string; text: string; t
         const toolName = String(part.tool ?? part.name ?? "herramienta");
         const status = String(state.status ?? "en ejecución");
         const input = state.input && typeof state.input === "object" ? JSON.stringify(safeJson(state.input)).slice(0, 700) : "";
-        result.push({ key: `${messageId}:tool:${String(part.id ?? index)}:${status}`, text: `TOOL ${toolName} · ${status}${input ? " · " + input : ""}`, tool: true });
+        const resultAudit = summarizeOpenCodeToolResult(toolName, state);
+        result.push({ key: `${messageId}:tool:${String(part.id ?? index)}:${status}`, text: `TOOL ${toolName} · ${status}${input ? " · " + input : ""}${resultAudit}`, tool: true });
       }
     }
   }
@@ -1299,12 +1302,12 @@ async function executeRun(
         "/" + waveAgents.length + " fases completadas. Inicio de ola: " + waveStartedAt + ".");
     };
 
-    // Four explicit collaboration stages. The two engines investigate independently
-    // in waves 1 and 3; later waves receive all completed handoffs from both engines.
-    await runWave("01 · DESCUBRIMIENTO", ["architect", "build", "reverse"]);
-    await runWave("02 · IMPLEMENTACIÓN / PROPUESTA", ["implementer"]);
-    await runWave("03 · REVISIÓN CRUZADA", ["reviewer", "tester"]);
-    await runWave("04 · ARBITRAJE FINAL", ["cloud-arbiter"]);
+    // Each wave consumes only completed handoffs from earlier waves. In particular,
+    // Reviewer must start after Tester so it can independently verify the real test result.
+    // Discovery remains parallel across engines; OpenCode agents stay sequential.
+    for (const wave of EXECUTION_WAVES) {
+      await runWave(wave.id, [...wave.agentIds]);
+    }
 
     const snapshot = getExecutionSnapshot(state.runId);
     if (!snapshot) throw new Error("No se pudo recuperar el registro final de la ejecución.");
