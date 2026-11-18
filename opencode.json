@@ -222,14 +222,16 @@
         "type": "local",
         "command": [
           "node",
-          "-e",
-          "import(require('node:url').pathToFileURL(require('node:path').resolve(process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT || '.opencode/mcp/factory-filesystem.mjs')).href)"
+          "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}"
         ],
         "enabled": true,
         "codemode": false,
         "timeout": {
           "startup": 10000,
           "execution": 30000
+        },
+        "environment": {
+          "FACTORY_FILESYSTEM_MCP_ENTRYPOINT": "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}"
         }
       }
     }

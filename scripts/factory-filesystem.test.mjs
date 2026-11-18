@@ -97,19 +97,29 @@ test("search_text respects result, depth, file and total-byte limits", async () 
   }
 });
 
-test("the exact OpenCode node -e launcher starts the configured project-scoped MCP", async () => {
+test("the exact OpenCode environment-resolved launcher starts the MCP in the selected project root", async () => {
   const f = await fixture();
   try {
     const factoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
     const config = JSON.parse(await readFile(join(factoryRoot, "opencode.json"), "utf8"));
     const server = config.mcp?.servers?.factory_filesystem;
     assert.equal(server?.type, "local");
-    assert.equal(server?.command?.[0], "node");
-    assert.equal(server?.command?.[1], "-e");
+    assert.deepEqual(server?.command, ["node", "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}"]);
+    assert.equal(server?.environment?.FACTORY_FILESYSTEM_MCP_ENTRYPOINT, "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}");
+
     const entryPoint = join(factoryRoot, ".opencode", "mcp", "factory-filesystem.mjs");
-    const child = spawn(server.command[0], server.command.slice(1), {
+    const resolvedCommand = server.command.map((part) =>
+      part.replaceAll("{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}", entryPoint)
+    );
+    const resolvedEnvironment = Object.fromEntries(
+      Object.entries(server.environment).map(([key, value]) => [
+        key,
+        value.replaceAll("{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}", entryPoint)
+      ])
+    );
+    const child = spawn(resolvedCommand[0], resolvedCommand.slice(1), {
       cwd: f.project,
-      env: { ...process.env, FACTORY_FILESYSTEM_MCP_ENTRYPOINT: entryPoint },
+      env: { ...process.env, ...resolvedEnvironment },
       stdio: ["pipe", "pipe", "pipe"]
     });
     let output = "";
@@ -131,12 +141,13 @@ test("the exact OpenCode node -e launcher starts the configured project-scoped M
     const [exitCode, exitSignal] = await once(child, "close");
     assert.equal(exitCode, 0, errorOutput || "Configured MCP launcher exited unsuccessfully: " + exitSignal);
     const responses = output.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-    assert.equal(responses.length, 2, "configured launcher must answer both MCP requests before exiting");
+    assert.equal(responses.length, 2, "configured launcher must answer both MCP requests before it exits");
     assert.equal(responses[0].result.serverInfo.name, "factory-filesystem");
     assert.deepEqual(
       responses[1].result.tools.map((tool) => tool.name).sort(),
       ["list_files", "read_file", "search_text"]
     );
+    assert.match(responses[1].result.tools[0].description, /proyecto/i);
   } finally {
     await rm(f.base, { recursive: true, force: true });
   }

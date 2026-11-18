@@ -74,3 +74,15 @@ test("factory filesystem MCP is ready only when the project-scoped server is con
   ] });
   assert.deepEqual(result, { ready: true, status: "connected", error: null });
 });
+
+test("the runtime registry contract matches the seven checked-in factory agent modes", () => {
+  assert.deepEqual(REQUIRED_OPENCODE_AGENT_MODES, {
+    build: "primary",
+    architect: "all",
+    implementer: "all",
+    reviewer: "all",
+    tester: "all",
+    "cloud-arbiter": "subagent",
+    reverse: "all"
+  });
+});

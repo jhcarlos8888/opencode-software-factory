@@ -825,6 +825,10 @@ async function runClaudeAgent(
       // canUseTool is not a hard boundary: CLI allow-rules may auto-approve a
       // tool before that callback runs. PreToolUse executes for every tool and
       // is therefore the enforcement point for project filesystem isolation.
+      stderr: (data) => {
+        const detail = sanitizeText(data).trim();
+        if (detail) addLog(state.runId, agent.agentId.toUpperCase(), "warning", "Claude SDK: " + detail.slice(0, 3000), agent.id);
+      },
       hooks: {
         PreToolUse: [{
           timeout: 15,
@@ -975,7 +979,14 @@ async function runClaudeAgent(
           addLog(state.runId, agent.agentId.toUpperCase(), "warning", resultFailure, agent.id);
         }
       } else if (record.type === "system" && record.subtype === "init") {
-        addLog(state.runId, agent.agentId.toUpperCase(), "info", "Claude Code inicializó el contexto de trabajo.", agent.id);
+        const mcpStatuses = Array.isArray(record.mcp_servers)
+          ? (record.mcp_servers as Array<Record<string, unknown>>).map((server) =>
+              String(server.name ?? "servidor") + "=" + String(server.status ?? "desconocido") +
+              (server.source ? " (source=" + String(server.source) + ")" : "")
+            ).join(", ")
+          : "no informado por esta versión del SDK";
+        addLog(state.runId, agent.agentId.toUpperCase(), "info",
+          "Claude Code inicializó el contexto de trabajo. MCP: " + mcpStatuses + ".", agent.id);
       } else if (record.type === "tool_progress") {
         addLog(state.runId, agent.agentId.toUpperCase(), "info", "Herramienta de Claude Code en ejecución.", agent.id);
       }

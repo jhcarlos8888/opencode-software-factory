@@ -5,7 +5,7 @@ export const REQUIRED_OPENCODE_AGENT_MODES = {
   reviewer: "all",
   tester: "all",
   "cloud-arbiter": "subagent",
-  reverse: "primary"
+  reverse: "all"
 } as const;
 
 export type RequiredOpenCodeAgentId = keyof typeof REQUIRED_OPENCODE_AGENT_MODES;

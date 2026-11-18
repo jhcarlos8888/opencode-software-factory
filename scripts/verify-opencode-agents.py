@@ -223,13 +223,19 @@ def verify(project: Path, binary: str | None) -> int:
     if filesystem_server.get("type") != "local":
         print("ERROR: factory_filesystem debe ser un servidor MCP local.")
         return 1
-    expected_mcp_command = [
-        "node",
-        "-e",
-        "import(require('node:url').pathToFileURL(require('node:path').resolve(process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT || '.opencode/mcp/factory-filesystem.mjs')).href)"
-    ]
+    expected_mcp_command = ["node", "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}"]
+    expected_mcp_environment = {
+        "FACTORY_FILESYSTEM_MCP_ENTRYPOINT": "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}"
+    }
     if filesystem_server.get("command") != expected_mcp_command:
         print("ERROR: el comando factory_filesystem no coincide con el servidor seguro versionado.")
+        return 1
+    configured_environment = filesystem_server.get("environment")
+    if not isinstance(configured_environment, dict) or any(
+        configured_environment.get(key) != value
+        for key, value in expected_mcp_environment.items()
+    ):
+        print("ERROR: factory_filesystem debe resolver su entrypoint mediante environment.FACTORY_FILESYSTEM_MCP_ENTRYPOINT.")
         return 1
     if filesystem_server.get("codemode") is not False or filesystem_server.get("enabled") is not True:
         print("ERROR: factory_filesystem debe estar enabled y codemode=false.")
