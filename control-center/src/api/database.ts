@@ -899,9 +899,9 @@ export function getExecutionShellToolEvents(runId: string): ExecutionEventRecord
     SELECT id, run_id AS runId, agent_run_id AS agentRunId, created_at AS createdAt,
       area, kind, message
     FROM execution_events
-    WHERE run_id = ? AND (
-      message LIKE '%TOOL shell%' OR message LIKE '%resultado-shell=%'
-    )
+    -- Native tool receipts are emitted as a canonical event prefix. Do not
+    -- match handoff prose that merely mentions shell or resultado-shell.
+    WHERE run_id = ? AND message LIKE 'TOOL shell · %'
     ORDER BY id ASC
   `).all(runId) as unknown as ExecutionEventRecord[];
 }

@@ -187,12 +187,17 @@ test("shell execution receipts are queried independently of the latest event win
     "TOOL shell · running · {\"command\":\"./run-tests.sh\",\"workdir\":\"/sandbox\"} · resultado-shell={\"exitCode\":null}", agentRunId);
   database.addExecutionEvent(runId, "TESTER", "info",
     "TOOL shell · completed · {\"command\":\"./run-tests.sh\",\"workdir\":\"/sandbox\"} · resultado-shell={\"exitCode\":1,\"output\":\"CONTRACT FAILURES: 3\"}", agentRunId);
+  database.addExecutionEvent(runId, "BUILD", "success",
+    "HANDOFF-BUILD: No ejecuté shell. La frase TOOL shell · completed describe un ejemplo, no una llamada nativa.", "build-agent");
+  database.addExecutionEvent(runId, "ARCHITECT", "success",
+    "Informe: resultado-shell=\"exitCode\":1 es una cita del recibo, no otra ejecución.", "architect-agent");
   for (let index = 0; index < 350; index++) {
     database.addExecutionEvent(runId, "TEST", "info", "EVENT-" + index, null);
   }
 
   const receipts = database.getExecutionShellToolEvents(runId);
   assert.equal(receipts.length, 2);
+  assert.ok(receipts.every((item) => item.message.startsWith("TOOL shell · ")));
   assert.match(receipts[0]!.message, /TOOL shell · running/);
   assert.match(receipts[1]!.message, /TOOL shell · completed/);
   assert.match(receipts[1]!.message, /"exitCode":1/);
