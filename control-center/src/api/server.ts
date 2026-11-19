@@ -13,7 +13,7 @@ import {
   getWorkThreadSnapshot, listAssignments, listFavoriteModels, recordProjectPreflight, saveAssignments,
   saveClaudeProviderPreference, saveFavoriteModels, saveProjectPreferences, synchronizeConfiguredClaudeModel,
   updateWorkThreadStatus,
-  type AgentAssignment, type ClaudeProviderId, type EngineId, type FavoriteModel, type ModelTier, type PermissionProfile,
+  type AgentAssignment, type ClaudeProviderId, type EngineId, type FavoriteModel, type ModelTier, type PermissionMode, type PermissionProfile,
   type WorkThreadSnapshot
 } from "./database.js";
 import { getClaudeModels, getDetectedClaudeProvider, getEngineVersion, getOpenCodeModels, readClaudeLocalConfig, listModels } from "./models.js";
@@ -341,24 +341,24 @@ app.get("/api/project-preferences", async () => getProjectPreferences());
 
 app.get("/api/projects/preflight", async () => {
   const preferences = getProjectPreferences();
-  return { preflight: getProjectPreflight(preferences.path, preferences.instructions) };
+  return { preflight: getProjectPreflight(preferences.path) };
 });
 
-app.post<{ Body: { path?: unknown; instructions?: unknown; decision?: unknown } }>(
+app.post<{ Body: { path?: unknown; depth?: unknown; decision?: unknown } }>(
   "/api/projects/preflight/decision",
   async (request, reply) => {
     const path = typeof request.body?.path === "string" ? request.body.path : "";
-    const instructions = typeof request.body?.instructions === "string" ? request.body.instructions : "";
+    const depth = request.body?.depth;
     const decision = request.body?.decision;
-    if (!path.trim() || !instructions.trim()) {
-      return reply.code(400).send({ error: "La ruta y las instrucciones deben coincidir con la preconsulta." });
+    if (!path.trim() || !["quick", "focused", "deep"].includes(String(depth))) {
+      return reply.code(400).send({ error: "La ruta y la profundidad deben coincidir con la preconsulta." });
     }
     if (decision !== "accepted" && decision !== "manual") {
       return reply.code(400).send({ error: "La decisión debe ser accepted o manual." });
     }
-    const saved = decideProjectPreflight(path, instructions, decision);
+    const saved = decideProjectPreflight(path, String(depth), decision);
     if (!saved) {
-      return reply.code(409).send({ error: "No existe una preconsulta vigente para esta ruta e instrucciones. Vuelve a analizar el proyecto." });
+      return reply.code(409).send({ error: "No existe una preconsulta vigente para esta ruta y profundidad. Vuelve a analizar el proyecto." });
     }
     return { saved: true, decision };
   }
@@ -394,6 +394,7 @@ app.put<{ Body: { assignments?: unknown } }>("/api/assignments", async (request,
     const agentId = String(item.agentId ?? "");
     const engine = item.engine;
     const modelId = String(item.modelId ?? "");
+    const permissionMode = item.permissionMode ?? "automatic";
     const permissionProfile = item.permissionProfile;
     const enabled = item.enabled;
 
@@ -410,6 +411,9 @@ app.put<{ Body: { assignments?: unknown } }>("/api/assignments", async (request,
     if (!modelId || modelId.length > 200) {
       return reply.code(400).send({ error: `Modelo inválido para ${agentId}.` });
     }
+    if (permissionMode !== "automatic" && permissionMode !== "manual") {
+      return reply.code(400).send({ error: `Modo de permisos inválido para ${agentId}.` });
+    }
     if (!["read-only", "workspace-write", "approval-required"].includes(String(permissionProfile))) {
       return reply.code(400).send({ error: `Perfil de permisos inválido para ${agentId}.` });
     }
@@ -421,6 +425,7 @@ app.put<{ Body: { assignments?: unknown } }>("/api/assignments", async (request,
       agentId,
       engine: engine as EngineId,
       modelId,
+      permissionMode: permissionMode as PermissionMode,
       permissionProfile: permissionProfile as PermissionProfile,
       enabled
     });
@@ -460,17 +465,20 @@ app.put<{ Body: { assignments?: unknown } }>("/api/assignments", async (request,
   return { saved: normalized.length, assignments: normalized };
 });
 
-app.post<{ Body: { path?: string; instructions?: string } }>("/api/projects/analyze", async (request, reply) => {
+app.post<{ Body: { path?: string; depth?: string } }>("/api/projects/analyze", async (request, reply) => {
   const projectPath = request.body?.path;
-  const instructions = typeof request.body?.instructions === "string" ? request.body.instructions.slice(0, 12000) : "";
+  const depth = request.body?.depth;
   if (typeof projectPath !== "string" || !projectPath.trim()) {
     return reply.code(400).send({ error: "Indica la ruta absoluta del proyecto." });
   }
+  if (!["quick", "focused", "deep"].includes(String(depth))) {
+    return reply.code(400).send({ error: "Selecciona una profundidad de preconsulta válida." });
+  }
 
   try {
-    const analysis = await analyzeProject(projectPath, instructions);
-    // Persist the canonical project path, not a user-supplied symlink alias.
-    saveProjectPreferences(analysis.path, instructions);
+    const analysis = await analyzeProject(projectPath, depth as "quick" | "focused" | "deep");
+    // Persist only the canonical project path. Work instructions belong to chat.
+    saveProjectPreferences(analysis.path, "");
     const current = listAssignments();
     const favorites = listFavoriteModels().filter((item) =>
       item.provider === (item.engine === "claude" ? getClaudeProviderPreference() : "opencode")
@@ -507,10 +515,10 @@ app.post<{ Body: { path?: string; instructions?: string } }>("/api/projects/anal
       tester: ["opencode", "claude"], "cloud-arbiter": ["claude", "opencode"],
       reverse: ["opencode", "claude"]
     };
-    const selectedAgents = new Set(analysis.taskPlan.recommendedAgents);
-    const recommendationDifficulty = analysis.taskPlan.complexity === "low"
-      ? "low"
-      : analysis.taskPlan.complexity === "high" ? "high" : analysis.complexity.level;
+    const selectedAgents = new Set(analysis.projectPlan.recommendedAgents);
+    const recommendationDifficulty = analysis.complexity.level === "very-high"
+      ? "high"
+      : analysis.complexity.level;
     const suggestedAssignments = current.map((assignment) => {
       const preferredTier = roleTierByDifficulty[recommendationDifficulty]?.[assignment.agentId] ?? ["balanced", "premium", "economy"];
       const prefs = rolePreference[assignment.agentId] ?? ["opencode", "claude"];
@@ -531,10 +539,10 @@ app.post<{ Body: { path?: string; instructions?: string } }>("/api/projects/anal
       suggestedAssignments,
       recommendationReady: favorites.length > 0,
       recommendationMessage: favorites.length
-        ? "Plan " + analysis.taskPlan.depth + ": " + analysis.taskPlan.recommendedAgents.length + " agentes seleccionados usando exclusivamente tus modelos favoritos activos."
+        ? "Preconsulta " + analysis.projectPlan.depth + ": " + analysis.projectPlan.recommendedAgents.length + " agentes recomendados por el tamaño y la arquitectura del proyecto, usando exclusivamente tus modelos favoritos activos."
         : "Aún no hay modelos favoritos. Configúralos para activar la asignación automática."
     };
-    recordProjectPreflight(analysis.path, instructions, response as unknown as Record<string, unknown>);
+    recordProjectPreflight(analysis.path, analysis.projectPlan.depth, response as unknown as Record<string, unknown>);
     return response;
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -669,7 +677,7 @@ app.get<{ Params: { runId: string } }>("/api/executions/:runId", async (request,
   return { execution };
 });
 
-app.post<{ Body: { path?: unknown; instructions?: unknown; taskDepth?: unknown } }>("/api/executions", async (request, reply) => {
+app.post<{ Body: { path?: unknown; instructions?: unknown; preflightDepth?: unknown; taskDepth?: unknown } }>("/api/executions", async (request, reply) => {
   const projectPath = typeof request.body?.path === "string" ? request.body.path.trim() : getProjectPreferences().path;
   const instructions = typeof request.body?.instructions === "string"
     ? request.body.instructions.slice(0, 12000).trim()
@@ -679,6 +687,10 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; taskDepth?: unknown }
   }
   if (!instructions) {
     return reply.code(400).send({ error: "Escribe las instrucciones que deben ejecutar los agentes." });
+  }
+  const preflightDepth = request.body?.preflightDepth;
+  if (!["quick", "focused", "deep"].includes(String(preflightDepth))) {
+    return reply.code(400).send({ error: "La profundidad de la preconsulta no coincide con la registrada." });
   }
   const taskDepth = request.body?.taskDepth;
   if (taskDepth !== undefined && !["quick", "focused", "deep"].includes(String(taskDepth))) {
@@ -690,10 +702,10 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; taskDepth?: unknown }
       error: `No se puede iniciar: el agente ${nonFavorite.agentId} tiene asignado ${nonFavorite.modelId}, que no está marcado como favorito.`
     });
   }
-  const preflightState = getProjectPreflight(projectPath, instructions);
+  const preflightState = getProjectPreflight(projectPath, String(preflightDepth));
   if (!preflightState) {
     return reply.code(409).send({
-      error: "La ruta o las instrucciones no coinciden con una preconsulta vigente. Ejecuta primero la preconsulta del proyecto."
+      error: "La ruta o profundidad no coinciden con una preconsulta vigente. Ejecuta primero la preconsulta del proyecto."
     });
   }
   if (!preflightState.decision) {
@@ -715,17 +727,17 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; taskDepth?: unknown }
   try {
     // Recheck the project structure, then atomically consume the server-side
     // preflight/decision/team snapshot. Client-side button state is not trusted.
-    const revalidatedProject = await analyzeProject(projectPath, instructions);
+    const revalidatedProject = await analyzeProject(projectPath, preflightDepth as "quick" | "focused" | "deep");
     if (revalidatedProject.path !== projectPath) {
       return reply.code(409).send({
         error: "La ruta real del proyecto cambió desde la preconsulta. Ejecuta nuevamente la preconsulta y confirma la ruta canónica."
       });
     }
-    const preflight = consumeProjectPreflight(projectPath, instructions);
+    const preflight = consumeProjectPreflight(projectPath, String(preflightDepth));
     if (!preflight.consumed) {
       return reply.code(409).send({ error: preflight.reason ?? "Completa el flujo de preconsulta antes de iniciar." });
     }
-    saveProjectPreferences(projectPath, instructions);
+    saveProjectPreferences(projectPath, "");
     const threadId = randomUUID();
     createdThreadId = threadId;
     createWorkThread({ id: threadId, projectPath, objective: instructions });

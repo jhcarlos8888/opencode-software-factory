@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -236,39 +236,45 @@ test("decision claims are atomic, can be released once, and cannot be resolved t
   assert.equal(database.getExecutionSnapshot(runId)?.decisionHistory[0]?.status, "approved");
 });
 
-test("project preflight requires a matching decision and saved team snapshot, then is single-use", () => {
+test("project preflight is bound to project path and discovery depth, then is single-use", () => {
   const projectPath = join(isolatedStateDir, "ROUND4-SANDBOX");
-  const instructions = "Corregir el defecto deliberadamente introducido.\n";
-  const analysis = { name: "ROUND4-SANDBOX", recommendationReady: true, taskPlan: { depth: "focused" } };
+  const depth = "focused";
+  const analysis = {
+    name: "ROUND4-SANDBOX",
+    recommendationReady: true,
+    projectPlan: { depth, recommendedAgents: ["architect", "build"] }
+  };
 
-  database.recordProjectPreflight(projectPath, instructions, analysis);
-  assert.equal(database.getProjectPreflight(projectPath, instructions)?.decision, null);
-  assert.equal(database.getProjectPreflight(projectPath, instructions)?.teamSaved, false);
-  assert.equal(database.getProjectPreflight(projectPath, instructions + "Cambio"), null);
-  assert.equal(database.decideProjectPreflight(projectPath, instructions + "Cambio", "manual"), false);
-  assert.match(database.consumeProjectPreflight(projectPath, instructions).reason ?? "", /preconsulta/);
+  database.recordProjectPreflight(projectPath, depth, analysis);
+  assert.equal(database.getProjectPreflight(projectPath, depth)?.decision, null);
+  assert.equal(database.getProjectPreflight(projectPath, depth)?.teamSaved, false);
+  assert.equal(database.getProjectPreflight(projectPath, "quick"), null);
+  assert.equal(database.getProjectPreflight(projectPath, "deep"), null);
+  assert.equal(database.decideProjectPreflight(projectPath, "quick", "manual"), false);
+  assert.match(database.consumeProjectPreflight(projectPath, "quick").reason ?? "", /profundidad/);
 
-  assert.equal(database.decideProjectPreflight(projectPath, instructions, "manual"), true);
-  const afterDecision = database.getProjectPreflight(projectPath, instructions);
+  assert.equal(database.decideProjectPreflight(projectPath, depth, "manual"), true);
+  const afterDecision = database.getProjectPreflight(projectPath, depth);
   assert.equal(afterDecision?.decision, "manual");
   assert.equal(afterDecision?.teamSaved, false);
-  assert.match(database.consumeProjectPreflight(projectPath, instructions).reason ?? "", /Guarda el equipo/);
+  assert.match(database.consumeProjectPreflight(projectPath, depth).reason ?? "", /Guarda el equipo/);
 
   const assignments = [
-    { agentId: "architect", engine: "claude" as const, modelId: "favorite-claude", permissionProfile: "read-only" as const, enabled: true },
-    { agentId: "implementer", engine: "opencode" as const, modelId: "favorite-opencode", permissionProfile: "approval-required" as const, enabled: true }
+    { agentId: "architect", engine: "claude" as const, modelId: "favorite-claude", permissionMode: "automatic" as const, permissionProfile: "read-only" as const, enabled: true },
+    { agentId: "implementer", engine: "opencode" as const, modelId: "favorite-opencode", permissionMode: "manual" as const, permissionProfile: "approval-required" as const, enabled: true }
   ];
   database.saveAssignments(assignments);
-  assert.equal(database.getProjectPreflight(projectPath, instructions)?.teamSaved, true);
+  assert.deepEqual(database.listAssignments(), assignments);
+  assert.equal(database.getProjectPreflight(projectPath, depth)?.teamSaved, true);
 
-  assert.deepEqual(database.consumeProjectPreflight(projectPath, instructions), { consumed: true });
-  const consumed = database.getProjectPreflight(projectPath, instructions);
+  assert.deepEqual(database.consumeProjectPreflight(projectPath, depth), { consumed: true });
+  const consumed = database.getProjectPreflight(projectPath, depth);
   assert.equal(consumed?.consumed, true);
-  assert.match(database.consumeProjectPreflight(projectPath, instructions).reason ?? "", /ya fue utilizada/);
+  assert.match(database.consumeProjectPreflight(projectPath, depth).reason ?? "", /ya fue utilizada/);
 
-  // A fresh preconsultation invalidates both the decision and its one-time token.
-  database.recordProjectPreflight(projectPath, instructions, { ...analysis, name: "ROUND4-SANDBOX-REFRESHED" });
-  const refreshed = database.getProjectPreflight(projectPath, instructions);
+  // A fresh project-only preconsultation invalidates both the decision and its one-time token.
+  database.recordProjectPreflight(projectPath, depth, { ...analysis, name: "ROUND4-SANDBOX-REFRESHED" });
+  const refreshed = database.getProjectPreflight(projectPath, depth);
   assert.equal(refreshed?.decision, null);
   assert.equal(refreshed?.teamSaved, false);
   assert.equal(refreshed?.consumed, false);

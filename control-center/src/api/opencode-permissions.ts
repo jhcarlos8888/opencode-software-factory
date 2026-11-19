@@ -28,7 +28,9 @@ export function buildOpenCodePermissionRules(
       rules.push({ action, resource: "*", effect: "deny" });
     }
   } else if (profile === "workspace-write") {
-    rules.push({ action: "edit", resource: "*", effect: "allow" });
+    for (const action of ["edit", "write", "patch"]) {
+      rules.push({ action, resource: "*", effect: "allow" });
+    }
     rules.push({ action: "shell", resource: "*", effect: "ask" });
     rules.push({ action: "subagent", resource: "*", effect: "deny" });
   } else if (profile === "approval-required") {

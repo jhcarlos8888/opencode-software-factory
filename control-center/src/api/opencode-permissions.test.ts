@@ -37,8 +37,10 @@ test("read-only denies all write and command execution actions", () => {
   }
 });
 
-test("workspace-write allows project edits but never shell or nested delegation without approval", () => {
-  assert.equal(finalRule("workspace-write", "edit"), "allow");
+test("workspace-write allows create, edit and patch in the project while shell and delegation stay protected", () => {
+  for (const action of ["edit", "write", "patch"]) {
+    assert.equal(finalRule("workspace-write", action), "allow", action);
+  }
   assert.equal(finalRule("workspace-write", "shell"), "ask");
   assert.equal(finalRule("workspace-write", "subagent"), "deny");
 });

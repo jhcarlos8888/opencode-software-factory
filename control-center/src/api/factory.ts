@@ -67,6 +67,7 @@ export function mergeAssignments(
     agentId: agent.id,
     engine: "opencode",
     modelId: agent.defaultModel,
+    permissionMode: "automatic",
     permissionProfile: agent.mode === "primary" ? "approval-required" : "read-only",
     enabled: true
   });

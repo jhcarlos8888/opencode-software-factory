@@ -1,10 +1,12 @@
 import { useEffect, useMemo, useState } from "react";
+import { OpenCodeQuestionForm, type OpenCodeFormField } from "./OpenCodeQuestionForm";
 
 type EngineId = "opencode" | "claude";
 type ClaudeProviderId = "apmix" | "anthropic" | "opencode-go";
 type ModelTier = "economy" | "balanced" | "premium";
 interface FavoriteModel { engine: EngineId; provider: string; modelId: string; tier: ModelTier; }
 type PermissionProfile = "read-only" | "workspace-write" | "approval-required";
+type PermissionMode = "automatic" | "manual";
 
 interface EngineStatus {
   id: EngineId;
@@ -26,7 +28,7 @@ interface ModelOption {
   source: "detected" | "alias";
 }
 
-interface ClaudeProviderStatus {
+interface ClaudeConnectorStatus {
   selectedProvider: ClaudeProviderId;
   configured: boolean;
   endpointCompatible: boolean;
@@ -45,17 +47,59 @@ interface Assignment {
   agentId: string;
   engine: EngineId;
   modelId: string;
+  permissionMode: PermissionMode;
   permissionProfile: PermissionProfile;
   enabled: boolean;
 }
 
-interface TaskPlan {
-  kind: "explanation" | "diagnosis" | "implementation" | "testing" | "architecture-review" | "general";
-  complexity: "low" | "medium" | "high";
-  depth: "quick" | "focused" | "deep";
-  recommendedAgents: string[];
-  reasons: string[];
-  changesExpected: boolean;
+type ResearchDepth = "quick" | "focused" | "deep";
+
+function getOpenCodeFormFields(details: unknown): OpenCodeFormField[] {
+  if (!details || typeof details !== "object" || Array.isArray(details)) return [];
+  const outer = details as Record<string, unknown>;
+  const metadata = outer.metadata && typeof outer.metadata === "object" && !Array.isArray(outer.metadata)
+    ? outer.metadata as Record<string, unknown>
+    : outer;
+  const nestedMetadata = metadata.metadata && typeof metadata.metadata === "object" && !Array.isArray(metadata.metadata)
+    ? metadata.metadata as Record<string, unknown>
+    : null;
+  const fieldContainer = [outer, metadata, nestedMetadata].find((candidate) => candidate && Array.isArray(candidate.fields));
+  if (!fieldContainer || !Array.isArray(fieldContainer.fields)) return [];
+  return fieldContainer.fields
+    .filter((field): field is Record<string, unknown> => Boolean(field) && typeof field === "object" && !Array.isArray(field))
+    .map((field) => ({
+      key: String(field.key ?? ""),
+      title: typeof field.title === "string" ? field.title : undefined,
+      description: typeof field.description === "string" ? field.description : undefined,
+      type: String(field.type ?? "string"),
+      url: typeof field.url === "string" ? field.url : undefined,
+      options: Array.isArray(field.options)
+        ? field.options
+            .filter((option): option is Record<string, unknown> => Boolean(option) && typeof option === "object" && !Array.isArray(option))
+            .map((option) => ({
+              value: String(option.value ?? option.label ?? ""),
+              label: typeof option.label === "string" ? option.label : undefined,
+              description: typeof option.description === "string" ? option.description : undefined
+            }))
+        : undefined,
+      required: typeof field.required === "boolean" ? field.required : undefined,
+      default: field.default,
+      defaultValue: field.defaultValue,
+      minItems: typeof field.minItems === "number" ? field.minItems : undefined,
+      maxItems: typeof field.maxItems === "number" ? field.maxItems : undefined,
+      minLength: typeof field.minLength === "number" ? field.minLength : undefined,
+      maxLength: typeof field.maxLength === "number" ? field.maxLength : undefined,
+      minimum: typeof field.minimum === "number" ? field.minimum : undefined,
+      maximum: typeof field.maximum === "number" ? field.maximum : undefined,
+      multiple: typeof field.multiple === "boolean" ? field.multiple : undefined,
+      custom: typeof field.custom === "boolean" ? field.custom : undefined,
+      when: field.when,
+      hidden: typeof field.hidden === "boolean" ? field.hidden : undefined,
+      format: typeof field.format === "string" ? field.format : undefined,
+      pattern: typeof field.pattern === "string" ? field.pattern : undefined,
+      placeholder: typeof field.placeholder === "string" ? field.placeholder : undefined
+    }))
+    .filter((field) => Boolean(field.key));
 }
 
 interface ProjectAnalysis {
@@ -67,9 +111,16 @@ interface ProjectAnalysis {
   git: { isRepository: boolean; status: string[] };
   recommendations: string[];
   mode: "read-only";
-  objective: string;
+  projectStructure: {
+    topLevelDirectories: string[];
+    modules: string[];
+    nestedManifests: string[];
+    depthLimit: number;
+    fileLimit: number;
+    fileCountLimited: boolean;
+  };
   complexity: { level: "low" | "medium" | "high" | "very-high"; score: number; reasons: string[]; fileCount: number; };
-  taskPlan: TaskPlan;
+  projectPlan: { depth: ResearchDepth; recommendedAgents: string[]; reasons: string[] };
   suggestedAssignments: Assignment[];
   recommendationReady: boolean;
   recommendationMessage: string;
@@ -122,6 +173,12 @@ interface ExecutionConfigurationSnapshot {
   claudeProvider: ClaudeProviderId;
   favorites: FavoriteModel[];
   assignments: Assignment[];
+  permissionResolution?: Array<{
+    agentId: string;
+    configuredMode: PermissionMode;
+    effectiveProfile: PermissionProfile;
+    reason: string;
+  }>;
   roleInstructionDigests: Record<string, string>;
   roleInstructions: Record<string, string>;
   workflowSkillDigest: string | null;
@@ -221,13 +278,13 @@ export default function App() {
   const [assignments, setAssignments] = useState<Record<string, Assignment>>({});
   const [projectPath, setProjectPath] = useState("");
   const [folderPicking, setFolderPicking] = useState(false);
-  const [projectInstructions, setProjectInstructions] = useState("");
   const [favorites, setFavorites] = useState<FavoriteModel[]>([]);
   const [favoriteEngine, setFavoriteEngine] = useState<EngineId>("opencode");
   const [favoriteModelId, setFavoriteModelId] = useState("");
   const [favoriteTier, setFavoriteTier] = useState<ModelTier>("balanced");
   const [favoritesSaving, setFavoritesSaving] = useState(false);
   const [analysis, setAnalysis] = useState<ProjectAnalysis | null>(null);
+  const [researchDepth, setResearchDepth] = useState<ResearchDepth>("focused");
   const [pendingAssignments, setPendingAssignments] = useState<Assignment[] | null>(null);
   const [recommendationStatus, setRecommendationStatus] = useState<"pending" | "accepted" | "manual" | null>(null);
   const [activityLogs, setActivityLogs] = useState<Array<{ time: string; area: string; message: string; kind: "info" | "success" | "warning" }>>([]);
@@ -237,9 +294,7 @@ export default function App() {
   const [error, setError] = useState("");
   const [apiReady, setApiReady] = useState(false);
   const [runtimeBuildWarning, setRuntimeBuildWarning] = useState("");
-  const [claudeProvider, setClaudeProvider] = useState<ClaudeProviderId>("apmix");
-  const [claudeProviderStatus, setClaudeProviderStatus] = useState<ClaudeProviderStatus | null>(null);
-  const [providerSaving, setProviderSaving] = useState(false);
+  const [claudeProviderStatus, setClaudeProviderStatus] = useState<ClaudeConnectorStatus | null>(null);
   const [teamSaved, setTeamSaved] = useState(false);
   const [preflightConsumed, setPreflightConsumed] = useState(false);
   const [execution, setExecution] = useState<ExecutionData | null>(null);
@@ -253,11 +308,17 @@ export default function App() {
   const [executionCancelling, setExecutionCancelling] = useState(false);
   const [decisionAnswers, setDecisionAnswers] = useState<Record<string, string>>({});
   const [decisionBusyId, setDecisionBusyId] = useState<string | null>(null);
+  const [showTechnicalLogs, setShowTechnicalLogs] = useState(false);
 
   const availableEngines = useMemo(
     () => new Set(engines.filter((engine) => engine.available).map((engine) => engine.id)),
     [engines]
   );
+
+  const detectedClaudeProvider = claudeProviderStatus?.selectedProvider ?? "apmix";
+  const detectedClaudeProviderName = detectedClaudeProvider === "opencode-go" ? "OpenCode Go"
+    : detectedClaudeProvider === "apmix" ? "APMix" : "Anthropic";
+  const claudeDetectedModelCount = models.claude.filter((model) => model.source === "detected").length;
 
   useEffect(() => {
     void loadInitialData();
@@ -342,7 +403,7 @@ export default function App() {
         api<{ assignments: Assignment[]; saved: boolean }>("/api/assignments"),
         api<{ models: ModelOption[] }>("/api/models/opencode"),
         api<{ models: ModelOption[] }>("/api/models/claude"),
-        api<ClaudeProviderStatus>("/api/providers/claude"),
+        api<ClaudeConnectorStatus>("/api/providers/claude"),
         api<{ favorites: FavoriteModel[] }>("/api/favorites"),
         api<{ path: string; instructions: string }>("/api/project-preferences"),
         api<{ execution: ExecutionData | null }>("/api/executions/latest"),
@@ -355,15 +416,14 @@ export default function App() {
       setAgents(assetResponse.agents);
       setSkills(assetResponse.skills);
       setModels({ opencode: openCodeModels.models, claude: claudeModels.models });
-      setClaudeProvider(providerResponse.selectedProvider);
       setClaudeProviderStatus(providerResponse);
       setFavorites(favoriteResponse.favorites);
       setProjectPath(projectPreferences.path);
-      setProjectInstructions(projectPreferences.instructions);
       setFavoriteModelId(openCodeModels.models[0]?.id ?? "");
       setAssignments(Object.fromEntries(assignmentResponse.assignments.map((item) => [item.agentId, item])));
       const preflight = preflightResponse.preflight;
       setAnalysis(preflight?.analysis ?? null);
+      setResearchDepth(preflight?.analysis.projectPlan?.depth ?? "focused");
       setRecommendationStatus(preflight?.decision ?? (preflight?.analysis.recommendationReady ? "pending" : null));
       setPendingAssignments(
         preflight && !preflight.decision && preflight.analysis.recommendationReady
@@ -402,7 +462,7 @@ export default function App() {
   }
 
   function favoriteModelsFor(engine: EngineId) {
-    const provider = engine === "claude" ? claudeProvider : "opencode";
+    const provider = engine === "claude" ? detectedClaudeProvider : "opencode";
     const favoriteIds = new Set(
       favorites
         .filter((item) => item.engine === engine && item.provider === provider)
@@ -419,24 +479,6 @@ export default function App() {
     }
     setError("");
     updateAssignment(agentId, { engine, modelId: firstFavorite });
-  }
-
-  async function saveClaudeProvider(provider: ClaudeProviderId) {
-    setProviderSaving(true);
-    setNotice("");
-    setError("");
-    try {
-      const result = await api<{ selectedProvider: ClaudeProviderId; message: string }>("/api/providers/claude", {
-        method: "PUT",
-        body: JSON.stringify({ provider })
-      });
-      setClaudeProvider(result.selectedProvider);
-      setNotice(result.message);
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setProviderSaving(false);
-    }
   }
 
   async function saveFavorites() {
@@ -463,7 +505,7 @@ export default function App() {
 
   function addFavorite() {
     if (!favoriteModelId) return;
-    const provider = favoriteEngine === "claude" ? claudeProvider : "opencode";
+    const provider = favoriteEngine === "claude" ? detectedClaudeProvider : "opencode";
     setFavorites((current) => {
       const next = current.filter((item) => !(item.engine === favoriteEngine && item.provider === provider && item.modelId === favoriteModelId));
       return [...next, { engine: favoriteEngine, provider, modelId: favoriteModelId, tier: favoriteTier }];
@@ -502,7 +544,7 @@ export default function App() {
     try {
       await api<{ saved: boolean; decision: "accepted" }>("/api/projects/preflight/decision", {
         method: "POST",
-        body: JSON.stringify({ path: projectPath, instructions: projectInstructions, decision: "accepted" })
+        body: JSON.stringify({ path: projectPath, depth: researchDepth, decision: "accepted" })
       });
       setAssignments(Object.fromEntries(pendingAssignments.map((item) => [item.agentId, item])));
       setTeamSaved(false);
@@ -520,7 +562,7 @@ export default function App() {
     try {
       await api<{ saved: boolean; decision: "manual" }>("/api/projects/preflight/decision", {
         method: "POST",
-        body: JSON.stringify({ path: projectPath, instructions: projectInstructions, decision: "manual" })
+        body: JSON.stringify({ path: projectPath, depth: researchDepth, decision: "manual" })
       });
       setTeamSaved(false);
       setPendingAssignments(null);
@@ -548,7 +590,7 @@ export default function App() {
         setRecommendationStatus(null);
         setTeamSaved(false);
         setPreflightConsumed(false);
-        setNotice("Carpeta seleccionada. Revisa la ruta y pulsa «Analizar proyecto» cuando estés listo.");
+        setNotice("Carpeta seleccionada. Elige la profundidad de preconsulta y revisa la estructura del proyecto.");
       }
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
@@ -557,7 +599,45 @@ export default function App() {
     }
   }
 
-  async function startInstructions() {
+  async function submitWorkInstruction(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const instructions = continuationText.trim();
+    if (!instructions) return;
+    if (activeExecution || continuationBusy || executionStarting) {
+      setError("Espera a que termine la ronda actual antes de enviar otra instrucción.");
+      return;
+    }
+
+    setError("");
+    setNotice("");
+
+    // Once the one-time project preflight has been consumed, continue the
+    // existing conversation and evidence thread.
+    if (preflightConsumed && workThread && execution && execution.run.threadId === workThread.thread.id) {
+      setContinuationBusy(true);
+      try {
+        const result = await api<{
+          started: boolean; runId: string; threadId: string;
+          execution: ExecutionData | null; workflow: WorkThreadSnapshot
+        }>("/api/work-threads/" + workThread.thread.id + "/continue", {
+          method: "POST",
+          body: JSON.stringify({ instructions })
+        });
+        setExecution(result.execution);
+        setWorkThread(result.workflow);
+        setContinuationText("");
+        setNotice("Ronda " + (result.execution?.run.roundNumber ?? "nueva") + " iniciada. Se conservan el historial, los resultados y la evidencia anteriores.");
+        recordActivity("WORKFLOW", "Continuación de proceso " + result.threadId + "; ejecución " + result.runId + ".", "success");
+      } catch (cause) {
+        setError(cause instanceof Error ? cause.message : String(cause));
+      } finally {
+        setContinuationBusy(false);
+      }
+      return;
+    }
+
+    // The preflight contains project evidence only. The first user task enters
+    // here, after the proposed team has been accepted and saved.
     if (!analysis || !["accepted", "manual"].includes(recommendationStatus ?? "")) {
       setError("Primero termina la preconsulta y acepta la propuesta o elige la configuración manual.");
       return;
@@ -566,31 +646,30 @@ export default function App() {
       setError("Guarda el equipo de agentes después de aceptar o modificar sus asignaciones.");
       return;
     }
-    if (!projectPath.trim() || !projectInstructions.trim()) {
-      setError("Selecciona el proyecto y escribe las instrucciones de trabajo.");
+    if (!projectPath.trim() || !configuredCount) {
+      setError("Selecciona el proyecto y habilita al menos un agente para comenzar.");
       return;
     }
-    if (!configuredCount) {
-      setError("Activa al menos un agente para comenzar.");
-      return;
-    }
+
     setExecutionStarting(true);
-    setError("");
-    setNotice("");
     try {
       const result = await api<{
         started: boolean; runId: string; threadId: string;
         execution: ExecutionData | null; workflow: WorkThreadSnapshot
       }>("/api/executions", {
         method: "POST",
-        body: JSON.stringify({ path: projectPath, instructions: projectInstructions, taskDepth: analysis.taskPlan.depth })
+        body: JSON.stringify({
+          path: projectPath,
+          instructions,
+          preflightDepth: researchDepth
+        })
       });
       setExecution(result.execution);
       setWorkThread(result.workflow);
       setContinuationText("");
       setPreflightConsumed(true);
-      setNotice(`Proceso ${result.threadId.slice(0, 8)} iniciado. El historial y las siguientes rondas quedarán agrupados en este proceso.`);
-      recordActivity("ORCHESTRATOR", `Ejecución real iniciada: ${result.runId}.`, "success");
+      setNotice("Proceso " + result.threadId.slice(0, 8) + " iniciado. Esta es la primera instrucción de la conversación; las siguientes continuarán aquí.");
+      recordActivity("ORCHESTRATOR", "Ejecución real iniciada: " + result.runId + ".", "success");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -598,34 +677,15 @@ export default function App() {
     }
   }
 
-  async function continueWork(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    if (!workThread || !continuationText.trim()) return;
-    if (activeExecution || continuationBusy) {
-      setError("Espera a que termine la ronda actual antes de enviar otra instrucción.");
-      return;
-    }
-    setContinuationBusy(true);
-    setError("");
-    setNotice("");
-    try {
-      const result = await api<{
-        started: boolean; runId: string; threadId: string;
-        execution: ExecutionData | null; workflow: WorkThreadSnapshot
-      }>(`/api/work-threads/${workThread.thread.id}/continue`, {
-        method: "POST",
-        body: JSON.stringify({ instructions: continuationText.trim() })
-      });
-      setExecution(result.execution);
-      setWorkThread(result.workflow);
-      setContinuationText("");
-      setNotice(`Ronda ${result.execution?.run.roundNumber ?? "nueva"} iniciada. Se recuperó el objetivo original, el historial y la evidencia de rondas anteriores.`);
-      recordActivity("WORKFLOW", `Continuación de proceso ${result.threadId}; ejecución ${result.runId}.`, "success");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : String(cause));
-    } finally {
-      setContinuationBusy(false);
-    }
+  function changeResearchDepth(depth: ResearchDepth) {
+    if (depth === researchDepth) return;
+    setResearchDepth(depth);
+    setAnalysis(null);
+    setPendingAssignments(null);
+    setRecommendationStatus(null);
+    setTeamSaved(false);
+    setPreflightConsumed(false);
+    setNotice("Profundidad actualizada. Ejecuta otra vez la preconsulta para generar una recomendación con este alcance.");
   }
 
   async function cancelCurrentExecution() {
@@ -643,9 +703,13 @@ export default function App() {
     }
   }
 
-  async function respondToDecision(decisionId: string, action: "allow" | "allow-run" | "deny" | "answer") {
+  async function respondToDecision(
+    decisionId: string,
+    action: "allow" | "allow-run" | "deny" | "answer",
+    structuredAnswer?: Record<string, unknown>
+  ) {
     if (!execution) return;
-    const answer = decisionAnswers[decisionId] ?? "";
+    const answer = structuredAnswer ? JSON.stringify(structuredAnswer) : decisionAnswers[decisionId] ?? "";
     if (action === "answer" && !answer.trim()) {
       setError("Escribe la respuesta antes de enviarla.");
       return;
@@ -688,7 +752,7 @@ export default function App() {
     try {
       const result = await api<ProjectAnalysis>("/api/projects/analyze", {
         method: "POST",
-        body: JSON.stringify({ path: projectPath, instructions: projectInstructions })
+        body: JSON.stringify({ path: projectPath, depth: researchDepth })
       });
       setAnalysis(result);
       // Keep the visible selection aligned with the backend's canonical real path.
@@ -697,14 +761,15 @@ export default function App() {
         setPendingAssignments(result.suggestedAssignments);
         setRecommendationStatus("pending");
         setNotice(`Preconsulta ${result.complexity.level}: hay una propuesta preparada. Revísala y decide si aceptarla o configurar manualmente.`);
-        recordActivity("ROUTER", `Plan ${result.taskPlan.depth}: ${result.taskPlan.recommendedAgents.length} agentes seleccionados usando únicamente favoritos.`, "success");
+        recordActivity("ROUTER", "Preconsulta " + result.projectPlan.depth + ": " + result.projectPlan.recommendedAgents.length + " agentes recomendados por estructura y volumen, usando únicamente favoritos.", "success");
       } else {
         setPendingAssignments(null);
         setRecommendationStatus(null);
         setNotice(`Preconsulta ${result.complexity.level} completada. ${result.recommendationMessage}`);
         recordActivity("ROUTER", "No hay modelos favoritos suficientes; no se inventaron asignaciones.", "warning");
       }
-      recordActivity("PRECHECK", `Exploración terminada: ${result.complexity.level}; ${result.complexity.fileCount} archivos revisados. Ningún motor fue ejecutado.`, "success");
+      setResearchDepth(result.projectPlan.depth);
+      recordActivity("PRECHECK", "Exploración " + result.projectPlan.depth + " terminada: " + result.complexity.level + "; " + result.complexity.fileCount + " archivos revisados. Ningún motor fue ejecutado.", "success");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
@@ -718,7 +783,7 @@ export default function App() {
   const activeExecution = Boolean(execution && ["queued", "running", "waiting"].includes(execution.run.status));
   const canStartExecution = Boolean(
     apiReady && analysis && ["accepted", "manual"].includes(recommendationStatus ?? "") &&
-    teamSaved && projectPath.trim() && projectInstructions.trim() && configuredCount > 0 &&
+    teamSaved && projectPath.trim() && configuredCount > 0 &&
     !activeExecution && !executionStarting && !preflightConsumed
   );
   const statusLabels: Record<string, string> = {
@@ -732,10 +797,20 @@ export default function App() {
     interrupted: "status-failed", skipped: "status-skipped"
   };
   const terminalEvents = execution?.events ?? [];
+  const isLowSignalOpenCodeLog = (item: ExecutionData["events"][number]) => {
+    if (item.area !== "OPENCODE-SERVER" || !/\blevel=INFO\b/i.test(item.message)) return false;
+    const status = item.message.match(/\bhttp\.status=(\d{3})\b/i)?.[1];
+    // Preserve HTTP failures in the normal view; collapse only successful/noisy transport chatter.
+    if (status && Number(status) >= 400) return false;
+    return /(?:\bhttp\.(?:method|url|status)=|message="(?:watcher (?:started|stopped)|location services evicted|Sent HTTP response)"|event\.type=(?:model|provider)\.updated\b|\b(?:GET|POST|PUT|PATCH|DELETE|OPTIONS)\s+\/)/i.test(item.message);
+  };
+  const technicalEventCount = terminalEvents.filter(isLowSignalOpenCodeLog).length;
+  const visibleTerminalEvents = showTechnicalLogs
+    ? terminalEvents
+    : terminalEvents.filter((item) => !isLowSignalOpenCodeLog(item));
 
-  const executionMonitoringPanels = (
-    <>
-          <section className="section-block decision-section" id="decisions">
+  const decisionMonitoringPanel = (
+<section className="section-block decision-section" id="decisions">
             <div className="section-title-row">
               <div>
                 <div className="eyebrow">HUMAN IN THE LOOP / APPROVAL QUEUE</div>
@@ -795,9 +870,21 @@ export default function App() {
                         : "La aprobación temporal no modifica permisos globales ni se conserva para futuros análisis. Solo permite repetir exactamente esta misma operación de Claude."}
                     </span>
                     </>
+                  ) : item.engine === "opencode" && getOpenCodeFormFields(item.details).length > 0 ? (
+                    <OpenCodeQuestionForm
+                      fields={getOpenCodeFormFields(item.details)}
+                      busy={decisionBusyId === item.id || item.status === "responding"}
+                      onSubmit={(answers) => void respondToDecision(item.id, "answer", answers)}
+                    />
                   ) : (
                     <div className="decision-answer">
-                      <textarea disabled={item.status === "responding"} value={decisionAnswers[item.id] ?? ""} onChange={(event) => setDecisionAnswers((current) => ({ ...current, [item.id]: event.target.value }))} rows={3} placeholder="Escribe la aclaración para el agente. Para formularios de varios campos de OpenCode, envía un objeto JSON con las claves del formulario." />
+                      <textarea
+                        disabled={decisionBusyId === item.id || item.status === "responding"}
+                        value={decisionAnswers[item.id] ?? ""}
+                        onChange={(event) => setDecisionAnswers((current) => ({ ...current, [item.id]: event.target.value }))}
+                        rows={3}
+                        placeholder="Escribe la aclaración para el agente."
+                      />
                       <button className="primary-button" type="button" disabled={decisionBusyId === item.id || item.status === "responding" || !(decisionAnswers[item.id] ?? "").trim()} onClick={() => void respondToDecision(item.id, "answer")}>
                         {decisionBusyId === item.id ? "Enviando..." : "Enviar respuesta"}
                       </button>
@@ -806,7 +893,11 @@ export default function App() {
                 </article>
               ))}
             </div>
-          </section>          <section className="section-block activity-section" id="activity">
+          </section>
+  );
+
+  const activityMonitoringPanel = (
+<section className="section-block activity-section" id="activity">
             <div className="section-title-row">
               <div>
                 <div className="eyebrow">SYSTEM TRACE / LIVE ENGINE STREAMS</div>
@@ -815,6 +906,11 @@ export default function App() {
               </div>
               <span className="terminal-status"><span /> {activeExecution ? "LIVE EXECUTION" : "LOCAL JOURNAL"}</span>
             </div>
+            {technicalEventCount > 0 && (
+              <button className="secondary-button terminal-details-toggle" type="button" onClick={() => setShowTechnicalLogs((visible) => !visible)}>
+                {showTechnicalLogs ? "Ocultar detalles técnicos" : "Mostrar " + technicalEventCount + " eventos técnicos filtrados"}
+              </button>
+            )}
             <div className="terminal-window" role="log" aria-live="polite" aria-label="Registro de actividad de motores y agentes">
               <div className="terminal-bar"><span /><span /><span /><small>factory://engine-streams/{execution?.run.id.slice(0, 8) ?? "idle"}</small></div>
               <div className="terminal-lines">
@@ -825,12 +921,17 @@ export default function App() {
                     <span className="terminal-dim">ENGINE STREAMS: STANDBY</span>
                   </div>
                 )}
-                {terminalEvents.length > 0 ? terminalEvents.map((item) => (
+                {visibleTerminalEvents.length > 0 ? visibleTerminalEvents.map((item) => (
                   <div className={`terminal-line terminal-${item.kind === "success" ? "success" : item.kind === "warning" ? "warning" : "info"}`} key={item.id}>
                     <time>{new Date(item.createdAt).toLocaleTimeString("es-CO", { hour12: false })}</time>
                     <b>[{item.area}]</b><span>{item.message}</span>
                   </div>
-                )) : activityLogs.map((item, index) => (
+                )) : terminalEvents.length > 0 ? (
+                  <div className="terminal-empty">
+                    <span>ACTIVIDAD PRINCIPAL COMPLETADA</span>
+                    <span>Los eventos de bajo nivel están disponibles en los detalles técnicos.</span>
+                  </div>
+                ) : activityLogs.map((item, index) => (
                   <div className={`terminal-line terminal-${item.kind}`} key={`${item.time}-${index}`}>
                     <time>{item.time}</time><b>[{item.area}]</b><span>{item.message}</span>
                   </div>
@@ -838,14 +939,11 @@ export default function App() {
               </div>
               <div className="terminal-footer">
                 <span>{execution ? `RUN ${execution.run.id.slice(0, 8)} · ${statusLabels[execution.run.status] ?? execution.run.status}` : "LOCAL EVENT JOURNAL"}</span>
-                <span>{terminalEvents.length || activityLogs.length} EVENTOS</span>
+                <span>{terminalEvents.length > 0 ? visibleTerminalEvents.length : activityLogs.length} / {terminalEvents.length > 0 ? terminalEvents.length : activityLogs.length} EVENTOS VISIBLES</span>
               </div>
             </div>
             <div className="terminal-disclaimer">La consola conserva eventos y actividad de herramientas; no muestra cadenas de pensamiento privadas ni credenciales.</div>
           </section>
-
-
-    </>
   );
 
   return (
@@ -938,81 +1036,38 @@ export default function App() {
             </div>
           </section>
 
-          <section className="section-block provider-block" id="claude-provider">
-            <div className="section-title-row">
-              <div>
-                <div className="eyebrow">CLAUDE CODE / PROVIDER ROUTING</div>
-                <h2>Proveedor de Claude Code</h2>
-                <p>La fábrica detecta automáticamente el proveedor, endpoint y modelo definidos en ~/.claude/settings.json.</p>
-              </div>
-              <span className="pending-tag">CONFIGURACIÓN LOCAL / API ANTHROPIC</span>
-            </div>
-            <div className="provider-choice-grid">
-              <label className={claudeProvider === "apmix" ? "provider-choice selected" : "provider-choice"}>
-                <input type="radio" name="claude-provider" value="apmix" checked={claudeProvider === "apmix"} disabled={providerSaving}
-                  onChange={() => void saveClaudeProvider("apmix")} />
-                <span className="provider-choice-content">
-                  <strong>APMix</strong>
-                  <small>https://api.apmix.ai</small>
-                  <em>API compatible con Anthropic · Usa el plan y modelos de tu cuenta APMix.</em>
-                </span>
-                <span className="provider-check">{claudeProvider === "apmix" ? "✓" : ""}</span>
-              </label>
-              <label className={claudeProvider === "opencode-go" ? "provider-choice selected" : "provider-choice"}>
-                <input type="radio" name="claude-provider" value="opencode-go" checked={claudeProvider === "opencode-go"} disabled={providerSaving}
-                  onChange={() => void saveClaudeProvider("opencode-go")} />
-                <span className="provider-choice-content">
-                  <strong>OpenCode Go</strong>
-                  <small>https://opencode.ai/inference/go/anthropic</small>
-                  <em>Usa la API Anthropic de OpenCode Go. La fábrica verifica endpoint, credencial y modelo antes de ejecutar.</em>
-                </span>
-                <span className="provider-check">{claudeProvider === "opencode-go" ? "✓" : ""}</span>
-              </label>
-              <label className={claudeProvider === "anthropic" ? "provider-choice selected" : "provider-choice"}>
-                <input type="radio" name="claude-provider" value="anthropic" checked={claudeProvider === "anthropic"} disabled={providerSaving}
-                  onChange={() => void saveClaudeProvider("anthropic")} />
-                <span className="provider-choice-content">
-                  <strong>Anthropic oficial</strong>
-                  <small>https://api.anthropic.com</small>
-                  <em>Autenticación oficial de Claude Code, si está disponible en el equipo.</em>
-                </span>
-                <span className="provider-check">{claudeProvider === "anthropic" ? "✓" : ""}</span>
-              </label>
-            </div>
-            <div className="provider-safety-note">
-              <strong>Configuración detectada automáticamente.</strong> La fábrica lee el endpoint, modelo y presencia de credenciales desde ~/.claude/settings.json; pasa las variables al proceso de Claude Code sin mostrarlas ni registrarlas. No modifica el archivo ni el token.
-              <div className="provider-config-readout">
-                <span>Endpoint: <code>{claudeProviderStatus?.baseUrl || "No detectado"}</code></span>
-                <span>Modelo: <code>{claudeProviderStatus?.model || "No detectado"}</code></span>
-                <span>Credencial: <strong>{claudeProviderStatus?.credentialDetected ? "Detectada" : "No detectada"}</strong></span>
-                <span>API Anthropic compatible: <strong>{claudeProviderStatus?.endpointCompatible ? "Sí" : "No"}</strong></span>
-                <span>Configuración lista: <strong>{claudeProviderStatus?.configured ? "Sí" : "Pendiente de corregir"}</strong></span>
-              </div>
-            </div>
-          </section>
-
           <section className="section-block favorites-block" id="favorites">
             <div className="section-title-row">
               <div>
                 <div className="eyebrow">MODEL PREFERENCES / SMART ROUTING</div>
                 <h2>Modelos favoritos</h2>
-                <p>La asignación automática solo utilizará modelos que marques aquí. Clasifica cada favorito según el nivel de capacidad/costo que quieras reservarle.</p>
+                <p>Los modelos se detectan automáticamente según los motores y conectores disponibles. Marca aquí los que la fábrica podrá asignar y clasifícalos por capacidad/costo.</p>
               </div>
               <button className="secondary-button" type="button" onClick={() => void saveFavorites()} disabled={favoritesSaving}>
                 {favoritesSaving ? "Guardando..." : "Guardar favoritos"} <span>↗</span>
               </button>
             </div>
+            <div className="model-catalog-status">
+              <span><strong>OpenCode</strong> · {models.opencode.length} modelos detectados en sus conectores</span>
+              <span><strong>Claude Code</strong> · {detectedClaudeProviderName} detectado · {claudeDetectedModelCount} modelos del conector</span>
+              <span className={claudeProviderStatus?.configured ? "catalog-status-ready" : "catalog-status-review"}>
+                {claudeProviderStatus?.configured ? "Configuración local detectada" : "Revisar configuración local de Claude Code"}
+              </span>
+            </div>
             <div className="favorite-add-row">
               <div className="select-field">
                 <label htmlFor="favorite-engine">MOTOR</label>
                 <select id="favorite-engine" value={favoriteEngine} onChange={(event) => changeFavoriteEngine(event.target.value as EngineId)}>
-                  <option value="opencode">OpenCode</option><option value="claude">Claude Code · {claudeProvider === "apmix" ? "APMix" : claudeProvider === "opencode-go" ? "OpenCode Go" : "Anthropic"}</option>
+                  <option value="opencode">OpenCode · {models.opencode.length} modelos</option>
+                  <option value="claude">Claude Code · {detectedClaudeProviderName}</option>
                 </select>
               </div>
               <div className="select-field favorite-model-select">
                 <label htmlFor="favorite-model">MODELO DISPONIBLE</label>
-                <select id="favorite-model" value={favoriteModelId} onChange={(event) => setFavoriteModelId(event.target.value)}>
-                  {models[favoriteEngine].map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}
+                <select id="favorite-model" value={favoriteModelId} onChange={(event) => setFavoriteModelId(event.target.value)} disabled={models[favoriteEngine].length === 0}>
+                  {models[favoriteEngine].length === 0
+                    ? <option value="">No se detectaron modelos para este motor</option>
+                    : models[favoriteEngine].map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}
                 </select>
               </div>
               <div className="select-field">
@@ -1028,7 +1083,7 @@ export default function App() {
               {favorites.map((item) => (
                 <div className="favorite-row" key={`${item.engine}:${item.provider}:${item.modelId}`}>
                   <div className="favorite-star">★</div>
-                  <div className="favorite-model-name"><strong>{item.modelId}</strong><small>{item.engine === "claude" ? `Claude Code · ${item.provider}` : "OpenCode"}</small></div>
+                  <div className="favorite-model-name"><strong>{item.modelId}</strong><small>{item.engine === "claude" ? "Claude Code · " + detectedClaudeProviderName : "OpenCode"}</small></div>
                   <span className={`tier-pill tier-${item.tier}`}>{({ economy: "Económico", balanced: "Equilibrado", premium: "Premium" })[item.tier]}</span>
                   <button className="remove-favorite" type="button" onClick={() => removeFavorite(item)} aria-label={`Quitar ${item.modelId}`}>×</button>
                 </div>
@@ -1042,7 +1097,7 @@ export default function App() {
               <div>
                 <div className="eyebrow">01 / PROJECT DISCOVERY</div>
                 <h2>Proyecto de trabajo</h2>
-                <p>Indica el repositorio y describe el objetivo. La fábrica analizará la dificultad y preparará una propuesta de equipo.</p>
+                <p>Indica el repositorio. La fábrica revisará su arquitectura, sus módulos y el volumen de información para recomendar el equipo de agentes, sin necesitar todavía una instrucción de trabajo.</p>
               </div>
               <span className="read-only-tag">PRECONSULTA · SOLO LECTURA</span>
             </div>
@@ -1078,24 +1133,24 @@ export default function App() {
                   <span>↗</span>
                 </button>
               </div>
-              <label htmlFor="project-instructions" className="project-instructions-label">Objetivo e instrucciones para la fábrica</label>
-              <textarea
-                id="project-instructions"
-                className="project-instructions"
-                value={projectInstructions}
-                onChange={(event) => {
-                  setProjectInstructions(event.target.value);
-                  setAnalysis(null);
-                  setPendingAssignments(null);
-                  setRecommendationStatus(null);
-                  setTeamSaved(false);
-                  setPreflightConsumed(false);
-                }}
-                rows={5}
-                maxLength={12000}
-                placeholder="Describe qué necesitas lograr, qué funcionalidades implementar, errores que investigar, criterios de aceptación, restricciones técnicas y qué no debe modificarse..."
-              />
-              <div className="field-hint">Estas instrucciones se guardan localmente y acompañan el análisis. La ruta identifica el repositorio; este campo define el trabajo que quieres realizar.</div>
+              <div className="research-depth-control">
+                <div className="research-depth-heading">
+                  <label>PROFUNDIDAD DE PRECONSULTA</label>
+                  <span>Elige cuánto debe recorrer la fábrica antes de recomendar el equipo.</span>
+                </div>
+                <div className="research-depth-options" role="group" aria-label="Profundidad de preconsulta">
+                  <button type="button" className={researchDepth === "quick" ? "selected" : ""} aria-pressed={researchDepth === "quick"} onClick={() => changeResearchDepth("quick")} disabled={busy}>
+                    <strong>Rápida</strong><small>Vista general</small>
+                  </button>
+                  <button type="button" className={researchDepth === "focused" ? "selected" : ""} aria-pressed={researchDepth === "focused"} onClick={() => changeResearchDepth("focused")} disabled={busy}>
+                    <strong>Focalizada</strong><small>Arquitectura y módulos</small>
+                  </button>
+                  <button type="button" className={researchDepth === "deep" ? "selected" : ""} aria-pressed={researchDepth === "deep"} onClick={() => changeResearchDepth("deep")} disabled={busy}>
+                    <strong>Profunda</strong><small>Recorrido ampliado</small>
+                  </button>
+                </div>
+                <div className="field-hint">La profundidad modifica el alcance del análisis de solo lectura. No determina qué trabajo realizarán después los agentes.</div>
+              </div>
             </form>
 
             {analysis && (
@@ -1114,25 +1169,14 @@ export default function App() {
                   <div><span className="mini-label">ARCHIVOS REVISADOS</span><strong>{analysis.complexity.fileCount}{analysis.complexity.fileCount >= 5000 ? "+" : ""}</strong></div>
                   <div className="complexity-reasons">{analysis.complexity.reasons.map((reason) => <span key={reason}>• {reason}</span>)}</div>
                 </div>
-                <div className="complexity-panel task-plan-panel">
-                  <div><span className="mini-label">COMPLEJIDAD DE LA TAREA</span><strong>{({ low: "Baja", medium: "Media", high: "Alta" })[analysis.taskPlan.complexity]}</strong></div>
-                  <div className="select-field">
-                    <label htmlFor="task-depth">PROFUNDIDAD DE INVESTIGACIÓN</label>
-                    <select id="task-depth" value={analysis.taskPlan.depth} onChange={(event) => {
-                      const depth = event.target.value as TaskPlan["depth"];
-                      setAnalysis((current) => current ? { ...current, taskPlan: { ...current.taskPlan, depth } } : current);
-                    }}>
-                      <option value="quick">Rápida · exploración acotada</option>
-                      <option value="focused">Focalizada · módulo y dependencias</option>
-                      <option value="deep">Profunda · análisis amplio</option>
-                    </select>
-                  </div>
-                  <div><span className="mini-label">TIPO DE TRABAJO</span><strong>{({ explanation: "Explicación", diagnosis: "Diagnóstico", implementation: "Implementación", testing: "Pruebas", "architecture-review": "Revisión arquitectónica", general: "General" })[analysis.taskPlan.kind]}</strong></div>
-                  <div><span className="mini-label">EQUIPO PROPUESTO</span><strong>{analysis.taskPlan.recommendedAgents.length} agente(s)</strong></div>
+                <div className="complexity-panel project-plan-panel">
+                  <div><span className="mini-label">PROFUNDIDAD UTILIZADA</span><strong>{({ quick: "Rápida", focused: "Focalizada", deep: "Profunda" })[analysis.projectPlan.depth]}</strong></div>
+                  <div><span className="mini-label">MÓDULOS DETECTADOS</span><strong>{analysis.projectStructure.modules.length}</strong></div>
+                  <div><span className="mini-label">EQUIPO RECOMENDADO</span><strong>{analysis.projectPlan.recommendedAgents.length} agente(s)</strong></div>
                   <div className="complexity-reasons">
-                    {analysis.taskPlan.reasons.map((reason) => <span key={reason}>• {reason}</span>)}
-                    <span>• Sin límite de duración. La profundidad solo orienta el alcance de la investigación.</span>
-                    <span>• {analysis.taskPlan.changesExpected ? "La tarea solicita cambios." : "Tarea de solo lectura: no se esperan modificaciones."}</span>
+                    {analysis.projectPlan.reasons.map((reason) => <span key={reason}>• {reason}</span>)}
+                    <span>• La recomendación se basa en la estructura y volumen del proyecto, no en una tarea todavía no definida.</span>
+                    <span>• El tipo de trabajo y los especialistas necesarios podrán ajustarse cuando envíes tu primera instrucción en el chat.</span>
                   </div>
                 </div>
                 {analysis.recommendationReady && pendingAssignments && (
@@ -1141,7 +1185,7 @@ export default function App() {
                       <div>
                         <span className="terminal-kicker">ROUTING / PREVIEW</span>
                         <strong>Equipo recomendado: {pendingAssignments.filter((item) => item.enabled).length} de {pendingAssignments.length} agentes</strong>
-                        <p>Puedes activar o desactivar especialistas y ajustar la profundidad antes de aceptar. Los modelos siguen limitados a tus favoritos.</p>
+                        <p>Puedes activar o desactivar especialistas antes de aceptar. La profundidad ya se eligió en Proyecto de trabajo. Los modelos siguen limitados a tus favoritos.</p>
                         <p>La fábrica eligió exclusivamente entre tus modelos favoritos. Todavía no se ha aplicado ni guardado ningún cambio.</p>
                       </div>
                       <span className="pending-tag">PENDIENTE DE TU DECISIÓN</span>
@@ -1154,7 +1198,7 @@ export default function App() {
                             <span />
                           </label>
                           <strong>{roleNames[item.agentId] ?? item.agentId}</strong>
-                          <span>{item.engine === "claude" ? "Claude Code · " + (claudeProvider === "apmix" ? "APMix" : claudeProvider === "opencode-go" ? "OpenCode Go" : "Anthropic") : "OpenCode"}</span>
+                          <span>{item.engine === "claude" ? "Claude Code · " + detectedClaudeProviderName : "OpenCode"}</span>
                           <code>★ {item.modelId}</code>
                         </div>
                       ))}
@@ -1167,8 +1211,8 @@ export default function App() {
                 )}
                 {!analysis.recommendationReady && recommendationStatus === null && (
                   <div className="recommendation-ready manual-choice">
-                    <strong>No hay favoritos configurados para generar una propuesta.</strong>
-                    <p>Puedes continuar configurando manualmente el motor, modelo y permisos de cada agente.</p>
+                    <strong>No hay favoritos configurados para generar una propuesta automática.</strong>
+                    <p>La preconsulta ya detectó la estructura del proyecto. Añade modelos favoritos y vuelve a consultar, o configura manualmente el equipo.</p>
                     <button className="secondary-button" type="button" onClick={chooseManualConfiguration}>Configurar equipo manualmente</button>
                   </div>
                 )}
@@ -1188,7 +1232,18 @@ export default function App() {
                     <div className="tag-list">{analysis.manifests.map((item) => <span className="soft-tag" key={item}>{item}</span>)}</div>
                   </div>
                   <div>
-                    <div className="mini-label">INSTRUCCIONES</div>
+                    <div className="mini-label">DIRECTORIOS PRINCIPALES</div>
+                    <div className="tag-list">{analysis.projectStructure.topLevelDirectories.map((item) => <span className="soft-tag" key={item}>{item}/</span>)}</div>
+                  </div>
+                  <div>
+                    <div className="mini-label">MÓDULOS / MANIFIESTOS INTERNOS</div>
+                    <div className="tag-list">
+                      {analysis.projectStructure.modules.map((item) => <span className="soft-tag" key={item}>{item}</span>)}
+                      {analysis.projectStructure.modules.length === 0 && <span className="field-hint">No se detectaron submódulos con manifiestos propios.</span>}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="mini-label">ARCHIVOS DE CONTEXTO</div>
                     <div className="tag-list">{analysis.instructions.map((item) => <span className="soft-tag" key={item}>{item}</span>)}</div>
                   </div>
                 </div>
@@ -1203,8 +1258,6 @@ export default function App() {
               </div>
             )}
           </section>
-
-          {!execution && executionMonitoringPanels}
 
           <section className="section-block" id="team">
             <div className="section-title-row">
@@ -1275,16 +1328,36 @@ export default function App() {
                       {!engineAvailable && <span className="field-hint warning-text">El motor no aparece instalado en este equipo.</span>}
                     </div>
                     <div className="select-field">
-                      <label htmlFor={`permission-${agent.id}`}>PERMISOS</label>
+                      <label htmlFor={`permission-${agent.id}`}>POLÍTICA DE PERMISOS</label>
                       <select
                         id={`permission-${agent.id}`}
-                        value={assignment.permissionProfile}
-                        onChange={(event) => updateAssignment(agent.id, { permissionProfile: event.target.value as PermissionProfile })}
+                        value={assignment.permissionMode === "automatic" ? "automatic" : assignment.permissionProfile}
+                        onChange={(event) => {
+                          const value = event.target.value;
+                          if (value === "automatic") {
+                            updateAssignment(agent.id, { permissionMode: "automatic" });
+                          } else {
+                            updateAssignment(agent.id, {
+                              permissionMode: "manual",
+                              permissionProfile: value as PermissionProfile
+                            });
+                          }
+                        }}
                       >
-                        <option value="read-only">{permissionNames["read-only"]}</option>
-                        <option value="approval-required">{permissionNames["approval-required"]}</option>
-                        <option value="workspace-write">{permissionNames["workspace-write"]}</option>
+                        <option value="automatic">Automático según la tarea</option>
+                        <option value="read-only">Manual · {permissionNames["read-only"]}</option>
+                        <option value="approval-required">Manual · {permissionNames["approval-required"]}</option>
+                        <option value="workspace-write">Manual · {permissionNames["workspace-write"]}</option>
                       </select>
+                      <span className="field-hint">
+                        {assignment.permissionMode === "automatic"
+                          ? agent.id === "implementer"
+                            ? "Recibirá escritura solo cuando el planificador detecte una tarea de implementación."
+                            : agent.id === "tester"
+                              ? "Conservará aprobación humana para ejecutar pruebas y comandos."
+                              : "Permanecerá en solo lectura para analizar o revisar sin alterar el proyecto."
+                          : "Se respetará este perfil fijo aunque la tarea requiera otro nivel de acceso."}
+                      </span>
                     </div>
                   </article>
                 );
@@ -1292,7 +1365,7 @@ export default function App() {
             </div>
             <div className="helper-banner">
               <span className="helper-icon">i</span>
-              <div><strong>Permisos aplicados por sesión.</strong> Solo lectura impide escribir; Escritura en workspace permite cambios de archivos dentro del proyecto; Requiere aprobación pausa el agente antes de operaciones protegidas. Las credenciales y los archivos sensibles quedan bloqueados.</div>
+              <div><strong>Permisos automáticos y temporales.</strong> El planificador adapta los permisos a cada tarea: solo el Implementer recibe escritura en el workspace cuando se solicitan cambios; Tester conserva la aprobación humana para comandos; los demás especialistas permanecen en lectura. Puedes fijar un perfil manual para bloquear la automatización en un agente. Los cambios nunca amplían el acceso a credenciales, archivos sensibles ni rutas externas.</div>
             </div>
           </section>
 
@@ -1300,43 +1373,270 @@ export default function App() {
             <div className="section-title-row">
               <div>
                 <div className="eyebrow">03 / ORCHESTRATED EXECUTION</div>
-                <h2>Comenzar instrucciones</h2>
-                <p>Una vez validado el proyecto, aceptado el equipo y guardadas las asignaciones, inicia el trabajo real de los agentes.</p>
+                <h2>{execution && (activeExecution || preflightConsumed) ? "Trabajo en conversación" : canStartExecution ? "Tu espacio de trabajo" : "Comenzar instrucciones"}</h2>
+                <p>{execution && (activeExecution || preflightConsumed)
+                  ? "Sigue la actividad de los motores, consulta los resultados y continúa el mismo proceso cuando quieras."
+                  : canStartExecution
+                    ? "El proyecto ya está analizado y el equipo está listo. Escribe tu primera instrucción en el chat para comenzar."
+                    : "La preconsulta analiza el proyecto sin instrucciones. Después de aceptar la propuesta y guardar el equipo, podrás iniciar el trabajo desde el chat."}</p>
               </div>
               <span className={activeExecution ? "terminal-status" : "read-only-tag"}>
                 {activeExecution ? statusLabels[execution?.run.status ?? "running"] : teamSaved ? "EQUIPO GUARDADO" : "CONFIGURACIÓN PENDIENTE"}
               </span>
             </div>
-            <div className="execution-launch-panel">
-              <div className="execution-launch-copy">
-                <span className="terminal-kicker">FACTORY ORCHESTRATOR</span>
-                <strong>¿Todo listo para iniciar?</strong>
-                <p>La fábrica creará una ejecución, abrirá sesiones independientes por agente y distribuirá el objetivo. El trabajo se supervisará desde este panel.</p>
-                <div className="execution-checks">
-                  <span className={analysis ? "check-ok" : "check-pending"}>{analysis ? "✓" : "○"} Preconsulta del proyecto</span>
-                  <span className={["accepted", "manual"].includes(recommendationStatus ?? "") ? "check-ok" : "check-pending"}>{["accepted", "manual"].includes(recommendationStatus ?? "") ? "✓" : "○"} Propuesta aceptada o configuración manual</span>
-                  <span className={teamSaved ? "check-ok" : "check-pending"}>{teamSaved ? "✓" : "○"} Equipo guardado</span>
-                  <span className={projectPath.trim() && projectInstructions.trim() ? "check-ok" : "check-pending"}>{projectPath.trim() && projectInstructions.trim() ? "✓" : "○"} Proyecto e instrucciones definidos</span>
-                  <span className={configuredCount > 0 ? "check-ok" : "check-pending"}>{configuredCount > 0 ? "✓" : "○"} {configuredCount} agentes habilitados</span>
+            {(!canStartExecution && !preflightConsumed && !activeExecution || activeExecution) && (
+              <div className="execution-launch-panel">
+                <div className="execution-launch-copy">
+                  <span className="terminal-kicker">FACTORY ORCHESTRATOR</span>
+                  <strong>{activeExecution ? "Ejecución en curso" : "Preparación del trabajo"}</strong>
+                  <p>{activeExecution
+                    ? "Los motores están trabajando. Puedes detener la ejecución desde aquí."
+                    : "Completa la preconsulta, acepta la recomendación o configura el equipo manualmente y guarda las asignaciones. La primera tarea se escribirá en el chat."}</p>
+                  <div className="execution-checks">
+                    <span className={analysis ? "check-ok" : "check-pending"}>{analysis ? "✓" : "○"} Preconsulta del proyecto</span>
+                    <span className={["accepted", "manual"].includes(recommendationStatus ?? "") ? "check-ok" : "check-pending"}>{["accepted", "manual"].includes(recommendationStatus ?? "") ? "✓" : "○"} Propuesta aceptada o configuración manual</span>
+                    <span className={teamSaved ? "check-ok" : "check-pending"}>{teamSaved ? "✓" : "○"} Equipo guardado</span>
+                    <span className={configuredCount > 0 ? "check-ok" : "check-pending"}>{configuredCount > 0 ? "✓" : "○"} {configuredCount} agentes habilitados</span>
+                  </div>
+                </div>
+                <div className="execution-launch-action">
+                  {activeExecution && (
+                    <button className="danger-button" type="button" onClick={() => void cancelCurrentExecution()} disabled={executionCancelling}>
+                      {executionCancelling ? "Cancelando..." : "Detener ejecución"} <span>■</span>
+                    </button>
+                  )}
+                  <small>{activeExecution
+                    ? "La ejecución está en curso."
+                    : "Cuando el equipo esté guardado, la entrada de chat aparecerá aquí."}</small>
                 </div>
               </div>
-              <div className="execution-launch-action">
-                {activeExecution ? (
-                  <button className="danger-button" type="button" onClick={() => void cancelCurrentExecution()} disabled={executionCancelling}>
-                    {executionCancelling ? "Cancelando..." : "Detener ejecución"} <span>■</span>
-                  </button>
-                ) : (
-                  <button className="execution-start-button" type="button" onClick={() => void startInstructions()} disabled={!canStartExecution}>
-                    <span className="execution-play-icon">▶</span>
-                    <span>{executionStarting ? "Preparando..." : "COMENZAR INSTRUCCIONES"}</span>
-                  </button>
-                )}
-                <small>{canStartExecution ? "Listo para iniciar una ejecución real." : activeExecution ? "La ejecución está en curso." : preflightConsumed ? "La preconsulta ya se utilizó. Ejecuta una nueva preconsulta para iniciar otra ejecución." : "Completa los pasos pendientes para habilitar el inicio."}</small>
-              </div>
-            </div>
+            )}
 
-            {execution && (
-              <div className="execution-status-panel">
+
+            {canStartExecution && !activeExecution && (
+              <section className="factory-conversation factory-conversation-ready" aria-label="Primera instrucción de trabajo">
+                <div className="factory-conversation-heading">
+                  <div>
+                    <span className="conversation-kicker">PROYECTO PRECONSULTADO · EQUIPO GUARDADO</span>
+                    <h3>¿Qué necesitas que hagamos en este proyecto?</h3>
+                    <p>Cuéntale a la fábrica qué quieres conseguir. OpenCode y Claude Code se coordinarán con el equipo que acabas de validar.</p>
+                  </div>
+                  <span className="conversation-state is-done"><span />LISTO PARA COMENZAR</span>
+                </div>
+                <form className="conversation-composer" onSubmit={(event) => void submitWorkInstruction(event)}>
+                  <label htmlFor="continuation-instructions">Tu primera instrucción</label>
+                  <textarea
+                    id="continuation-instructions"
+                    value={continuationText}
+                    onChange={(event) => setContinuationText(event.target.value)}
+                    placeholder="Describe qué necesitas: implementar una funcionalidad, investigar un error, crear pruebas, revisar un módulo o cualquier otra tarea..."
+                    rows={4}
+                    maxLength={12000}
+                    disabled={executionStarting || continuationBusy}
+                  />
+                  <div className="conversation-composer-footer">
+                    <span>La preconsulta ya terminó. Esta instrucción iniciará el proceso y quedará guardada como el primer mensaje de la conversación.</span>
+                    <button className="primary-button" type="submit" disabled={!continuationText.trim() || executionStarting || continuationBusy}>
+                      {executionStarting ? "Iniciando..." : "Comenzar trabajo"} <span>↗</span>
+                    </button>
+                  </div>
+                </form>
+              </section>
+            )}
+
+
+            {execution && (activeExecution || preflightConsumed) && (
+              <>
+                <section className="factory-conversation" aria-label="Conversación de trabajo de la fábrica">
+                  <div className="factory-conversation-heading">
+                    <div>
+                      <span className="conversation-kicker">FACTORY SESSION · RONDA {execution.run.roundNumber}</span>
+                      <h3>Tu trabajo, en directo</h3>
+                      <p>OpenCode y Claude Code muestran aquí su actividad real. Al terminar, la fábrica reúne sus resultados en una respuesta clara.</p>
+                    </div>
+                    <span className={"conversation-state " + (activeExecution ? "is-live" : execution.run.status === "succeeded" ? "is-done" : "is-observed")}>
+                      <span />{activeExecution ? "TRABAJO EN CURSO" : statusLabels[execution.run.status] ?? execution.run.status}
+                    </span>
+                  </div>
+
+
+                  {(() => {
+                    const currentMessages = workThread?.messages.filter((message) =>
+                      message.roundNumber === execution.run.roundNumber && message.role !== "assistant"
+                    ) ?? [];
+                    const olderMessages = workThread?.messages.filter((message) =>
+                      message.roundNumber < execution.run.roundNumber
+                    ) ?? [];
+                    const hasCurrentUserMessage = currentMessages.some((message) => message.role === "user");
+                    return (
+                      <>
+                        <div className="conversation-transcript">
+                          {currentMessages.map((message) => (
+                            <article className={"conversation-message conversation-message-" + message.role} key={message.id}>
+                              <div className="conversation-message-meta">
+                                <strong>{message.role === "user" ? "TÚ" : "ACTUALIZACIÓN"}</strong>
+                                <span>RONDA {message.roundNumber} · {new Date(message.createdAt).toLocaleString("es-CO")}</span>
+                              </div>
+                              {message.role === "user" && message.content.length > 1000 ? (
+                                <details className="conversation-long-message">
+                                  <summary>
+                                    <span>{presentConversationalText(message.content.slice(0, 420))}…</span>
+                                    <strong>Ver instrucciones completas</strong>
+                                  </summary>
+                                  <pre>{message.content}</pre>
+                                </details>
+                              ) : (
+                                <p className="conversation-message-copy">{presentConversationalText(message.content)}</p>
+                              )}
+                            </article>
+                          ))}
+                          {!hasCurrentUserMessage && (
+                            <article className="conversation-message conversation-message-user">
+                              <div className="conversation-message-meta">
+                                <strong>TÚ</strong><span>RONDA {execution.run.roundNumber}</span>
+                              </div>
+                              {execution.run.instructions.length > 1000 ? (
+                                <details className="conversation-long-message">
+                                  <summary>
+                                    <span>{presentConversationalText(execution.run.instructions.slice(0, 420))}…</span>
+                                    <strong>Ver instrucciones completas</strong>
+                                  </summary>
+                                  <pre>{execution.run.instructions}</pre>
+                                </details>
+                              ) : (
+                                <p className="conversation-message-copy">{presentConversationalText(execution.run.instructions)}</p>
+                              )}
+                            </article>
+                          )}
+                        </div>
+                        {olderMessages.length > 0 && (
+                          <details className="conversation-history">
+                            <summary>Ver conversación anterior · {olderMessages.length} mensajes de {workThread?.rounds.length ?? 0} rondas</summary>
+                            <div className="conversation-history-list">
+                              {olderMessages.map((message) => (
+                                <article className={"conversation-message conversation-message-" + message.role} key={message.id}>
+                                  <div className="conversation-message-meta">
+                                    <strong>{message.role === "user" ? "TÚ" : message.role === "assistant" ? "FÁBRICA" : "ACTUALIZACIÓN"}</strong>
+                                    <span>RONDA {message.roundNumber} · {new Date(message.createdAt).toLocaleString("es-CO")}</span>
+                                  </div>
+                                  <p className="conversation-message-copy">{presentConversationalText(message.content)}</p>
+                                </article>
+                              ))}
+                            </div>
+                          </details>
+                        )}
+                      </>
+                    );
+                  })()}
+
+
+                  <div className="engine-console-heading">
+                    <div>
+                      <span className="conversation-kicker">MOTORES EN ACCIÓN</span>
+                      <h4>Así están trabajando los agentes</h4>
+                    </div>
+                    <span className="engine-console-refresh"><span /> Actividad sincronizada con las sesiones</span>
+                  </div>
+                  <div className="engine-console-grid">
+                    <EngineActivityPanel engine="opencode" execution={execution} roleNames={roleNames} statusLabels={statusLabels} />
+                    <EngineActivityPanel engine="claude" execution={execution} roleNames={roleNames} statusLabels={statusLabels} />
+                  </div>
+
+                  {execution.decisions.length > 0 && decisionMonitoringPanel}
+
+                  {(() => {
+                    const currentAssistantMessage = workThread?.messages.find((message) =>
+                      message.role === "assistant" &&
+                      (message.runId === execution.run.id || message.roundNumber === execution.run.roundNumber)
+                    );
+                    const currentSummary = execution.run.summary ??
+                      workThread?.rounds.find((round) => round.run.id === execution.run.id)?.run.summary;
+                    if (currentAssistantMessage && currentSummary) {
+                      return (
+                        <article className="conversation-result-card">
+                          <div className="conversation-result-meta">
+                            <div>
+                              <span className="conversation-kicker">RESPUESTA DE LA FÁBRICA</span>
+                              <h4>{currentSummary.headline}</h4>
+                            </div>
+                            <span className={"conversation-verdict verdict-" + currentSummary.verdict}>
+                              {currentSummary.verdict === "completed" ? "COMPLETADO" : currentSummary.verdict === "observations" ? "CON OBSERVACIONES" : "REQUIERE ATENCIÓN"}
+                            </span>
+                          </div>
+                          <p className="conversation-result-overview">{presentConversationalText(currentSummary.overview)}</p>
+                          {currentSummary.findings.length > 0 && (
+                            <div className="conversation-answer-section">
+                              <strong>Lo importante que encontramos</strong>
+                              <ul>{currentSummary.findings.map((item, index) => <li key={index}>{item}</li>)}</ul>
+                            </div>
+                          )}
+                          {currentSummary.nextSteps.length > 0 && (
+                            <div className="conversation-answer-section">
+                              <strong>Cómo podemos continuar</strong>
+                              <ul>{currentSummary.nextSteps.map((item, index) => <li key={index}>{item}</li>)}</ul>
+                            </div>
+                          )}
+                          <details className="conversation-original-answer">
+                            <summary>Ver respuesta completa y datos de consolidación</summary>
+                            <pre>{currentAssistantMessage.content}</pre>
+                          </details>
+                        </article>
+                      );
+                    }
+                    if (currentSummary) {
+                      return (
+                        <article className="conversation-result-card">
+                          <div className="conversation-result-meta">
+                            <div><span className="conversation-kicker">RESPUESTA DE LA FÁBRICA</span><h4>{currentSummary.headline}</h4></div>
+                            <span className={"conversation-verdict verdict-" + currentSummary.verdict}>
+                              {currentSummary.verdict === "completed" ? "COMPLETADO" : currentSummary.verdict === "observations" ? "CON OBSERVACIONES" : "REQUIERE ATENCIÓN"}
+                            </span>
+                          </div>
+                          <p className="conversation-result-overview">{presentConversationalText(currentSummary.overview)}</p>
+                          {currentSummary.findings.length > 0 && <div className="conversation-answer-section"><strong>Lo importante que encontramos</strong><ul>{currentSummary.findings.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+                          {currentSummary.nextSteps.length > 0 && <div className="conversation-answer-section"><strong>Cómo podemos continuar</strong><ul>{currentSummary.nextSteps.map((item, index) => <li key={index}>{item}</li>)}</ul></div>}
+                        </article>
+                      );
+                    }
+                    return null;
+                  })()}
+
+                  {activeExecution && (
+                    <div className="conversation-live-note">
+                      <span className="conversation-live-pulse" />
+                      Los motores siguen trabajando. La respuesta consolidada aparecerá aquí cuando terminen las fases y la revisión final.
+                    </div>
+                  )}
+
+                  {workThread && execution.run.threadId === workThread.thread.id && (
+                    <form className="conversation-composer" onSubmit={(event) => void submitWorkInstruction(event)}>
+                      <label htmlFor="continuation-instructions">¿Qué hacemos a continuación?</label>
+                      <textarea
+                        id="continuation-instructions"
+                        value={continuationText}
+                        onChange={(event) => setContinuationText(event.target.value)}
+                        placeholder="Escribe tu siguiente instrucción. Puedes pedir una corrección, profundizar en un hallazgo, solicitar pruebas o continuar con otra tarea..."
+                        rows={3}
+                        maxLength={12000}
+                        disabled={activeExecution || continuationBusy}
+                      />
+                      <div className="conversation-composer-footer">
+                        <span>El proceso conserva el contexto, los resultados y la evidencia de las rondas anteriores.</span>
+                        <button className="primary-button" type="submit" disabled={!continuationText.trim() || activeExecution || continuationBusy || executionStarting}>
+                          {continuationBusy || executionStarting ? "Preparando..." : "Enviar instrucción"} <span>↗</span>
+                        </button>
+                      </div>
+                    </form>
+                  )}
+                </section>
+
+                <details className="factory-technical-audit">
+                  <summary>
+                    <span className="audit-summary-title">Ver toda la evidencia técnica y configuración de la ejecución</span>
+                    <span className="audit-summary-caption">Sesiones, estados, permisos, logs originales, pruebas, handoffs, hashes, aprobaciones e informes completos</span>
+                  </summary>
+                  <div className="factory-technical-audit-content">
+                <div className="execution-status-panel">
                 <div className="execution-status-heading">
                   <div>
                     <span className="terminal-kicker">EXECUTION ID · {execution.run.id}</span>
@@ -1363,7 +1663,7 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-                {executionMonitoringPanels}
+                {activityMonitoringPanel}
                 {execution.run.summary ? (
                   <div className="execution-summary">
                     <div className="execution-summary-heading">
@@ -1583,7 +1883,16 @@ export default function App() {
                                       <strong>{roleNames[assignment.agentId] ?? assignment.agentId}</strong>
                                       {assignment.enabled ? " · " : " · OMITIDO · "}
                                       {assignment.engine === "claude" ? "Claude Code" : "OpenCode"} · {assignment.modelId}
-                                      {" · "}{assignment.permissionProfile}
+                                      {" · "}{assignment.permissionMode === "automatic"
+                                        ? "AUTOMÁTICO · configurado " + assignment.permissionProfile
+                                        : assignment.permissionMode === "manual"
+                                          ? "MANUAL · " + assignment.permissionProfile
+                                          : "PERFIL HISTÓRICO · " + assignment.permissionProfile}
+                                      {(() => {
+                                        const effective = matchingRound.run.configurationSnapshot?.permissionResolution
+                                          ?.find((item) => item.agentId === assignment.agentId);
+                                        return effective ? " · efectivo " + effective.effectiveProfile : "";
+                                      })()}
                                     </span>
                                   ))}
                                   <small>
@@ -1621,25 +1930,7 @@ export default function App() {
                         </div>
                       )}
                     </div>
-                    <form className="work-continuation-composer" onSubmit={(event) => void continueWork(event)}>
-                      <label htmlFor="continuation-instructions">Nueva instrucción para continuar el mismo proceso</label>
-                      <textarea
-                        id="continuation-instructions"
-                        value={continuationText}
-                        onChange={(event) => setContinuationText(event.target.value)}
-                        placeholder="Ej.: Revisemos ahora el hallazgo número 2, contrastemos las alternativas y propongamos una solución..."
-                        rows={4}
-                        maxLength={12000}
-                        disabled={activeExecution || continuationBusy}
-                      />
-                      <div className="work-composer-footer">
-                        <span>La siguiente ronda vuelve a leer las instrucciones y Skills vigentes, y usa agentes, modelos favoritos y permisos guardados. Las rondas anteriores no cambian.</span>
-                        <button className="primary-button" type="submit" disabled={!continuationText.trim() || activeExecution || continuationBusy}>
-                          {continuationBusy ? "Preparando ronda..." : "Continuar proceso"}
-                          <span>↗</span>
-                        </button>
-                      </div>
-                    </form>
+
                   </section>
                 )}
                 <div className="execution-run-meta">
@@ -1647,7 +1938,11 @@ export default function App() {
                   <span>Última actualización: {new Date(execution.run.updatedAt).toLocaleString("es-CO")}</span>
                 </div>
               </div>
+                  </div>
+                </details>
+              </>
             )}
+
             {!canStartExecution && !activeExecution && (
               <div className="execution-guidance">
                 <strong>Antes de comenzar:</strong> realiza la preconsulta, elige o acepta la propuesta, revisa los permisos de cada agente y guarda el equipo. Para que el Implementador pueda modificar código, asigna Escritura en workspace o Requiere aprobación según el nivel de supervisión que prefieras.
@@ -1685,6 +1980,198 @@ export default function App() {
     </div>
   );
 }
+
+
+type EngineActivityPanelProps = {
+  engine: EngineId;
+  execution: ExecutionData;
+  roleNames: Record<string, string>;
+  statusLabels: Record<string, string>;
+};
+
+function describeEngineActivity(message: string, kind: string): {
+  type: "output" | "tool" | "status" | "warning";
+  title: string;
+  detail?: string;
+  state?: string;
+} {
+  if (message.startsWith("TOOL ")) {
+    const toolName = message.slice(5).split(" · ")[0]?.trim() || "herramienta";
+    const lower = toolName.toLowerCase();
+    const title = lower.includes("list_files") ? "Explorando la estructura del proyecto"
+      : lower.includes("read_file") ? "Consultando archivos del proyecto"
+      : lower.includes("search_text") || lower.includes("grep") ? "Buscando referencias en el código"
+      : lower.includes("shell") || lower.includes("bash") ? "Ejecutando un comando autorizado"
+      : lower.includes("edit") || lower.includes("write") ? "Trabajando sobre un archivo"
+      : lower.includes("test") ? "Ejecutando verificaciones"
+      : "Utilizando una herramienta de trabajo";
+    const statusMatch = message.match(/ · (running|completed|success|error|failed|pending|in_progress|en ejecución)\b/i);
+    const state = statusMatch?.[1]?.toLowerCase();
+    return {
+      type: "tool",
+      title,
+      state: state === "completed" || state === "success" ? "Completado"
+        : state === "error" || state === "failed" ? "Con error"
+        : state === "pending" ? "Pendiente"
+        : "En curso",
+      detail: message
+    };
+  }
+  if (/Comienza la fase\./i.test(message)) {
+    return { type: "status", title: "El especialista comenzó a trabajar.", detail: message };
+  }
+  if (/Fase .* terminada\./i.test(message)) {
+    return { type: "status", title: "El especialista terminó su intervención.", detail: message };
+  }
+  if (/Sesión OpenCode creada|Sesión Claude Code:/i.test(message)) {
+    return { type: "status", title: "La sesión de trabajo está preparada.", detail: message };
+  }
+  if (/inicializó el contexto de trabajo/i.test(message)) {
+    return { type: "status", title: "Preparó el contexto y las herramientas de trabajo.", detail: message };
+  }
+  if (/MCP factory_filesystem conectado/i.test(message)) {
+    return { type: "status", title: "El acceso seguro al proyecto está listo.", detail: message };
+  }
+  if (/se espera la conexión del MCP|se espera antes de iniciar sesiones/i.test(message)) {
+    return { type: "status", title: "Preparando las herramientas seguras del proyecto.", detail: message };
+  }
+  if (/Bloqueo del perfil|Bloqueo de aislamiento|se rechazó la escritura/i.test(message)) {
+    return { type: "warning", title: "Una operación fue detenida por las reglas de seguridad.", detail: message };
+  }
+  if (/Claude SDK:|error interno|no fue posible|no se pudo/i.test(message) || kind === "warning") {
+    return { type: "warning", title: "El motor informó una incidencia que requiere revisión.", detail: message };
+  }
+  if (kind === "success") {
+    return { type: "output", title: message };
+  }
+  return { type: "status", title: message.length > 220 ? message.slice(0, 217) + "…" : message, detail: message };
+}
+
+function EngineActivityPanel({ engine, execution, roleNames, statusLabels }: EngineActivityPanelProps) {
+  const agentRuns = execution.agents.filter((agent) => agent.engine === engine);
+  const agentRunIds = new Set(agentRuns.map((agent) => agent.id));
+  const events = execution.events.filter((event) =>
+    (event.agentRunId !== null && agentRunIds.has(event.agentRunId)) ||
+    (engine === "opencode" && event.agentRunId === null && event.area === "OPENCODE-SERVER")
+  );
+  const isActive = agentRuns.some((agent) => ["queued", "running", "waiting"].includes(agent.status));
+  const isWaiting = agentRuns.some((agent) => agent.status === "waiting");
+  const allSucceeded = agentRuns.length > 0 && agentRuns.every((agent) => agent.status === "succeeded");
+  const title = engine === "opencode" ? "OpenCode" : "Claude Code";
+  const status = agentRuns.length === 0 ? "Sin agentes en esta ronda"
+    : isWaiting ? "Esperando tu decisión"
+    : isActive ? "Trabajando"
+    : allSucceeded ? "Trabajo completado"
+    : agentRuns.some((agent) => agent.status === "failed") ? "Requiere revisión"
+    : "Ronda finalizada";
+  const visibleEvents = events.slice(-36);
+
+  return (
+    <section className={"engine-console engine-console-" + engine} aria-label={"Actividad real de " + title}>
+      <header className="engine-console-header">
+        <div className="engine-console-brand">
+          <span className="engine-console-mark">{engine === "opencode" ? "O" : "C"}</span>
+          <div>
+            <strong>{title}</strong>
+            <span>{agentRuns.length} especialista(s) asignado(s)</span>
+          </div>
+        </div>
+        <span className={"engine-console-state " + (isActive ? "is-running" : allSucceeded ? "is-success" : "is-idle")}>
+          <span />{status}
+        </span>
+      </header>
+
+      <div className="engine-console-agents">
+        {agentRuns.length > 0 ? agentRuns.map((agent) => (
+          <span
+            className={"engine-agent-chip engine-agent-" + agent.status}
+            key={agent.id}
+            title={title + " · " + agent.modelId + " · " + agent.permissionProfile}
+          >
+            {roleNames[agent.agentId] ?? agent.agentId}
+            <small>{statusLabels[agent.status] ?? agent.status}</small>
+          </span>
+        )) : (
+          <span className="engine-no-agents">Este motor no tiene especialistas asignados en esta ronda.</span>
+        )}
+      </div>
+
+      <div className="engine-terminal-screen" aria-live="polite">
+        <div className="engine-terminal-toolbar">
+          <span className="engine-terminal-lights"><i /><i /><i /></span>
+          <span>{engine === "opencode" ? "opencode" : "claude"} · salida de sesión</span>
+          <span className="engine-terminal-live">{isActive ? "LIVE" : "LOG"}</span>
+        </div>
+        <div className="engine-terminal-events">
+          {visibleEvents.length === 0 && (
+            <div className="engine-terminal-placeholder">
+              <span>{agentRuns.length ? "Sesión preparada." : "Sin actividad para este motor."}</span>
+              <span>{isActive ? "Esperando los primeros eventos de los especialistas…" : "La actividad de esta ronda aparecerá aquí."}</span>
+            </div>
+          )}
+          {visibleEvents.map((event) => {
+            const agent = event.agentRunId ? agentRuns.find((item) => item.id === event.agentRunId) : undefined;
+            const presentation = describeEngineActivity(event.message, event.kind);
+            return (
+              <article className={"engine-event engine-event-" + presentation.type} key={event.id}>
+                <div className="engine-event-meta">
+                  <span>{agent ? (roleNames[agent.agentId] ?? agent.agentId) : title}</span>
+                  <time>{new Date(event.createdAt).toLocaleTimeString("es-CO", { hour12: false })}</time>
+                </div>
+                {presentation.type === "output" ? (
+                  <>
+                    <div className="engine-event-output">
+                      {presentConversationalText(presentation.title.length > 520 ? presentation.title.slice(0, 520).trimEnd() + "…" : presentation.title)}
+                    </div>
+                    {presentation.title.length > 520 && (
+                      <details className="engine-event-detail">
+                        <summary>Ver respuesta completa del motor</summary>
+                        <pre>{presentation.title}</pre>
+                      </details>
+                    )}
+                  </>
+                ) : (
+                  <div className="engine-event-summary">
+                    <span className="engine-event-symbol">
+                      {presentation.type === "tool" ? "›" : presentation.type === "warning" ? "!" : "•"}
+                    </span>
+                    <strong>{presentation.title}</strong>
+                    {presentation.state && <span className="engine-tool-state">{presentation.state}</span>}
+                  </div>
+                )}
+                {presentation.detail && (
+                  <details className="engine-event-detail">
+                    <summary>{presentation.type === "tool" ? "Ver operación y parámetros" : "Ver registro original"}</summary>
+                    <pre>{presentation.detail}</pre>
+                  </details>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      </div>
+      <footer className="engine-console-footer">
+        <span>{events.length} eventos capturados</span>
+        <span>{agentRuns.filter((agent) => agent.status === "succeeded").length}/{agentRuns.length} especialistas completados</span>
+      </footer>
+    </section>
+  );
+}
+
+
+function presentConversationalText(value: string): string {
+  return value
+    .replace(/\r\n/g, "\n")
+    .replace(/\*\*(.*?)\*\*/g, "$1")
+    .replace(/(?<!\*)\*([^*\n]+)\*(?!\*)/g, "$1")
+    .replace(/\x60([^\x60]+)\x60/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^\s*[-*]\s+/gm, "• ")
+    .replace(/^(\s*)\d+\.\s+/gm, "$1• ")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 
 function EngineCard({ engine, description, modelCount }: {
   engine?: EngineStatus;

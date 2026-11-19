@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { basename, isAbsolute, relative, resolve, sep } from "node:path";
 import { readdir, realpath, stat } from "node:fs/promises";
-import { planTask, type TaskPlan } from "./task-planner.js";
+import { recommendProjectTeam, type ProjectTeamRecommendation, type ResearchDepth } from "./task-planner.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -29,9 +29,16 @@ export interface ProjectAnalysis {
   git: { isRepository: boolean; status: string[] };
   recommendations: string[];
   mode: "read-only";
-  objective: string;
+  projectStructure: {
+    topLevelDirectories: string[];
+    modules: string[];
+    nestedManifests: string[];
+    depthLimit: number;
+    fileLimit: number;
+    fileCountLimited: boolean;
+  };
   complexity: { level: "low" | "medium" | "high" | "very-high"; score: number; reasons: string[]; fileCount: number; };
-  taskPlan: TaskPlan;
+  projectPlan: ProjectTeamRecommendation;
 }
 
 function isWithinDirectory(directory: string, candidate: string): boolean {
@@ -49,7 +56,15 @@ async function safeDirectoryEntries(projectRoot: string, name: string): Promise<
   return entries.filter((entry) => entry.isFile()).map((entry) => entry.name);
 }
 
-export async function analyzeProject(rawPath: string, objective = ""): Promise<ProjectAnalysis> {
+export async function analyzeProject(rawPath: string, depth: ResearchDepth = "focused"): Promise<ProjectAnalysis> {
+  if (!["quick", "focused", "deep"].includes(depth)) {
+    throw new Error("La profundidad de preconsulta debe ser quick, focused o deep.");
+  }
+  const scanLimits = depth === "quick"
+    ? { depth: 2, files: 1000 }
+    : depth === "deep"
+      ? { depth: 8, files: 12000 }
+      : { depth: 5, files: 5000 };
   if (
     typeof rawPath !== "string" ||
     !rawPath ||
@@ -74,22 +89,33 @@ export async function analyzeProject(rawPath: string, objective = ""): Promise<P
 
   const ignored = new Set([".git", "node_modules", "build", "dist", ".gradle", ".idea", "target", ".next", "vendor", ".venv"]);
   let fileCount = 0;
-  const countFiles = async (dir: string, depth: number): Promise<void> => {
-    if (depth > 5 || fileCount >= 5000) return;
+  const nestedManifests: string[] = [];
+  const manifestNames = new Set(manifests);
+  const countFiles = async (dir: string, currentDepth: number): Promise<void> => {
+    if (currentDepth > scanLimits.depth || fileCount >= scanLimits.files) return;
     let children;
     try { children = await readdir(dir, { withFileTypes: true }); } catch { return; }
     for (const child of children) {
-      if (fileCount >= 5000) break;
+      if (fileCount >= scanLimits.files) break;
       // Dirent.isDirectory/isFile are false for symlinks: never follow project
-      // links while counting the tree.
+      // links while counting or discovering nested manifests.
       if (child.isDirectory()) {
-        if (!ignored.has(child.name)) await countFiles(resolve(dir, child.name), depth + 1);
+        if (!ignored.has(child.name)) await countFiles(resolve(dir, child.name), currentDepth + 1);
       } else if (child.isFile()) {
         fileCount++;
+        if (currentDepth > 0 && manifestNames.has(child.name) && nestedManifests.length < 80) {
+          nestedManifests.push(resolve(dir, child.name).slice(projectPath.length + 1));
+        }
       }
     }
   };
   await countFiles(projectPath, 0);
+  const topLevelDirectories = [...directories].sort().slice(0, 40);
+  const modules = [...new Set(nestedManifests.map((item) => item.split(sep).slice(0, -1).join(sep)))]
+    .filter(Boolean)
+    .sort()
+    .slice(0, 40);
+  const fileCountLimited = fileCount >= scanLimits.files;
 
   // Only regular files directly inside the canonical project root are treated
   // as manifests or agent instruction documents. Symlinks are ignored.
@@ -97,10 +123,14 @@ export async function analyzeProject(rawPath: string, objective = ""): Promise<P
   const instructions = ["AGENTS.md", "CLAUDE.md", "README.md"]
     .filter((name) => regularFiles.has(name));
 
+  const detectedManifestNames = new Set([
+    ...presentManifests,
+    ...nestedManifests.map((item) => basename(item))
+  ]);
   const stacks: string[] = [];
-  if (presentManifests.includes("pom.xml")) stacks.push("Java / Maven");
-  if (presentManifests.includes("build.gradle") || presentManifests.includes("build.gradle.kts")) stacks.push("Java / Gradle");
-  if (presentManifests.includes("package.json")) stacks.push("Node.js / JavaScript / TypeScript");
+  if (detectedManifestNames.has("pom.xml")) stacks.push("Java / Maven");
+  if (detectedManifestNames.has("build.gradle") || detectedManifestNames.has("build.gradle.kts")) stacks.push("Java / Gradle");
+  if (detectedManifestNames.has("package.json")) stacks.push("Node.js / JavaScript / TypeScript");
 
   let pythonSources = [...regularFiles].some((name) => name.endsWith(".py"));
   for (const directory of ["scripts", "src"]) {
@@ -109,12 +139,12 @@ export async function analyzeProject(rawPath: string, objective = ""): Promise<P
       pythonSources = childFiles.some((name) => name.endsWith(".py"));
     }
   }
-  if (presentManifests.includes("pyproject.toml") || presentManifests.includes("requirements.txt") ||
+  if (detectedManifestNames.has("pyproject.toml") || detectedManifestNames.has("requirements.txt") ||
       regularFiles.has("Pipfile") || regularFiles.has("setup.py") || pythonSources) {
     stacks.push("Python");
   }
-  if (presentManifests.includes("Cargo.toml")) stacks.push("Rust");
-  if (presentManifests.includes("go.mod")) stacks.push("Go");
+  if (detectedManifestNames.has("Cargo.toml")) stacks.push("Rust");
+  if (detectedManifestNames.has("go.mod")) stacks.push("Go");
   if ([...regularFiles].some((name) => name.endsWith(".sln") || name.endsWith(".csproj"))) stacks.push(".NET");
   if (stacks.length === 0 && directories.has("src")) stacks.push("Proyecto con directorio src (stack por confirmar)");
   if (stacks.length === 0) stacks.push("Stack no identificado");
@@ -144,17 +174,30 @@ export async function analyzeProject(rawPath: string, objective = ""): Promise<P
 
   const complexityReasons: string[] = [];
   let complexityScore = 0;
-  if (fileCount > 1000) { complexityScore += 3; complexityReasons.push("Más de 1.000 archivos fuente/documentación detectados (conteo limitado a 5.000)."); }
+  if (fileCount > 1000) { complexityScore += 3; complexityReasons.push("Más de 1.000 archivos fuente/documentación detectados (el recorrido está limitado según la profundidad elegida)."); }
   else if (fileCount > 250) { complexityScore += 2; complexityReasons.push("Repositorio de tamaño medio/alto por cantidad de archivos."); }
   else if (fileCount > 80) { complexityScore += 1; complexityReasons.push("Más de 80 archivos detectados."); }
-  if (presentManifests.length > 2) { complexityScore += 2; complexityReasons.push("Varios manifiestos o módulos tecnológicos."); }
-  else if (presentManifests.length > 1) { complexityScore += 1; complexityReasons.push("Más de un manifiesto tecnológico."); }
+  const allManifestCount = presentManifests.length + nestedManifests.length;
+  if (modules.length >= 8) { complexityScore += 3; complexityReasons.push("Arquitectura modular extensa: se detectaron múltiples módulos con manifiestos propios."); }
+  else if (modules.length >= 3) { complexityScore += 2; complexityReasons.push("Se detectaron varios módulos con manifiestos propios."); }
+  else if (modules.length > 0) { complexityScore += 1; complexityReasons.push("Se detectaron manifiestos dentro de submódulos."); }
+  if (allManifestCount > 5) { complexityScore += 2; complexityReasons.push("Varios manifiestos tecnológicos distribuidos en el repositorio."); }
+  else if (allManifestCount > 2) { complexityScore += 1; complexityReasons.push("Más de dos manifiestos tecnológicos detectados."); }
   if (stacks.length > 2) { complexityScore += 2; complexityReasons.push("Arquitectura con múltiples stacks."); }
   else if (stacks.length > 1) { complexityScore += 1; complexityReasons.push("Más de un stack detectado."); }
   if (instructions.length > 1) { complexityScore += 1; complexityReasons.push("Múltiples documentos de instrucciones/contexto."); }
   if (gitStatus.length > 15) { complexityScore += 1; complexityReasons.push("Numerosos cambios Git pendientes."); }
+  if (fileCountLimited) complexityReasons.push("El conteo alcanzó el límite de la profundidad elegida; el total real puede ser mayor.");
   if (complexityReasons.length === 0) complexityReasons.push("Estructura pequeña y pocos indicadores de complejidad detectados.");
-  const complexityLevel = complexityScore >= 7 ? "very-high" : complexityScore >= 5 ? "high" : complexityScore >= 3 ? "medium" : "low";
+  const complexityLevel = complexityScore >= 8 ? "very-high" : complexityScore >= 5 ? "high" : complexityScore >= 3 ? "medium" : "low";
+  if (modules.length > 0) recommendations.push(modules.length + " módulo(s) con manifiestos propios detectados durante el recorrido estructural.");
+
+  const projectPlan = recommendProjectTeam({
+    complexity: complexityLevel,
+    stackCount: stacks.length,
+    moduleCount: modules.length,
+    manifestCount: allManifestCount
+  }, depth);
 
   return {
     name: basename(projectPath),
@@ -165,8 +208,15 @@ export async function analyzeProject(rawPath: string, objective = ""): Promise<P
     git: { isRepository, status: gitStatus },
     recommendations,
     mode: "read-only",
-    objective: objective.trim(),
+    projectStructure: {
+      topLevelDirectories,
+      modules,
+      nestedManifests,
+      depthLimit: scanLimits.depth,
+      fileLimit: scanLimits.files,
+      fileCountLimited
+    },
     complexity: { level: complexityLevel, score: complexityScore, reasons: complexityReasons, fileCount },
-    taskPlan: planTask(objective)
+    projectPlan
   };
 }

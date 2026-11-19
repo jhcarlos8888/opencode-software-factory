@@ -54,3 +54,29 @@ test("project analysis ignores symlinked instruction files and source directorie
     await rm(base, { recursive: true, force: true });
   }
 });
+
+
+test("preflight depth controls the structural scan and discovers nested modules without following symlinks", async () => {
+  const base = await mkdtemp(join(tmpdir(), "factory-project-depth-"));
+  try {
+    const project = join(base, "modular-project");
+    const module = join(project, "packages", "billing", "service");
+    await mkdir(module, { recursive: true });
+    await writeFile(join(project, "package.json"), "{}\n");
+    await writeFile(join(module, "pom.xml"), "<project/>\n");
+    await writeFile(join(module, "BillingService.java"), "class BillingService {}\n");
+
+    const quick = await analyzeProject(project, "quick");
+    const deep = await analyzeProject(project, "deep");
+
+    assert.equal(quick.projectStructure.depthLimit, 2);
+    assert.equal(deep.projectStructure.depthLimit, 8);
+    assert.equal(quick.projectStructure.modules.includes(join("packages", "billing", "service")), false);
+    assert.ok(deep.projectStructure.modules.includes(join("packages", "billing", "service")));
+    assert.ok(deep.manifests.includes("package.json"));
+    assert.ok(deep.stacks.includes("Java / Maven"));
+    assert.ok(deep.projectPlan.recommendedAgents.length >= quick.projectPlan.recommendedAgents.length);
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});

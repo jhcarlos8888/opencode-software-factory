@@ -28,8 +28,12 @@ export interface ClaudeLocalConfig {
   env: Record<string, string>;
 }
 
-function normalizeClaudeModel(value: string): string {
+function normalizeClaudeModel(value: string, provider?: ClaudeProviderId): string {
   const model = value.trim();
+  const providerPrefix = provider ? provider + "/" : "";
+  if (providerPrefix && model.startsWith(providerPrefix)) {
+    return model.slice(providerPrefix.length);
+  }
   return model.startsWith("opencode-go/") ? model.slice("opencode-go/".length) : model;
 }
 
@@ -119,25 +123,75 @@ export async function getOpenCodeModels(): Promise<ModelOption[]> {
   }
 }
 
+const CLAUDE_MODEL_ALIASES: ModelOption[] = [
+  { id: "sonnet", label: "Sonnet (alias de Claude Code)", source: "alias" },
+  { id: "opus", label: "Opus (alias de Claude Code)", source: "alias" },
+  { id: "haiku", label: "Haiku (alias de Claude Code)", source: "alias" }
+];
+
+/**
+ * Adapt the active provider's connected OpenCode catalog to the bare model IDs
+ * expected by Claude Code's ANTHROPIC_MODEL / SDK model option.
+ *
+ * Only models under the provider detected in ~/.claude/settings.json are
+ * admitted. This does not mix models from unrelated OpenCode providers.
+ */
+export function buildClaudeConnectorModelCatalog(
+  provider: ClaudeProviderId,
+  connectedModels: ModelOption[],
+  configuredModel: string
+): ModelOption[] {
+  const providerPrefix = provider + "/";
+  const providerName = provider === "opencode-go" ? "OpenCode Go"
+    : provider === "apmix" ? "APMix"
+      : "Anthropic";
+  const normalizedConfigured = normalizeClaudeModel(configuredModel, provider);
+  const options: ModelOption[] = [];
+  const seen = new Set<string>();
+
+  const add = (option: ModelOption) => {
+    if (!option.id || option.id.length > 200 ||
+        !/^[a-zA-Z0-9._:-]{1,200}$/.test(option.id) || seen.has(option.id)) return;
+    seen.add(option.id);
+    options.push(option);
+  };
+
+  if (normalizedConfigured) {
+    add({
+      id: normalizedConfigured,
+      label: normalizedConfigured + " · configurado en settings.json",
+      source: "detected"
+    });
+  }
+
+  for (const model of connectedModels) {
+    if (!model.id.startsWith(providerPrefix)) continue;
+    const id = model.id.slice(providerPrefix.length);
+    add({
+      id,
+      label: id + " · catálogo " + providerName,
+      source: "detected"
+    });
+  }
+
+  for (const alias of CLAUDE_MODEL_ALIASES) add(alias);
+  return options;
+}
+
 export async function getClaudeModels(provider: ClaudeProviderId): Promise<ModelOption[]> {
-  const aliases: ModelOption[] = [
-    { id: "sonnet", label: "Sonnet (alias de Claude Code)", source: "alias" },
-    { id: "opus", label: "Opus (alias de Claude Code)", source: "alias" },
-    { id: "haiku", label: "Haiku (alias de Claude Code)", source: "alias" }
-  ];
   try {
     const config = await readClaudeLocalConfig();
-    if (config.provider === provider && config.model &&
-        /^[a-zA-Z0-9._:/-]{1,200}$/.test(config.model)) {
-      return [
-        { id: config.model, label: config.model + " · configurado en settings.json", source: "detected" },
-        ...aliases.filter((item) => item.id !== config.model)
-      ];
-    }
+    if (config.provider !== provider) return [...CLAUDE_MODEL_ALIASES];
+
+    // OpenCode's model registry is the connected catalog for providers shared
+    // with Claude Code (notably OpenCode Go's Anthropic-compatible endpoint).
+    // If the catalog is unavailable, retain the configured model and aliases.
+    const connectedModels = await getOpenCodeModels().catch(() => []);
+    return buildClaudeConnectorModelCatalog(provider, connectedModels, config.model);
   } catch {
     // Configuración local ausente o inválida: no se exponen detalles ni credenciales.
+    return [...CLAUDE_MODEL_ALIASES];
   }
-  return aliases;
 }
 
 export async function listModels(engine: EngineId, claudeProvider: ClaudeProviderId = "apmix"): Promise<ModelOption[]> {

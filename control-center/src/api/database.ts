@@ -10,11 +10,13 @@ export type ClaudeProviderId = "apmix" | "anthropic" | "opencode-go";
 export type ModelTier = "economy" | "balanced" | "premium";
 export interface FavoriteModel { engine: EngineId; provider: string; modelId: string; tier: ModelTier; }
 export type PermissionProfile = "read-only" | "workspace-write" | "approval-required";
+export type PermissionMode = "automatic" | "manual";
 
 export interface AgentAssignment {
   agentId: string;
   engine: EngineId;
   modelId: string;
+  permissionMode: PermissionMode;
   permissionProfile: PermissionProfile;
   enabled: boolean;
 }
@@ -101,6 +103,7 @@ db.exec(`
     permission_profile TEXT NOT NULL CHECK (
       permission_profile IN ('read-only', 'workspace-write', 'approval-required')
     ),
+    permission_mode TEXT NOT NULL DEFAULT 'automatic' CHECK (permission_mode IN ('automatic', 'manual')),
     enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     updated_at TEXT NOT NULL
   );
@@ -232,6 +235,7 @@ if (legacyRuns.length) {
     throw error;
   }
 }
+ensureColumn("agent_assignments", "permission_mode", "TEXT NOT NULL DEFAULT 'automatic' CHECK (permission_mode IN ('automatic', 'manual'))");
 ensureColumn("execution_agents", "handoff_in_json", "TEXT NOT NULL DEFAULT '[]'");
 ensureColumn("execution_agents", "handoff_out_json", "TEXT");
 ensureColumn("execution_agents", "handoff_output_json", "TEXT");
@@ -259,11 +263,12 @@ if (providerTable && !providerTable.sql.includes("'opencode-go'")) {
 
 export function listAssignments(): AgentAssignment[] {
   const rows = db.prepare(
-    "SELECT agent_id, engine, model_id, permission_profile, enabled FROM agent_assignments ORDER BY agent_id"
+    "SELECT agent_id, engine, model_id, permission_mode, permission_profile, enabled FROM agent_assignments ORDER BY agent_id"
   ).all() as Array<{
     agent_id: string;
     engine: EngineId;
     model_id: string;
+    permission_mode: PermissionMode;
     permission_profile: PermissionProfile;
     enabled: number;
   }>;
@@ -272,6 +277,7 @@ export function listAssignments(): AgentAssignment[] {
     agentId: row.agent_id,
     engine: row.engine,
     modelId: row.model_id,
+    permissionMode: row.permission_mode,
     permissionProfile: row.permission_profile,
     enabled: row.enabled === 1
   }));
@@ -280,11 +286,12 @@ export function listAssignments(): AgentAssignment[] {
 export function saveAssignments(assignments: AgentAssignment[]): void {
   const statement = db.prepare(`
     INSERT INTO agent_assignments
-      (agent_id, engine, model_id, permission_profile, enabled, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?)
+      (agent_id, engine, model_id, permission_mode, permission_profile, enabled, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
     ON CONFLICT(agent_id) DO UPDATE SET
       engine = excluded.engine,
       model_id = excluded.model_id,
+      permission_mode = excluded.permission_mode,
       permission_profile = excluded.permission_profile,
       enabled = excluded.enabled,
       updated_at = excluded.updated_at
@@ -298,6 +305,7 @@ export function saveAssignments(assignments: AgentAssignment[]): void {
         item.agentId,
         item.engine,
         item.modelId,
+        item.permissionMode,
         item.permissionProfile,
         item.enabled ? 1 : 0,
         now
@@ -448,21 +456,21 @@ export interface ProjectPreflightSnapshot {
   preconsultedAt: string;
 }
 
-function hashPreflightInstructions(instructions: string): string {
-  return createHash("sha256").update(instructions.trim(), "utf8").digest("hex");
+function hashPreflightDepth(depth: string): string {
+  return createHash("sha256").update(depth.trim(), "utf8").digest("hex");
 }
 
 function currentAssignmentsFingerprint(): string {
   const assignments = db.prepare(
-    "SELECT agent_id AS agentId, engine, model_id AS modelId, permission_profile AS permissionProfile, enabled FROM agent_assignments ORDER BY agent_id"
+    "SELECT agent_id AS agentId, engine, model_id AS modelId, permission_mode AS permissionMode, permission_profile AS permissionProfile, enabled FROM agent_assignments ORDER BY agent_id"
   ).all() as Array<{
-    agentId: string; engine: string; modelId: string; permissionProfile: string; enabled: number;
+    agentId: string; engine: string; modelId: string; permissionMode: string; permissionProfile: string; enabled: number;
   }>;
   return createHash("sha256").update(JSON.stringify(assignments), "utf8").digest("hex");
 }
 
 /** Persist read-only discovery and invalidate any older decision/team approval. */
-export function recordProjectPreflight(path: string, instructions: string, analysis: Record<string, unknown>): void {
+export function recordProjectPreflight(path: string, depth: string, analysis: Record<string, unknown>): void {
   const now = new Date().toISOString();
   db.prepare(`
     INSERT INTO project_preflight
@@ -477,11 +485,11 @@ export function recordProjectPreflight(path: string, instructions: string, analy
       consumed_at = NULL,
       created_at = excluded.created_at,
       updated_at = excluded.updated_at
-  `).run(path.trim(), hashPreflightInstructions(instructions), JSON.stringify(analysis), now, now);
+  `).run(path.trim(), hashPreflightDepth(depth), JSON.stringify(analysis), now, now);
 }
 
-/** Return only a preflight matching the exact project path and instruction text. */
-export function getProjectPreflight(path: string, instructions: string): ProjectPreflightSnapshot | null {
+/** Return the latest project-only preflight; an optional depth must match exactly. */
+export function getProjectPreflight(path: string, depth?: string): ProjectPreflightSnapshot | null {
   const row = db.prepare(`
     SELECT project_path AS path, instructions_sha256 AS instructionsHash,
            analysis_json AS analysisJson, decision, team_fingerprint AS teamFingerprint,
@@ -491,10 +499,13 @@ export function getProjectPreflight(path: string, instructions: string): Project
     path: string; instructionsHash: string; analysisJson: string; decision: ProjectPreflightDecision | null;
     teamFingerprint: string | null; consumedAt: string | null; createdAt: string;
   } | undefined;
-  if (!row || row.path !== path.trim() || row.instructionsHash !== hashPreflightInstructions(instructions)) return null;
+  if (!row || row.path !== path.trim() || (depth !== undefined && row.instructionsHash !== hashPreflightDepth(depth))) return null;
+  const analysis = JSON.parse(row.analysisJson) as Record<string, unknown>;
+  // Legacy preflights were bound to task instructions; require the new project-only contract.
+  if (!analysis.projectPlan || typeof analysis.projectPlan !== "object") return null;
   return {
     path: row.path,
-    analysis: JSON.parse(row.analysisJson) as Record<string, unknown>,
+    analysis,
     decision: row.decision,
     teamSaved: Boolean(row.teamFingerprint && row.teamFingerprint === currentAssignmentsFingerprint()),
     consumed: Boolean(row.consumedAt),
@@ -505,14 +516,14 @@ export function getProjectPreflight(path: string, instructions: string): Project
 /** Record the user's explicit accept/manual choice for the matching preconsultation. */
 export function decideProjectPreflight(
   path: string,
-  instructions: string,
+  depth: string,
   decision: ProjectPreflightDecision
 ): boolean {
   const result = db.prepare(`
     UPDATE project_preflight
     SET decision = ?, team_fingerprint = NULL, consumed_at = NULL, updated_at = ?
     WHERE id = 1 AND project_path = ? AND instructions_sha256 = ?
-  `).run(decision, new Date().toISOString(), path.trim(), hashPreflightInstructions(instructions));
+  `).run(decision, new Date().toISOString(), path.trim(), hashPreflightDepth(depth));
   return Number(result.changes) === 1;
 }
 
@@ -525,7 +536,7 @@ export function recordProjectPreflightTeamSave(): void {
 }
 
 /** Atomically consume the preflight so one approval cannot start multiple initial runs. */
-export function consumeProjectPreflight(path: string, instructions: string): { consumed: boolean; reason?: string } {
+export function consumeProjectPreflight(path: string, depth: string): { consumed: boolean; reason?: string } {
   db.exec("BEGIN IMMEDIATE");
   try {
     const row = db.prepare(`
@@ -536,9 +547,9 @@ export function consumeProjectPreflight(path: string, instructions: string): { c
       path: string; instructionsHash: string; decision: ProjectPreflightDecision | null;
       teamFingerprint: string | null; consumedAt: string | null;
     } | undefined;
-    if (!row || row.path !== path.trim() || row.instructionsHash !== hashPreflightInstructions(instructions)) {
+    if (!row || row.path !== path.trim() || row.instructionsHash !== hashPreflightDepth(depth)) {
       db.exec("ROLLBACK");
-      return { consumed: false, reason: "La ruta o las instrucciones cambiaron. Ejecuta nuevamente la preconsulta del proyecto." };
+      return { consumed: false, reason: "La ruta o profundidad de preconsulta cambiaron. Vuelve a consultar el proyecto." };
     }
     if (!row.decision) {
       db.exec("ROLLBACK");
@@ -573,6 +584,25 @@ export interface ExecutionConfigurationSnapshot {
   claudeProvider: ClaudeProviderId;
   favorites: FavoriteModel[];
   assignments: AgentAssignment[];
+  taskPlan?: {
+    kind: string;
+    complexity: string;
+    depth: string;
+    recommendedAgents: string[];
+    reasons: string[];
+    changesExpected: boolean;
+  };
+  permissionResolution?: Array<{
+    agentId: string;
+    configuredMode: PermissionMode;
+    effectiveProfile: PermissionProfile;
+    reason: string;
+  }>;
+  agentSelection?: {
+    selectedAgentIds: string[];
+    skippedAgentIds: string[];
+    mandatoryAgentIds: string[];
+  };
   roleInstructionDigests: Record<string, string>;
   roleInstructions: Record<string, string>;
   workflowSkillDigest: string | null;
