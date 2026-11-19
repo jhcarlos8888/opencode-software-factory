@@ -23,6 +23,8 @@ import { planTask, resolveAgentPermissionProfile, selectAgentsForTask, type Rese
 import { parseOpenCodeFormAnswers } from "./opencode-forms.js";
 import { buildClaudeFactorySkillsSdkOptions, ensureClaudeFactorySkillsPlugin, type ClaudeFactorySkillsPlugin } from "./claude-skills.js";
 import { classifyOpenCodeServerLog } from "./opencode-log-classifier.js";
+import { validateOpenCodeTurnResult } from "./opencode-turn-result.js";
+import { retryOpenCodeRead } from "./opencode-request-retry.js";
 import {
   buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
   extractClaudeFinalText, formatApprovalAuditContext, prepareHandoffOutput, type AgentResult, type HandoffDescriptor
@@ -44,7 +46,6 @@ type OpenCodeRuntime = {
   password: string;
   sessions: Map<string, string>;
   filesystemReadyProjects: Set<string>;
-  serverErrors: string[];
   closing: boolean;
 };
 type PendingResolver = (answer: DecisionAnswer) => void;
@@ -155,7 +156,6 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
   let stderrBuffer = "";
   let password = "";
   let closed = false;
-  const serverErrors: string[] = [];
   const consumeServerOutput = (chunk: Buffer, isError: boolean) => {
     const current = (isError ? stderrBuffer : stdoutBuffer) + chunk.toString("utf8");
     const lines = current.split(/\r?\n/);
@@ -164,7 +164,6 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
     else stdoutBuffer = remainder.slice(-4000);
     for (const line of lines) {
       const classification = classifyOpenCodeServerLog(line, isError);
-      if (classification.failure) serverErrors.push(sanitizeText(line).slice(0, 12000));
       const match = line.match(/server password\s+([^\s]+)/i);
       if (match) {
         password = match[1] ?? password;
@@ -187,7 +186,7 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
         if (response.ok) {
           addLog(runId, "OPENCODE-SERVER", "success", "Servidor local aislado de OpenCode disponible en localhost.");
           const runtime: OpenCodeRuntime = {
-            child, baseUrl, password, sessions: new Map(), filesystemReadyProjects: new Set(), serverErrors, closing: false
+            child, baseUrl, password, sessions: new Map(), filesystemReadyProjects: new Set(), closing: false
           };
           try {
             await waitForFactoryOpenCodeAgents(runtime, factoryRoot, runId);
@@ -207,17 +206,19 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
 
 async function openCodeRequest<T>(runtime: OpenCodeRuntime, method: string, path: string, body?: unknown, timeoutMs: number | null = 30000): Promise<T> {
   const auth = "Basic " + Buffer.from("opencode:" + runtime.password).toString("base64");
-  const response = await fetch(runtime.baseUrl + path, {
-    method,
-    headers: { Authorization: auth, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
-    body: body === undefined ? undefined : JSON.stringify(body),
-    ...(timeoutMs === null ? {} : { signal: AbortSignal.timeout(timeoutMs) })
+  return retryOpenCodeRead(method, async () => {
+    const response = await fetch(runtime.baseUrl + path, {
+      method,
+      headers: { Authorization: auth, ...(body === undefined ? {} : { "Content-Type": "application/json" }) },
+      body: body === undefined ? undefined : JSON.stringify(body),
+      ...(timeoutMs === null ? {} : { signal: AbortSignal.timeout(timeoutMs) })
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      throw new Error(`OpenCode API HTTP ${response.status}: ${sanitizeText(text).slice(0, 1200)}`);
+    }
+    return (text ? JSON.parse(text) : undefined) as T;
   });
-  const text = await response.text();
-  if (!response.ok) {
-    throw new Error(`OpenCode API HTTP ${response.status}: ${sanitizeText(text).slice(0, 1200)}`);
-  }
-  return (text ? JSON.parse(text) : undefined) as T;
 }
 
 /**
@@ -595,7 +596,6 @@ async function runOpenCodeAgent(
   updateExecutionAgent(agent.id, { sessionId, status: "running", startedAt: new Date().toISOString() });
   addLog(state.runId, agent.agentId.toUpperCase(), "info", `Sesión OpenCode creada: ${sessionId}. Modelo: ${agent.modelId}.`, agent.id);
 
-  runtime.serverErrors.length = 0;
   // In OpenCode V2, /prompt only admits and schedules the input. It does not
   // wait for the model turn. The separate wait route resolves when the agent
   // loop becomes idle; without it the factory can mark a healthy model failed
@@ -628,16 +628,14 @@ async function runOpenCodeAgent(
   await waitPromise;
   if (waitError) throw waitError;
   lastText = await pollOpenCodeAgent(state, agent, sessionId, seenParts, seenForms) || lastText;
-  const serverFailure = runtime.serverErrors.shift();
-  if (serverFailure) {
-    throw new Error(`OpenCode notificó un error interno del turno: ${serverFailure.slice(0, 3000)}`);
-  }
-  if (!lastText.trim()) {
-    throw new Error("OpenCode terminó el turno sin producir una respuesta de texto. La sesión no se marcará como exitosa.");
-  }
-  if (/This OpenCode Go model is hosted outside|AI\.Error\.(?:InvalidRequest|Authentication|NotFound)|model.{0,80}(?:not found|not available|no access)/i.test(lastText)) {
-    throw new Error(`El proveedor/modelo rechazó la solicitud: ${lastText.slice(0, 3000)}`);
-  }
+  // Server-wide diagnostics are not scoped to this agent session. A models.dev
+  // refresh timeout may occur while the assistant finishes successfully. Do not
+  // convert arbitrary ERROR logs into a failed handoff: the session wait result
+  // and canonical assistant response determine this turn's outcome.
+  const sessionMessages = await openCodeRequest<unknown>(
+    runtime, "GET", `/api/session/${encodeURIComponent(sessionId)}/message`
+  );
+  validateOpenCodeTurnResult(lastText, sessionMessages);
   return lastText;
 }
 
