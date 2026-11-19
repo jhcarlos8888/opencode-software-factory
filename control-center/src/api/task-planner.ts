@@ -16,20 +16,32 @@ function normalize(value: string): string {
 /** Classifies requested work independently from repository size/complexity. */
 export function planTask(instructions: string, depthOverride?: ResearchDepth): TaskPlan {
   const text = normalize(instructions);
-  // Negated actions must not grant write permissions. Keep the original text
-  // for intent categories while evaluating only positively requested actions.
-  const actionableText = text.replace(/\b(?:sin|no)\s+(?:modificar|crear|agregar|corregir|implementar|escribir|arrancar|levantar|desplegar|realizar cambios|hacer cambios|commit|push)\b/g, "");
+  // Normalize intent before assigning a write-capable team. Natural Spanish
+  // requests often use gerunds, polite questions or results ("quiero la letra
+  // más grande") instead of the imperative "modifica". Keep explicit negative
+  // clauses out of the positive-action match, without suppressing later work:
+  // "no cambies el Word, aumenta la letra en la web" is an implementation.
+  const negativeActions = /\b(?:sin|no|nunca|evita|evitar|evites|prohibido|abstente de|no quiero(?: que)?|no necesito(?: que)?|no debes|no debe|no se debe)\s+(?:(?:que|hacer|realizar|se|los|las|el|la)\s+){0,3}(?:aument\w*|agrand\w*|increment\w*|ampli\w*|reduc\w*|disminu\w*|achic\w*|cambi\w*|ajust\w*|modific\w*|implement\w*|crea\w*|agreg\w*|corrig\w*|correg\w*|escrib\w*|arranc\w*|levant\w*|despleg\w*|realizar cambios|hacer cambios|commit|push)\b/g;
+  const actionableText = text.replace(negativeActions, "");
+  // Questions about *how* to change something ask for an explanation, not
+  // for permission to change the repository. A subsequent explicit order
+  // ("y hazlo") must still trigger implementation.
+  const asksHowRatherThanDo = /^(?:(?:hola|buenas|oye)[,!\s]*)*(?:(?:me puedes|puedes|podrias)\s+)?(?:explicame|explicar|explica|dime|indicame|quiero saber|quisiera saber|necesito saber|como puedo|como podria|como se puede|como hago|que debo hacer|que hay que hacer|por que)\b/.test(text.replace(/^[¿¡\s]+/, ""));
+  const explicitFollowThrough = /\b(?:y|ademas|tambien|despues|luego)\s+(?:hazlo|hacelo|implementalo|aplicalo|cambialo|corrigelo|modificalo|ejecutalo|haz(?:lo)?\s+ahora|implementa|aplica|modifica|cambia|corrige|aumenta|agranda)\b/.test(actionableText);
   const broadScope = /todo el proyecto|proyecto completo|de extremo a extremo|integral|todos los modulos|toda la arquitectura|redisenar|migracion completa|auditoria completa/.test(text);
   const explicitDeep = /auditoria|audita|diseno arquitectonico|investigacion profunda|comparativa|analisis exhaustivo|seguridad|rendimiento|performance/.test(text);
   const asksArchitectureReview = /analiza.*arquitectura|revisa.*arquitectura|evaluacion.*arquitectura|arquitectura.*actual/.test(text);
-  const explicitChangeVerb = /implementa|implementar|crea|crear|agrega|anade|modifica|modificar|corrige|corregir|refactor|migra|migrar|actualiza|actualizar|desarrolla|desarrollar|mejora|mejorar/.test(actionableText);
+  const explicitChangeVerb = /\b(?:implementa\w*|crea\w*|agrega\w*|anade\w*|modific\w*|corrig\w*|correg\w*|refactor\w*|migra\w*|actualiz\w*|desarroll\w*|mejor\w*|aplica\w*)\b/.test(actionableText);
+  const naturalChangeVerb = /\b(?:aument\w*|agrand\w*|increment\w*|ampli\w*|reduc\w*|disminu\w*|achic\w*|agrandec\w*|ajust\w*|personaliz\w*|redimension\w*|reorganiz\w*|reorden\w*|reubic\w*|cambi\w*|subir|sube|suba|subiendo|bajar|baja|baje|bajando)\b/.test(actionableText)
+    || /\b(?:letra|fuente|texto|tipografia|botones?|interfaz|pantalla|pagina|vistas?)\b.{0,65}\b(?:mas grandes?|mas pequenos?|mas legibles?|mas visibles?|de mayor tamano|de menor tamano)\b/.test(actionableText);
   const followUpChangeRequest = /(?:sigue|seguir|continua|continuar|aplica|aplicar|realiza|realice|realizar|haz|hacer|hagamos|efectua|efectuar|ejecuta|ejecutar).{0,70}(?:correcciones?|arreglos?|mejoras?|cambios?|ajustes?)/.test(actionableText);
   // Operational work (launching/deploying an app and publishing Git commits)
   // is actionable even when it contains no request to edit application code.
   // Check it before the testing branch, so "verifica ... y levanta el
   // proyecto; haz commit y push" does not become a read-only task.
   const asksForOperations = /\b(?:levantar|levantemos|levanta|arrancar|arranquemos|arranca|iniciar el servidor|iniciar la aplicacion|poner en marcha|desplegar|despliega|deploy|npm start|commit|commitear|push)\b/.test(actionableText);
-  const asksForChange = explicitChangeVerb || followUpChangeRequest || asksForOperations;
+  const asksForChange = (explicitChangeVerb || naturalChangeVerb || followUpChangeRequest || asksForOperations)
+    && (!asksHowRatherThanDo || explicitFollowThrough);
   const asksForTests = /prueba|pruebas|test|testing|validar|valida|verifica|verificacion|cobertura/.test(text);
   const asksForDiagnosis = /error|falla|fallo|bug|problema|no funciona|investiga|diagnostica|causa|por que/.test(text);
   const asksForExplanation = /explica|explicame|de que trata|que hace|describe|resumen|resume|en un parrafo|overview/.test(text);
@@ -48,7 +60,7 @@ export function planTask(instructions: string, depthOverride?: ResearchDepth): T
     if (asksForTests) agents = [...new Set([...agents, "tester", "build"])];
     depth = broadScope || explicitDeep ? "deep" : "focused";
     complexity = broadScope || explicitDeep ? "high" : "medium";
-    reasons.push(asksForOperations && !explicitChangeVerb && !followUpChangeRequest
+    reasons.push(asksForOperations && !explicitChangeVerb && !naturalChangeVerb && !followUpChangeRequest
       ? "La instruccion solicita operaciones de despliegue, arranque o Git, que requieren un agente ejecutor."
       : "La instruccion solicita cambios en el codigo.");
   } else if (asksForTests) {

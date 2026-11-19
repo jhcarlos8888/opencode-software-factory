@@ -147,3 +147,66 @@ test("read-only verification of all agents remains a testing task", () => {
   assert.equal(plan.kind, "testing");
   assert.equal(plan.changesExpected, false);
 });
+
+
+test("round 1 Aula typography request routes natural Spanish to implementation", () => {
+  const exact = "Hola que tal todo ? quisiera me colabores aumentando el tamaño de la letra del proyecto en general de aula research";
+  const plan = planTask(exact);
+  assert.equal(plan.kind, "implementation");
+  assert.equal(plan.changesExpected, true);
+  for (const agent of ["architect", "implementer", "tester", "reviewer", "cloud-arbiter"]) {
+    assert.ok(plan.recommendedAgents.includes(agent), agent);
+  }
+  assert.equal(resolveAgentPermissionProfile("implementer", plan, "automatic", "read-only").permissionProfile, "workspace-write");
+});
+
+test("polite, colloquial, infinitive and outcome-oriented UI requests are actionable", () => {
+  const requests = [
+    "Me ayudas a aumentar el tamaño de letra en todas las pantallas?",
+    "Quisiera que me colabores agrandando los textos de los formularios.",
+    "Por favor puedes ampliar la fuente del editor?",
+    "Necesito reducir los márgenes de la aplicación.",
+    "Me gustaría que los botones fueran más grandes.",
+    "Que la letra de la interfaz se vea más grande.",
+    "Podrías cambiar el color del menú?",
+    "Hagamos la fuente más legible para usuarios mayores.",
+    "Quiero ajustar el espaciado de los encabezados.",
+    "Baja el tamaño de los iconos y sube el de los títulos.",
+    "Aumenta la tipografía sin cambiar el formato APA del Word."
+  ];
+  for (const request of requests) {
+    const plan = planTask(request);
+    assert.equal(plan.kind, "implementation", request);
+    assert.ok(plan.recommendedAgents.includes("implementer"), request);
+  }
+});
+
+test("questions about doing the work do not authorize changes", () => {
+  const informational = [
+    "Cómo puedo aumentar la letra de la aplicación?",
+    "¿Puedes explicar cómo cambiar la fuente del proyecto?",
+    "Quiero saber por qué reducir los márgenes podría romper la interfaz.",
+    "Qué debo hacer para agrandar la letra del editor?",
+    "Explica las ventajas de modificar los estilos.",
+    "No aumentes las fuentes, solo analiza los estilos.",
+    "Verifica las fuentes, sin modificar la interfaz.",
+    "No cambies los estilos CSS, solo revisa accesibilidad."
+  ];
+  for (const request of informational) {
+    const plan = planTask(request);
+    assert.notEqual(plan.kind, "implementation", request);
+    assert.equal(plan.changesExpected, false, request);
+    assert.ok(!plan.recommendedAgents.includes("implementer"), request);
+  }
+});
+
+test("explicitly requested changes remain actionable beside negative constraints", () => {
+  for (const request of [
+    "No cambies las fuentes APA del Word. Aumenta la fuente en la interfaz.",
+    "Explica los riesgos y luego implementa una fuente más grande.",
+    "Sin modificar los datos de usuarios, agranda las etiquetas de la pantalla."
+  ]) {
+    const plan = planTask(request);
+    assert.equal(plan.kind, "implementation", request);
+  }
+});
