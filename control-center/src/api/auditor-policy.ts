@@ -49,11 +49,24 @@ export function isProtectedShellCommand(command: string): boolean {
 
 function isSafeShell(command: string): boolean {
   const value = command.trim();
-  // Never parse untrusted shell fragments as though they were argv: reject
-  // substitutions, redirection, pipes, command chaining and control characters.
-  if (!value || value.length > 1200 || /[\r\n;|&<>\x00-`]/.test(value) ||
-      /\$|\\|\*|\?|\b(?:eval|exec|source|env|xargs|python|node\s+-e|npx)\b/i.test(value)) return false;
-  return /^(?:pwd|git status(?:\s+(?:-sb|--short|--porcelain(?:=v1)?|--branch))*|git diff(?:\s+(?:--stat|--check|--numstat|--name-only|--cached|--unified=\d+|-U\d+|--|[\w./-]+))*|git log\s+-(?:1|2|3|5)(?:\s+--oneline)?|git rev-parse\s+(?:--show-toplevel|--is-inside-work-tree|HEAD)|npm run (?:check|test:unit|smoke)|bash scripts\/smoke-test\.sh|ss\s+-ltnp?|ss\s+-ltn|node\s+--check\s+[\w./-]+\.js)$/i.test(value);
+  if (!value || value.length > 1200 || /[\r\n;|&<>\x00-\x1f`]/.test(value.replace(/ 2>&1$/, ""))) {
+    // Stderr may be merged into stdout, but arbitrary redirects and pipelines
+    // must never be inferred safe from a matching command prefix.
+    return false;
+  }
+  // The common OpenCode shell renderer uses echo to display a test's native
+  // exit status and other fixed separators. Interpolation is allowed ONLY for
+  // the exact shell status variables, never arbitrary command expansion.
+  if (/^echo (?:'---[A-Za-z0-9 _-]{0,40}---'|"---[A-Za-z0-9 _-]{0,40}---"|'---'|"---"|"(?:CHECK_EXIT|EXIT|PUSH_EXIT)=\$\?"|"(?:CHECK_EXIT|EXIT)=\$\{PIPESTATUS\[0\]\}")$/.test(value)) {
+    return true;
+  }
+  if (/[\$\\*?]/.test(value)) return false;
+  // Inspection-only filter commands: no filenames, shell redirection or scripts.
+  if (/^(?:head -(?:[1-9]\d?|c [1-9]\d{0,4})|tail -[1-9]\d{0,2})$/.test(value)) return true;
+  if (/^git (?:status(?:\s+(?:-sb|--short|--porcelain(?:=v1)?|--branch))*|branch --show-current|rev-parse (?:HEAD|--show-toplevel|--is-inside-work-tree|origin\/master)|log (?:-1|-2|-3|-5)(?: --oneline)?|log --oneline -[1235]|log origin\/master -1 --format='%H %s'|diff(?:\s+(?:--stat|--check|--numstat|--name-only|--cached|--unified=\d+|-U\d+|--|[\w./-]+))*)$/.test(value)) return true;
+  if (/^(?:npm run (?:check|test:unit|smoke)|bash scripts\/smoke-test\.sh)(?: 2>&1)?$/.test(value)) return true;
+  if (/^(?:pwd|ss -ltnp?|node --check [\w./-]+\.js)$/.test(value)) return true;
+  return false;
 }
 
 function getShellCommand(tool: string, input: Record<string, unknown>): string | null {

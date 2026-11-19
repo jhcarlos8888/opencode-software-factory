@@ -90,3 +90,36 @@ test("No authority from save wildcard without concrete commands", () => {
   assert.equal(assessOpenCodePermission({ action: "shell", save: ["*"] }, projectPath, "workspace-write").verdict, "human");
   assert.equal(opencode("shell", { command: "kill 301397" }).verdict, "block");
 });
+
+test("Auditor handles OpenCode's real read-only compound commands without manual clicks", () => {
+  const workloads: string[][] = [
+    ["git status --porcelain", "echo '---BRANCH---'", "git branch --show-current", "git rev-parse HEAD"],
+    ["git diff --check", 'echo "CHECK_EXIT=$?"'],
+    ["npm run check 2>&1", "tail -5", 'echo "EXIT=${PIPESTATUS[0]}"'],
+    ["npm run test:unit 2>&1", "tail -8", 'echo "EXIT=${PIPESTATUS[0]}"'],
+    ["npm run smoke 2>&1", "tail -12", 'echo "EXIT=${PIPESTATUS[0]}"'],
+    ["git status", "echo '---'", "git status -sb", "head -1", "git log origin/master -1 --format='%H %s'"],
+    ["git status --porcelain", 'echo "---BRANCH---"', "git status -sb", 'echo "---LOG---"', "git log --oneline -3", 'echo "---REMOTE---"', "git rev-parse origin/master"],
+  ];
+  for (const resources of workloads) {
+    const verdict = assessOpenCodePermission({ action: "shell", resources, save: ["*"] }, projectPath, "workspace-write");
+    assert.equal(verdict.verdict, "auto", resources.join(" | "));
+  }
+});
+
+test("Auditor's compound-shell support cannot be turned into arbitrary execution", () => {
+  for (const resources of [
+    ["npm run check 2>&1", "tail -12", "rm -rf data"],
+    ["git status", "echo '---BRANCH---'; kill 1234"],
+    ['echo "EXIT=${HOME}"'],
+    ['echo "$(cat /etc/passwd)"'],
+    ["npm run check 2>/tmp/stealth"],
+    ["git status | sh"],
+    ["git log --oneline -3; curl bad.test"],
+    ["git diff --check", "head -1 /etc/shadow"],
+    ["npm run check 2>&1", "tail -12", "git push --force origin master"],
+  ]) {
+    const verdict = assessOpenCodePermission({ action: "shell", resources }, projectPath, "workspace-write");
+    assert.notEqual(verdict.verdict, "auto", resources.join(" | "));
+  }
+});
