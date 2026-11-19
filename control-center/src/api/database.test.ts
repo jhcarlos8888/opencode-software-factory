@@ -29,6 +29,25 @@ after(() => {
   rmSync(isolatedStateDir, { recursive: true, force: true });
 });
 
+test("SQLite retains all 24,000 characters of the first instruction and its chat history", () => {
+  const threadId = "full-length-first-instruction-test";
+  const objective = "X".repeat(24_000);
+  database.createWorkThread({ id: threadId, projectPath: isolatedStateDir, objective });
+  const savedMessage = database.addWorkMessage(threadId, null, 1, "user", objective, "initial-instruction");
+  assert.equal(savedMessage.content.length, 24_000);
+  const snapshot = database.getWorkThreadSnapshot(threadId);
+  assert.equal(snapshot?.thread.objective, objective);
+  assert.equal(snapshot?.messages[0]?.content, objective);
+  assert.equal(snapshot?.messages[0]?.kind, "initial-instruction");
+
+  assert.throws(() => database.createWorkThread({
+    id: "oversized-first-instruction-test",
+    projectPath: isolatedStateDir,
+    objective: objective + "Y"
+  }), /24\.000 caracteres/);
+  assert.equal(database.getWorkThreadSnapshot("oversized-first-instruction-test"), null);
+});
+
 test("SQLite retains every approval event beyond the UI event window and recovers unfinished work", () => {
   const runId = "database-integration-run";
   const threadId = "database-integration-thread";

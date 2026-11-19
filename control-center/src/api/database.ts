@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { ExecutionSummary, HandoffDescriptor, HandoffOutputMetadata, HandoffOutputRecord } from "./orchestration.js";
+import { workInstructionLimitError } from "./work-instruction-limit.js";
 
 export type EngineId = "opencode" | "claude";
 export type ClaudeProviderId = "apmix" | "anthropic" | "opencode-go";
@@ -1052,11 +1053,13 @@ export interface WorkThreadSnapshot {
 }
 
 export function createWorkThread(thread: Pick<WorkThreadRecord, "id" | "projectPath" | "objective">): void {
+  const limitError = workInstructionLimitError(thread.objective);
+  if (limitError) throw new RangeError(limitError);
   const now = new Date().toISOString();
   db.prepare(`
     INSERT INTO work_threads (id, project_path, objective, status, created_at, updated_at)
     VALUES (?, ?, ?, 'active', ?, ?)
-  `).run(thread.id, thread.projectPath, thread.objective.slice(0, 12000), now, now);
+  `).run(thread.id, thread.projectPath, thread.objective, now, now);
 }
 
 export function addWorkMessage(

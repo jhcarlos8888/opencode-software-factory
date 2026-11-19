@@ -26,6 +26,7 @@ import { classifyOpenCodeServerLog } from "./opencode-log-classifier.js";
 import { validateOpenCodeTurnResult } from "./opencode-turn-result.js";
 import { retryOpenCodeRead } from "./opencode-request-retry.js";
 import { buildOpenCodeChildPath } from "./opencode-environment.js";
+import { workInstructionLimitError } from "./work-instruction-limit.js";
 import { assessAuditorTool, assessOpenCodePermission, isProtectedShellCommand } from "./auditor-policy.js";
 import { inspectAuditorShellReceipts, appendAuditorOperationalFindings } from "./auditor-operations.js";
 import {
@@ -1530,6 +1531,8 @@ export async function startExecution(
     }
     const resolvedProjectPath = await requireCanonicalProjectRoot(projectPath);
     if (!instructions.trim()) throw new Error("Escribe las instrucciones que deben ejecutar los agentes.");
+    const instructionLimitError = workInstructionLimitError(instructions);
+    if (instructionLimitError) throw new RangeError(instructionLimitError);
     const assignments = listAssignments();
     const taskPlan = planTask(instructions, depthOverride);
     const selection = selectAgentsForTask(assignments, taskPlan);

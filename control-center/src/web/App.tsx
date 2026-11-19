@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { OpenCodeQuestionForm, type OpenCodeFormField } from "./OpenCodeQuestionForm";
+import { MAX_WORK_INSTRUCTION_CHARS } from "../api/work-instruction-limit";
 
 type EngineId = "opencode" | "claude";
 type ClaudeProviderId = "apmix" | "anthropic" | "opencode-go";
@@ -1466,11 +1467,11 @@ export default function App() {
                     onChange={(event) => setContinuationText(event.target.value)}
                     placeholder="Describe qué necesitas: implementar una funcionalidad, investigar un error, crear pruebas, revisar un módulo o cualquier otra tarea..."
                     rows={4}
-                    maxLength={12000}
+                    maxLength={MAX_WORK_INSTRUCTION_CHARS}
                     disabled={executionStarting || continuationBusy}
                   />
                   <div className="conversation-composer-footer">
-                    <span>La preconsulta ya terminó. Esta instrucción iniciará el proceso y quedará guardada como el primer mensaje de la conversación.</span>
+                    <span>La preconsulta ya terminó. Esta instrucción iniciará el proceso y quedará guardada como el primer mensaje de la conversación. ({continuationText.length.toLocaleString("es-CO")} / {MAX_WORK_INSTRUCTION_CHARS.toLocaleString("es-CO")} caracteres)</span>
                     <button className="primary-button" type="submit" disabled={!continuationText.trim() || executionStarting || continuationBusy}>
                       {executionStarting ? "Iniciando..." : "Comenzar trabajo"} <span>↗</span>
                     </button>
@@ -1652,11 +1653,11 @@ export default function App() {
                         onChange={(event) => setContinuationText(event.target.value)}
                         placeholder="Escribe tu siguiente instrucción. Puedes pedir una corrección, profundizar en un hallazgo, solicitar pruebas o continuar con otra tarea..."
                         rows={3}
-                        maxLength={12000}
+                        maxLength={MAX_WORK_INSTRUCTION_CHARS}
                         disabled={activeExecution || continuationBusy}
                       />
                       <div className="conversation-composer-footer">
-                        <span>El proceso conserva el contexto, los resultados y la evidencia de las rondas anteriores.</span>
+                        <span>El proceso conserva el contexto, los resultados y la evidencia de las rondas anteriores. ({continuationText.length.toLocaleString("es-CO")} / {MAX_WORK_INSTRUCTION_CHARS.toLocaleString("es-CO")} caracteres)</span>
                         <button className="primary-button" type="submit" disabled={!continuationText.trim() || activeExecution || continuationBusy || executionStarting}>
                           {continuationBusy || executionStarting ? "Preparando..." : "Enviar instrucción"} <span>↗</span>
                         </button>

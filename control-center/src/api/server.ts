@@ -21,6 +21,7 @@ import { analyzeProject } from "./projects.js";
 import { cancelExecution, getExecution, getLatestExecution, recoverExecutionState, respondExecutionDecision, startExecution } from "./execution.js";
 import { compareRuntimeBuilds, parseRuntimeBuildInfo } from "./runtime-build.js";
 import { CONTROL_CENTER_SECURITY_HEADERS, inspectRequestSecurity } from "./request-security.js";
+import { workInstructionLimitError } from "./work-instruction-limit.js";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const factoryRoot = resolve(process.env.FACTORY_ROOT || resolve(currentDir, "../../.."));
@@ -679,9 +680,11 @@ app.get<{ Params: { runId: string } }>("/api/executions/:runId", async (request,
 
 app.post<{ Body: { path?: unknown; instructions?: unknown; preflightDepth?: unknown; taskDepth?: unknown } }>("/api/executions", async (request, reply) => {
   const projectPath = typeof request.body?.path === "string" ? request.body.path.trim() : getProjectPreferences().path;
-  const instructions = typeof request.body?.instructions === "string"
-    ? request.body.instructions.slice(0, 12000).trim()
-    : getProjectPreferences().instructions;
+  const rawInstructions = typeof request.body?.instructions === "string"
+    ? request.body.instructions : getProjectPreferences().instructions;
+  const limitError = workInstructionLimitError(rawInstructions);
+  if (limitError) return reply.code(400).send({ error: limitError });
+  const instructions = rawInstructions.trim();
   if (!projectPath || !isAbsolute(projectPath)) {
     return reply.code(400).send({ error: "Selecciona una ruta absoluta para el proyecto." });
   }
@@ -765,8 +768,11 @@ app.post<{
 }>("/api/work-threads/:threadId/continue", async (request, reply) => {
   const workflow = getWorkThreadSnapshot(request.params.threadId);
   if (!workflow) return reply.code(404).send({ error: "Proceso de trabajo no encontrado." });
-  const instructions = typeof request.body?.instructions === "string"
-    ? request.body.instructions.trim().slice(0, 12000) : "";
+  const rawInstructions = typeof request.body?.instructions === "string"
+    ? request.body.instructions : "";
+  const limitError = workInstructionLimitError(rawInstructions);
+  if (limitError) return reply.code(400).send({ error: limitError });
+  const instructions = rawInstructions.trim();
   if (!instructions) return reply.code(400).send({ error: "Escribe la siguiente instrucción para continuar el proceso." });
   const latestRound = workflow.rounds.at(-1);
   if (latestRound && ["queued", "running", "waiting"].includes(latestRound.run.status)) {
