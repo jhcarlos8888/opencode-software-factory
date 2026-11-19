@@ -57,7 +57,9 @@ OpenCode como de Claude Code y registra sus decisiones en los eventos
 `AUDITOR` de SQLite y en el Centro de decisiones.
 
 - **Autoaprobación de bajo riesgo:** consultas Git de solo lectura,
-  `npm run check`, `npm run test:unit`, `npm run smoke` y algunas
+  `npm run check`, `npm run test:unit`, `npm run smoke` (incluida la
+  visualización limitada `2>&1 | tail -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}"`),
+  y algunas
   acciones de navegador local (navegar a inicio/salud, redimensionar,
   consola, capturas confinadas). Cada permiso se concede **una sola vez**,
   con el perfil `workspace-write` y durante la ronda activa.

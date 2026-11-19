@@ -47,8 +47,31 @@ export function isProtectedShellCommand(command: string): boolean {
     || /\bpodman\s+(?:stop|kill|rm|system\s+prune)\b/i.test(command);
 }
 
+/**
+ * Allow the precise, side-effect-limited output wrapper used by Claude Code
+ * when displaying a known npm verification script. Never permit arbitrary
+ * pipelines, extra shell segments, alternate npm subcommands, redirection
+ * targets or post-processing scripts.
+ *
+ * Bash expands PIPESTATUS[0] from the immediately preceding pipeline when
+ * entering the echo command. This keeps the test's real result observable.
+ */
+export function isBoundedTestOutputPipeline(command: string): boolean {
+  if (command.length > 250 || /[\r\n\x00-\x1f`]/.test(command)) return false;
+  const match = /^(npm run (check|test:unit|smoke)) 2>&1 \| tail -([1-9]\d?|100); echo "(CHECK|UNIT|TEST|SMOKE)_EXIT=\$\{PIPESTATUS\[0\]\}"$/.exec(command);
+  if (!match) return false;
+  const kind = match[2];
+  const label = match[4];
+  return (
+    (kind === "check" && label === "CHECK") ||
+    (kind === "test:unit" && (label === "UNIT" || label === "TEST")) ||
+    (kind === "smoke" && label === "SMOKE")
+  );
+}
+
 function isSafeShell(command: string): boolean {
   const value = command.trim();
+  if (isBoundedTestOutputPipeline(value)) return true;
   if (!value || value.length > 1200 || /[\r\n;|&<>\x00-\x1f`]/.test(value.replace(/ 2>&1$/, ""))) {
     // Stderr may be merged into stdout, but arbitrary redirects and pipelines
     // must never be inferred safe from a matching command prefix.
@@ -57,7 +80,7 @@ function isSafeShell(command: string): boolean {
   // The common OpenCode shell renderer uses echo to display a test's native
   // exit status and other fixed separators. Interpolation is allowed ONLY for
   // the exact shell status variables, never arbitrary command expansion.
-  if (/^echo (?:'---[A-Za-z0-9 _-]{0,40}---'|"---[A-Za-z0-9 _-]{0,40}---"|'---'|"---"|"(?:CHECK_EXIT|EXIT|PUSH_EXIT)=\$\?"|"(?:CHECK_EXIT|EXIT)=\$\{PIPESTATUS\[0\]\}")$/.test(value)) {
+  if (/^echo (?:'---[A-Za-z0-9 _-]{0,40}---'|"---[A-Za-z0-9 _-]{0,40}---"|'---'|"---"|"(?:CHECK_EXIT|EXIT|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT|CACHED_EXIT|EXIT_DIFF|EXIT_CACHED)=\$\?"|"(?:CHECK_EXIT|EXIT|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT)=\$\{PIPESTATUS\[0\]\}")$/.test(value)) {
     return true;
   }
   if (/[\$\\*?]/.test(value)) return false;

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assessAuditorTool, assessOpenCodePermission, isProtectedShellCommand } from "./auditor-policy.js";
+import { assessAuditorTool, assessOpenCodePermission, isBoundedTestOutputPipeline, isProtectedShellCommand } from "./auditor-policy.js";
 
 const projectPath = "/home/user/projects/aula";
 function claude(toolName: string, input: Record<string, unknown>, permissionProfile: "read-only" | "workspace-write" | "approval-required" = "workspace-write") {
@@ -122,4 +122,62 @@ test("Auditor's compound-shell support cannot be turned into arbitrary execution
     const verdict = assessOpenCodePermission({ action: "shell", resources }, projectPath, "workspace-write");
     assert.notEqual(verdict.verdict, "auto", resources.join(" | "));
   }
+});
+
+
+test("Claude Reviewer can auto-approve the exact bounded smoke output pipeline", () => {
+  const command = 'npm run smoke 2>&1 | tail -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}"';
+  assert.equal(isBoundedTestOutputPipeline(command), true);
+  assert.deepEqual(claude("Bash", { command, description: "Run isolated smoke test suite" }), {
+    verdict: "auto",
+    category: "test",
+    reason: "Comando exacto de comprobación autorizado por lista conservadora."
+  });
+  assert.equal(claude("Bash", { command }, "read-only").verdict, "human");
+  assert.equal(claude("Bash", { command }, "approval-required").verdict, "human");
+  assert.equal(assessAuditorTool({
+    engine: "claude", toolName: "Bash",
+    input: { command, cwd: "/tmp/another-project" },
+    projectPath, permissionProfile: "workspace-write"
+  }).verdict, "human");
+});
+
+test("Auditor can recognize equivalent bounded check and unit-test output formats", () => {
+  for (const command of [
+    'npm run check 2>&1 | tail -5; echo "CHECK_EXIT=${PIPESTATUS[0]}"',
+    'npm run test:unit 2>&1 | tail -20; echo "UNIT_EXIT=${PIPESTATUS[0]}"',
+    'npm run test:unit 2>&1 | tail -100; echo "TEST_EXIT=${PIPESTATUS[0]}"'
+  ]) {
+    assert.equal(isBoundedTestOutputPipeline(command), true, command);
+    assert.equal(claude("Bash", { command }).verdict, "auto", command);
+  }
+});
+
+test("Auditor blocks malicious or ambiguous shell composition even near a known smoke command", () => {
+  for (const command of [
+    'npm run smoke 2>&1 | tail -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}"; pkill -f node',
+    'npm run smoke 2>&1 | tail -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}" && git push --force',
+    'npm run smoke 2>&1 | tail -20; echo "SMOKE_EXIT=${HOME}"',
+    'npm run smoke 2>&1 | tail -20; echo "SMOKE_EXIT=$(cat /etc/shadow)"',
+    'npm run smoke 2>&1 | tail -20; echo "UNIT_EXIT=${PIPESTATUS[0]}"',
+    'npm run smoke 2>&1 | head -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}"',
+    'npm run smoke 2>&1 | tail -200; echo "SMOKE_EXIT=${PIPESTATUS[0]}"',
+    'npm run smoke 2>&1 | tail -20 | bash; echo "SMOKE_EXIT=${PIPESTATUS[0]}"',
+    'npm run smoke >/tmp/log 2>&1 | tail -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}"',
+    'npm run smoke; cat ~/.ssh/id_rsa',
+    'npm run deploy 2>&1 | tail -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}"',
+    'npm run smoke 2>&1 | tail -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}" # allow',
+    'npm run smoke 2>&1 | tail -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}"\nrm -rf /tmp',
+    'npm run smoke 2>&1 | tail -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}" | sh',
+  ]) {
+    assert.equal(isBoundedTestOutputPipeline(command), false, command);
+    assert.notEqual(claude("Bash", { command }).verdict, "auto", command);
+  }
+});
+
+test("OpenCode split permission resources for bounded smoke display auto-approve only known segments", () => {
+  const resources = ["npm run smoke 2>&1", "tail -20", 'echo "SMOKE_EXIT=${PIPESTATUS[0]}"'];
+  assert.equal(assessOpenCodePermission({ action: "shell", resources, save: ["*"] }, projectPath, "workspace-write").verdict, "auto");
+  assert.equal(assessOpenCodePermission({ action: "shell", resources: [...resources, "rm -rf data"] }, projectPath, "workspace-write").verdict, "block");
+  assert.notEqual(assessOpenCodePermission({ action: "shell", resources: [...resources, "npm run deploy"] }, projectPath, "workspace-write").verdict, "auto");
 });
