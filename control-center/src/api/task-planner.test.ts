@@ -131,3 +131,19 @@ test("Cloud Arbiter participates when the task plan explicitly recommends it", (
   assert.ok(plan.recommendedAgents.includes("cloud-arbiter"));
   assert.deepEqual(selectAgentsForTask(assignments, plan).selectedAgentIds, plan.recommendedAgents);
 });
+
+test("round 5 mixed verification, startup and Git request selects executor and tester", () => {
+  const plan = planTask("Bueno entonces hagamos las siguientes tareas, levantemos el proyecto y verifiquemos que efectivamente todos los agentes tengan bien configurado los modelos solicitados y que respondan. Hagamos commit y push luego de verificar que todo funciona.");
+  assert.equal(plan.kind, "implementation");
+  assert.equal(plan.changesExpected, true);
+  assert.ok(plan.recommendedAgents.includes("implementer"));
+  assert.ok(plan.recommendedAgents.includes("tester"));
+  assert.ok(plan.recommendedAgents.includes("build"));
+  assert.equal(resolveAgentPermissionProfile("implementer", plan, "automatic", "read-only").permissionProfile, "workspace-write");
+});
+
+test("read-only verification of all agents remains a testing task", () => {
+  const plan = planTask("Verifica que todos los agentes tengan bien configurados los modelos. Sin modificar archivos.");
+  assert.equal(plan.kind, "testing");
+  assert.equal(plan.changesExpected, false);
+});

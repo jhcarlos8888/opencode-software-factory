@@ -16,12 +16,20 @@ function normalize(value: string): string {
 /** Classifies requested work independently from repository size/complexity. */
 export function planTask(instructions: string, depthOverride?: ResearchDepth): TaskPlan {
   const text = normalize(instructions);
+  // Negated actions must not grant write permissions. Keep the original text
+  // for intent categories while evaluating only positively requested actions.
+  const actionableText = text.replace(/\b(?:sin|no)\s+(?:modificar|crear|agregar|corregir|implementar|escribir|arrancar|levantar|desplegar|realizar cambios|hacer cambios|commit|push)\b/g, "");
   const broadScope = /todo el proyecto|proyecto completo|de extremo a extremo|integral|todos los modulos|toda la arquitectura|redisenar|migracion completa|auditoria completa/.test(text);
   const explicitDeep = /auditoria|audita|diseno arquitectonico|investigacion profunda|comparativa|analisis exhaustivo|seguridad|rendimiento|performance/.test(text);
   const asksArchitectureReview = /analiza.*arquitectura|revisa.*arquitectura|evaluacion.*arquitectura|arquitectura.*actual/.test(text);
-  const explicitChangeVerb = /implementa|implementar|crea|crear|agrega|anade|modifica|modificar|corrige|corregir|refactor|migra|migrar|actualiza|actualizar|desarrolla|desarrollar|mejora|mejorar/.test(text);
-  const followUpChangeRequest = /(?:sigue|seguir|continua|continuar|aplica|aplicar|realiza|realice|realizar|haz|hacer|hagamos|efectua|efectuar|ejecuta|ejecutar).{0,70}(?:correcciones?|arreglos?|mejoras?|cambios?|ajustes?)/.test(text);
-  const asksForChange = explicitChangeVerb || followUpChangeRequest;
+  const explicitChangeVerb = /implementa|implementar|crea|crear|agrega|anade|modifica|modificar|corrige|corregir|refactor|migra|migrar|actualiza|actualizar|desarrolla|desarrollar|mejora|mejorar/.test(actionableText);
+  const followUpChangeRequest = /(?:sigue|seguir|continua|continuar|aplica|aplicar|realiza|realice|realizar|haz|hacer|hagamos|efectua|efectuar|ejecuta|ejecutar).{0,70}(?:correcciones?|arreglos?|mejoras?|cambios?|ajustes?)/.test(actionableText);
+  // Operational work (launching/deploying an app and publishing Git commits)
+  // is actionable even when it contains no request to edit application code.
+  // Check it before the testing branch, so "verifica ... y levanta el
+  // proyecto; haz commit y push" does not become a read-only task.
+  const asksForOperations = /\b(?:levantar|levantemos|levanta|arrancar|arranquemos|arranca|iniciar el servidor|iniciar la aplicacion|poner en marcha|desplegar|despliega|deploy|npm start|commit|commitear|push)\b/.test(actionableText);
+  const asksForChange = explicitChangeVerb || followUpChangeRequest || asksForOperations;
   const asksForTests = /prueba|pruebas|test|testing|validar|valida|verifica|verificacion|cobertura/.test(text);
   const asksForDiagnosis = /error|falla|fallo|bug|problema|no funciona|investiga|diagnostica|causa|por que/.test(text);
   const asksForExplanation = /explica|explicame|de que trata|que hace|describe|resumen|resume|en un parrafo|overview/.test(text);
@@ -40,7 +48,9 @@ export function planTask(instructions: string, depthOverride?: ResearchDepth): T
     if (asksForTests) agents = [...new Set([...agents, "tester", "build"])];
     depth = broadScope || explicitDeep ? "deep" : "focused";
     complexity = broadScope || explicitDeep ? "high" : "medium";
-    reasons.push("La instruccion solicita cambios en el codigo.");
+    reasons.push(asksForOperations && !explicitChangeVerb && !followUpChangeRequest
+      ? "La instruccion solicita operaciones de despliegue, arranque o Git, que requieren un agente ejecutor."
+      : "La instruccion solicita cambios en el codigo.");
   } else if (asksForTests) {
     kind = "testing"; agents = ["tester", "build"]; depth = "focused"; complexity = "medium";
     reasons.push("La instruccion solicita validacion o pruebas.");

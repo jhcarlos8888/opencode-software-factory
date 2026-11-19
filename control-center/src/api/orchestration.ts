@@ -619,7 +619,9 @@ export function buildExecutionSummary(input: {
   );
   const concurrentCrossEngineVerified = hasConcurrentCrossEngineRun(agents);
   const collaborationExpected = /colaboraci[oó]n|entre motores|ambos motores|multiagente|intercambio de contexto|compartir resultados/i.test(input.instructions);
-  const requiresAllAgents = /(?:siete|7) agentes|participaci[oó]n obligatoria|todos los agentes/i.test(input.instructions);
+  // Mentioning "todos los agentes" to inspect their configuration does not
+  // require running all seven. Reserve this gate for explicit participation.
+  const requiresAllAgents = /participaci[oó]n obligatoria(?: de (?:los )?(?:siete|7|todos los) agentes)?|(?:los )?(?:siete|7|todos los) agentes.{0,65}(?:participen|trabajen|ejecuten|act[uú]en|simult[aá]neamente)|(?:ejecuta|ejecutar|activa|activar|convoca|convocar).{0,35}(?:los )?(?:siete|7|todos los) agentes/i.test(input.instructions);
   const missingExpected = EXPECTED_AGENTS.filter((agentId) => !agents.some((agent) => agent.agentId === agentId));
   const mandatoryUnavailable = requiresAllAgents && (skipped.length > 0 || missingExpected.length > 0);
   const collaborationVerified = claudeToOpenCode && openCodeToClaude;
@@ -641,7 +643,12 @@ export function buildExecutionSummary(input: {
       skipped.length > 0 || collaborationIncomplete || integrity.status === "observations" || approvalAuditIncomplete ? "observations" : "completed";
   const skippedText = skipped.length ? ` Agentes deshabilitados u omitidos: ${skipped.join(", ")}.` : "";
   const missingText = missingExpected.length ? ` No hay registro de: ${missingExpected.join(", ")}.` : "";
-  const fallback = `Se completaron ${succeeded} de ${agents.length} agentes registrados. Se entregaron ${handoffs.length} handoffs, de los cuales ${verifiedCrossEngineHandoffs} cruces entre motores están verificados de extremo a extremo. ${concurrentCrossEngineVerified ? "Se verificó solapamiento temporal real entre Claude Code y OpenCode." : "No se verificó solapamiento temporal entre motores."}${skippedText}${missingText}`;
+  const collaborationDescription = collaborationExpected
+    ? ` Se verificaron ${verifiedCrossEngineHandoffs} handoffs entre motores. ${concurrentCrossEngineVerified ? "Se verificó solapamiento temporal real entre Claude Code y OpenCode." : "No se verificó solapamiento temporal entre motores."}`
+    : crossEngineHandoffs > 0
+      ? ` ${verifiedCrossEngineHandoffs} de ${crossEngineHandoffs} handoffs entre motores fueron verificados.`
+      : " Esta ronda no solicitó colaboración entre motores; no es un criterio de éxito.";
+  const fallback = `Se completaron ${succeeded} de ${agents.length} agentes registrados. Se entregaron ${handoffs.length} handoffs.${collaborationDescription}${skippedText}${missingText}`;
   const headline = verdict === "completed" ? "Ejecución completada" :
     verdict === "observations" ? "Ejecución completada con observaciones" : "Objetivo de integración no cumplido";
   return {

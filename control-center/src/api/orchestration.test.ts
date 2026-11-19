@@ -735,3 +735,33 @@ test("handoff identity accepts a markdown heading but rejects IDs buried in the 
   assert.equal(hasHandoffIdAtStart("**" + id + "**\nReport", id), true);
   assert.equal(hasHandoffIdAtStart("Informe del agente\n" + id, id), false);
 });
+
+test("checking configuration of all agents does not require running all seven", () => {
+  const summary = buildExecutionSummary({
+    instructions: "Verifiquemos que todos los agentes tengan bien configurados los modelos solicitados.",
+    agents: [
+      { agentId: "build", engine: "opencode", status: "succeeded", startedAt: "2026-11-19T16:12:00Z", finishedAt: "2026-11-19T16:13:00Z", handoffIn: [] },
+      { agentId: "tester", engine: "opencode", status: "succeeded", startedAt: "2026-11-19T16:13:00Z", finishedAt: "2026-11-19T16:14:00Z", handoffIn: [] },
+      ...["architect", "cloud-arbiter", "implementer", "reverse", "reviewer"].map((agentId) => ({
+        agentId, engine: "claude" as const, status: "skipped" as const, startedAt: null, finishedAt: null, handoffIn: []
+      }))
+    ],
+    results: []
+  });
+  assert.equal(summary.verdict, "observations");
+  assert.equal(summary.headline, "Ejecución completada con observaciones");
+  assert.match(summary.overview, /no solicitó colaboración entre motores/);
+  assert.equal(summary.collaboration.concurrentCrossEngineVerified, false);
+});
+
+test("explicit execution of all seven agents still fails if some are skipped", () => {
+  const summary = buildExecutionSummary({
+    instructions: "Quiero que todos los agentes participen en esta ronda.",
+    agents: [
+      { agentId: "build", engine: "opencode", status: "succeeded", startedAt: null, finishedAt: null, handoffIn: [] },
+      { agentId: "reviewer", engine: "claude", status: "skipped", startedAt: null, finishedAt: null, handoffIn: [] }
+    ],
+    results: []
+  });
+  assert.equal(summary.verdict, "failed");
+});
