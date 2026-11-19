@@ -2392,3 +2392,20 @@ textarea::placeholder { color: #777f8b; }
 
 /* Expandable low-level transport logs stay available without flooding the default console. */
 .terminal-details-toggle { margin-bottom: 10px; font-size: 12px; }
+
+/* El Auditor tiene visibilidad permanente sin competir con el formulario humano. */
+.auditor-status-panel { display:grid; gap:8px; padding:15px 17px; border:1px solid #9ac4b3; border-radius:10px; background:#f1faf5; }
+.auditor-status-heading { display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px; color:#225947; font-size:13px; letter-spacing:.3px; }
+.auditor-status-heading span { font:700 10px ui-monospace,monospace; color:#26745d; }
+.auditor-status-panel p { margin:0; line-height:1.6; font-size:13px; color:#3d6556; }
+.auditor-status-details { display:flex; gap:10px; flex-wrap:wrap; font-size:12px; color:#426b5a; }
+.auditor-status-details span { padding:6px 8px; border:1px solid #c2dfd0; border-radius:6px; }
+.auditor-critical-decision { border:2px solid #be4b51; background:#fff8f7; }
+.auditor-danger-warning { border-left:3px solid #b62d38; background:#fff0f0; padding:12px; border-radius:5px; color:#922c33; font-size:13px; line-height:1.6; }
+@media (prefers-color-scheme:dark) {
+  .auditor-status-panel { background:#19372d; border-color:#3a7862; }
+  .auditor-status-heading,.auditor-status-heading span,.auditor-status-panel p,.auditor-status-details { color:#d2f4e4; }
+  .auditor-status-details span { border-color:#487967; }
+  .auditor-critical-decision { background:#3c2228; }
+  .auditor-danger-warning { background:#57252c; color:#ffdcdf; }
+}

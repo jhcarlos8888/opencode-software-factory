@@ -48,6 +48,45 @@ Las continuaciones de un proceso de trabajo conservan el objetivo original, el h
 - Las decisiones humanas pasan por los estados pending → responding → approved/rejected/answered. La reserva SQLite es atómica para impedir doble respuesta. Si el estado externo del motor no puede reconciliarse, la decisión queda huérfana y requiere revisión; no se vuelve a aprobar automáticamente.
 - Los informes de handoff se validan mediante ID, SHA-256, longitudes UTF-8, identidad del emisor y truncamiento. Los secretos conocidos se redactan antes de persistir los handoffs.
 
+## Agente del sistema: Auditor de permisos (v1)
+
+**Activo automáticamente durante cada ronda**. No es un modelo de lenguaje
+adicional que pueda inventar autorizaciones, sino un motor de políticas
+deterministas integrado en el orquestador. Supervisa las solicitudes tanto de
+OpenCode como de Claude Code y registra sus decisiones en los eventos
+`AUDITOR` de SQLite y en el Centro de decisiones.
+
+- **Autoaprobación de bajo riesgo:** consultas Git de solo lectura,
+  `npm run check`, `npm run test:unit`, `npm run smoke` y algunas
+  acciones de navegador local (navegar a inicio/salud, redimensionar,
+  consola, capturas confinadas). Cada permiso se concede **una sola vez**,
+  con el perfil `workspace-write` y durante la ronda activa.
+- **Decisión humana:** operaciones desconocidas, respuestas a formularios,
+  navegación web externa, `browser_evaluate`, clics arbitrarios,
+  instalación de dependencias, modificaciones Git (commit, push) o
+  comandos que no pasan la lista explícita. Nunca se usan los globs
+  `save: ["*"]` como concesión.
+- **Alerta crítica:** `pkill`, `kill`, `killall`, `fuser`,
+  borrados, reinicio/parada de servicios, comandos destructivos y
+  `git reset --hard` requieren una **confirmación humana puntual**
+  y no pueden recibir permiso reutilizable de la fábrica.
+  En el panel se muestran con aviso de riesgo elevado.
+- **Auditoría final de evidencias:** examina los recibos nativos de shell
+  persistidos y añade hallazgos de alto riesgo al resumen ejecutivo,
+  incluso cuando los otros agentes declaren éxito. El estado de una
+  prueba no prueba por sí mismo la seguridad del proceso.
+- **Autorreparación:** DESACTIVADA, sin cambios autónomos en el código de
+  la fábrica. Una eventual función de reparación requerirá diseño,
+  pruebas, reversión y consentimiento explícito en una ronda futura.
+
+**Límites de seguridad:** no es una sandbox del sistema operativo. Un
+script de prueba del propio repositorio puede ejecutar operaciones
+indirectas; por ello los proyectos y sus scripts deben ser confiables.
+Las instrucciones y las pruebas deben usar puertos y datos temporales
+aislados. Un agente no debe cerrar procesos según el nombre genérico
+`node server.js` ni matar el PID que simplemente escucha el puerto
+del proyecto: ese proceso puede pertenecer a un servicio persistente.
+
 ## Persistencia y privacidad
 
 El historial de ejecuciones, eventos, decisiones, aprobaciones, handoffs y procesos de trabajo se guarda en SQLite en:

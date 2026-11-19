@@ -889,6 +889,7 @@ export function getExecutionSnapshot(runId: string): ExecutionSnapshot | null {
         SELECT id FROM execution_events
         WHERE run_id = ? ORDER BY id DESC LIMIT 300
       ) OR
+      message LIKE '%Permiso aprobado automáticamente por Auditor%' OR
       message LIKE '%Autorización temporal aplicada automáticamente durante esta ejecución:%' OR
       message LIKE '%Autorización temporal reutilizada para la misma operación%' OR
       message LIKE '%Autorización temporal reutilizada durante esta ejecución por el mismo agente:%' OR
@@ -897,7 +898,8 @@ export function getExecutionSnapshot(runId: string): ExecutionSnapshot | null {
       message LIKE '%Solicitud atendida:%' OR
       message LIKE '%Solicitud pendiente:%' OR
       message LIKE '%Solicitud rechazada%' OR
-      message LIKE '%rechazó las demás solicitudes%'
+      message LIKE '%rechazó las demás solicitudes%' OR
+      area = 'AUDITOR'
     )
     ORDER BY id ASC
   `).all(runId, runId) as unknown as ExecutionEventRecord[];
@@ -942,6 +944,7 @@ export function getExecutionApprovalEvents(runId: string): ExecutionEventRecord[
       area, kind, message
     FROM execution_events
     WHERE run_id = ? AND (
+      message LIKE '%Permiso aprobado automáticamente por Auditor%' OR
       message LIKE '%Autorización temporal aplicada automáticamente durante esta ejecución:%' OR
       message LIKE '%Autorización temporal reutilizada para la misma operación%' OR
       message LIKE '%Autorización temporal reutilizada durante esta ejecución por el mismo agente:%' OR

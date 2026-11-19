@@ -26,6 +26,8 @@ import { classifyOpenCodeServerLog } from "./opencode-log-classifier.js";
 import { validateOpenCodeTurnResult } from "./opencode-turn-result.js";
 import { retryOpenCodeRead } from "./opencode-request-retry.js";
 import { buildOpenCodeChildPath } from "./opencode-environment.js";
+import { assessAuditorTool, assessOpenCodePermission, isProtectedShellCommand } from "./auditor-policy.js";
+import { inspectAuditorShellReceipts, appendAuditorOperationalFindings } from "./auditor-operations.js";
 import {
   buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
   extractClaudeFinalText, formatApprovalAuditContext, prepareHandoffOutput,
@@ -461,9 +463,18 @@ function createOpenCodeDecision(
   const proposedPatterns = Array.isArray(request.save) ? request.save : [];
   const resourceText = resources.length ? ` Recursos solicitados (elementos separados): ${JSON.stringify(resources)}.` : "";
   const patternText = proposedPatterns.length ? ` Patrones propuestos (elementos separados): ${JSON.stringify(proposedPatterns)}.` : "";
+  const assessment = kind === "permission"
+    ? assessOpenCodePermission(request, snapshot?.run.projectPath ?? "", agent.permissionProfile)
+    : null;
+  const securityPrefix = assessment?.verdict === "block"
+    ? "RIESGO ALTO · Revisión humana obligatoria. " : "";
   const description = kind === "permission"
-    ? `OpenCode solicita autorización para ${action}.${resourceText}${patternText}`
+    ? `${securityPrefix}OpenCode solicita autorización para ${action}.${resourceText}${patternText}${assessment ? " Auditor: " + assessment.reason : ""}`
     : String(request.metadata?.description ?? "OpenCode necesita información para continuar.");
+  if (assessment && assessment.verdict !== "auto") {
+    addLog(state.runId, "AUDITOR", assessment.verdict === "block" ? "warning" : "info",
+      `Revisión humana requerida para ${agent.agentId} · ${action}: ${assessment.reason}`, agent.id);
+  }
   createExecutionDecision({
     id: randomUUID(),
     runId: state.runId,
@@ -472,9 +483,9 @@ function createOpenCodeDecision(
     engineSessionId: sessionId,
     engineRequestId: requestId,
     kind,
-    title: kind === "permission" ? `Autorizar acción: ${action}` : "OpenCode necesita una respuesta",
+    title: kind === "permission" ? `${assessment?.verdict === "block" ? "RIESGO ALTO · " : ""}Autorizar acción: ${action}` : "OpenCode necesita una respuesta",
     description,
-    details: safeJson(request)
+    details: safeJson({ ...request, ...(assessment ? { auditor: assessment } : {}) })
   });
   if (kind === "permission") state.seenOpenCodePermissionRequests.add(requestKey);
   addLog(state.runId, agent.agentId.toUpperCase(), "warning", `Solicitud pendiente: ${description}`, agent.id);
@@ -506,7 +517,24 @@ async function pollOpenCodeAgent(
     if (!requestId) continue;
     const requestKey = `${sessionId}:${requestId}`;
     if (state.seenOpenCodePermissionRequests.has(requestKey)) continue;
-    if (matchesAgentRunApproval(state.openCodeRunApprovals, agent.id, request)) {
+    const auditorDecision = assessOpenCodePermission(
+      request, getExecutionSnapshot(state.runId)?.run.projectPath ?? "", agent.permissionProfile
+    );
+    if (auditorDecision.verdict === "auto") {
+      try {
+        await replyOpenCodePermission(runtime, sessionId, requestId, "once");
+        state.seenOpenCodePermissionRequests.add(requestKey);
+        addLog(state.runId, "AUDITOR", "success",
+          `Permiso aprobado automáticamente por Auditor (solo esta operación): ${agent.agentId} · ${String(request.action ?? request.permission)}. ${auditorDecision.reason}`,
+          agent.id);
+        continue;
+      } catch (error) {
+        addLog(state.runId, "AUDITOR", "warning",
+          `No se pudo autoaprobar; pasa al humano: ${error instanceof Error ? error.message : String(error)}`, agent.id);
+      }
+    }
+    if (auditorDecision.verdict !== "block" &&
+        matchesAgentRunApproval(state.openCodeRunApprovals, agent.id, request)) {
       try {
         await replyOpenCodePermission(runtime, sessionId, requestId, "once");
         state.seenOpenCodePermissionRequests.add(requestKey);
@@ -884,6 +912,19 @@ async function runClaudeAgent(
                 `Bloqueo del perfil read-only: se rechazó ${toolName}.`, agent.id);
               return deny("El perfil read-only de la fábrica no permite ejecutar comandos, escribir archivos ni delegar subagentes.");
             }
+            if (toolName === "Bash" && typeof toolInput.command === "string" &&
+                isProtectedShellCommand(toolInput.command)) {
+              addLog(state.runId, "AUDITOR", "warning",
+                `Comando de proceso/servicio protegido requiere revisión humana: ${agent.agentId}. No aprobar sin verificar propiedad del PID.`, agent.id);
+              return {
+                continue: true,
+                hookSpecificOutput: {
+                  hookEventName: "PreToolUse" as const,
+                  permissionDecision: "ask" as const,
+                  permissionDecisionReason: "AUDITOR: posible terminación de procesos o servicios persistentes. Se requiere autorización humana explícita."
+                }
+              };
+            }
             if (readTools.has(toolName)) {
               const allowed = await claudeToolPathIsAllowed(projectPath, toolName, toolInput);
               if (!allowed) {
@@ -923,8 +964,21 @@ async function runClaudeAgent(
           if (allowed) return { behavior: "allow", toolUseID: options.toolUseID };
         }
         const isQuestion = toolName === "AskUserQuestion";
+        const auditorDecision = !isQuestion ? assessAuditorTool({
+          engine: "claude", toolName, input, projectPath, permissionProfile: agent.permissionProfile
+        }) : null;
+        if (auditorDecision?.verdict === "auto") {
+          addLog(state.runId, "AUDITOR", "success",
+            `Permiso aprobado automáticamente por Auditor (solo esta operación): ${agent.agentId} · ${toolName}. ${auditorDecision.reason}`, agent.id);
+          return { behavior: "allow", toolUseID: options.toolUseID };
+        }
+        if (auditorDecision?.verdict === "block") {
+          addLog(state.runId, "AUDITOR", "warning",
+            `Alerta de alto riesgo: ${agent.agentId} · ${toolName}. ${auditorDecision.reason}`, agent.id);
+        }
         const approvalKey = claudeToolApprovalKey(toolName, input);
-        if (!isQuestion && hasAgentRunApprovalKey(state.claudeRunApprovalKeys, agent.id, approvalKey)) {
+        if (!isQuestion && auditorDecision?.verdict !== "block" &&
+            hasAgentRunApprovalKey(state.claudeRunApprovalKeys, agent.id, approvalKey)) {
           addLog(state.runId, agent.agentId.toUpperCase(), "success",
             `Autorización temporal reutilizada durante esta ejecución por el mismo agente: ${toolName}.`, agent.id);
           return { behavior: "allow", toolUseID: options.toolUseID };
@@ -936,10 +990,14 @@ async function runClaudeAgent(
               return String(question.question ?? question.header ?? "Pregunta del agente");
             }).join("\n")
           : "";
-        const details = { toolName, approvalKey, input: safeJson(input), displayName: options.displayName, blockedPath: options.blockedPath };
+        const details = {
+          toolName, approvalKey, input: safeJson(input), displayName: options.displayName,
+          blockedPath: options.blockedPath, ...(auditorDecision ? { auditor: auditorDecision } : {})
+        };
         const answer = await createClaudeDecision(
           state, agent, sessionId, isQuestion ? "question" : "permission", title,
-          isQuestion ? questionList || "Claude necesita que aclares un punto antes de continuar." : (options.description ?? `Claude solicita ejecutar ${toolName}.`),
+          isQuestion ? questionList || "Claude necesita que aclares un punto antes de continuar."
+            : `${auditorDecision?.verdict === "block" ? "RIESGO ALTO · Autorización humana obligatoria. " : ""}${options.description ?? `Claude solicita ejecutar ${toolName}.`}${auditorDecision ? " Auditor: " + auditorDecision.reason : ""}`,
           details, options.signal
         );
         if (isQuestion && answer.action === "answer") {
@@ -1386,9 +1444,16 @@ async function executeRun(
         agentRunId: event.agentRunId
       }))
     });
-    updateExecutionSummary(state.runId, summary);
-    addLog(state.runId, "EXECUTIVE-SUMMARY", summary.verdict === "failed" ? "warning" : "success",
-      JSON.stringify(summary));
+    const operationalFindings = inspectAuditorShellReceipts(getExecutionShellToolEvents(state.runId));
+    const auditedSummary = appendAuditorOperationalFindings(summary, operationalFindings);
+    for (const finding of operationalFindings) {
+      addLog(state.runId, "AUDITOR", "warning",
+        `Incidente operativo prioritario (recibos ${finding.evidence.join(", ")}): ${finding.description}`);
+    }
+    updateExecutionSummary(state.runId, auditedSummary);
+    addLog(state.runId, "EXECUTIVE-SUMMARY",
+      auditedSummary.verdict === "failed" || operationalFindings.length > 0 ? "warning" : "success",
+      JSON.stringify(auditedSummary));
 
     const hasFailed = snapshot.agents.some((agent) => agent.status === "failed") || failures.length > 0;
     const terminalStatus: ExecutionStatus = state.cancelled ? "cancelled" : hasFailed ? "failed" : "succeeded";
@@ -1396,10 +1461,10 @@ async function executeRun(
       const finalStatus = state.cancelled || hasFailed ? "failed" : "completed";
       const response = [
         "Ronda " + workflow.roundNumber + " · " + (state.cancelled ? "Cancelada" : hasFailed ? "Terminada con errores" : "Completada"),
-        summary.headline,
-        summary.overview,
-        summary.findings.length ? "Hallazgos: " + summary.findings.join(" | ") : "",
-        summary.nextSteps.length ? "Siguientes pasos: " + summary.nextSteps.join(" | ") : ""
+        auditedSummary.headline,
+        auditedSummary.overview,
+        auditedSummary.findings.length ? "Hallazgos: " + auditedSummary.findings.join(" | ") : "",
+        auditedSummary.nextSteps.length ? "Siguientes pasos: " + auditedSummary.nextSteps.join(" | ") : ""
       ].filter(Boolean).join("\n\n");
       addWorkMessage(workflow.threadId, state.runId, workflow.roundNumber, "assistant", response, "round-summary");
       updateWorkThreadStatus(workflow.threadId, finalStatus);
@@ -1579,6 +1644,10 @@ export async function startExecution(
       try { updateExecutionRun(id, "failed", true); } catch { /* Preserve the original startup error. */ }
       throw error;
     }
+    addLog(id, "AUDITOR", "success",
+      "Auditor de permisos activo: aprueba únicamente operaciones de bajo riesgo dentro del proyecto; "
+      + "operaciones desconocidas, destructivas y externas requieren intervención humana. "
+      + "Autorreparación: DESACTIVADA; no realiza cambios espontáneos en la fábrica.");
     runtimeByRun.set(id, state);
     void executeRun(state, resolvedProjectPath, instructions.trim(), factoryRoot, agents, taskPlan, {
       threadId: options.threadId ?? null, roundNumber, continuityContext,
@@ -1654,6 +1723,12 @@ export async function respondExecutionDecision(
   const details = decision.details && typeof decision.details === "object"
     ? decision.details as OpenCodePermission
     : {};
+  const auditDetails = details.auditor && typeof details.auditor === "object"
+    ? details.auditor as { verdict?: string } : null;
+  if (decision.kind === "permission" && response.action === "allow-run" &&
+      auditDetails?.verdict === "block") {
+    throw new Error("El Auditor no permite recordar autorizaciones de alto riesgo: requiere aprobación humana puntual cada vez.");
+  }
   const addedRules = decision.engine === "opencode" && decision.kind === "permission" && response.action === "allow-run"
     ? buildRunApprovalPatterns(details)
     : [];

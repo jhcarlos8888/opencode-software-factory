@@ -147,7 +147,7 @@ export interface ExecutionSummary {
 }
 
 function isAutomaticApprovalEvent(event: ApprovalAuditEvent): boolean {
-  return /autorización temporal aplicada automáticamente durante esta ejecución|autorización temporal reutilizada para la misma operación|autorización temporal reutilizada durante esta ejecución por el mismo agente/i
+  return /permiso aprobado automáticamente por auditor|autorización temporal aplicada automáticamente durante esta ejecución|autorización temporal reutilizada para la misma operación|autorización temporal reutilizada durante esta ejecución por el mismo agente/i
     .test(event.message);
 }
 

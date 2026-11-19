@@ -245,8 +245,17 @@ const roleNames: Record<string, string> = {
   reverse: "Ingeniería inversa"
 };
 
+function isCriticalAuditorDecision(decision: ExecutionData["decisions"][number]): boolean {
+  const details = decision.details && typeof decision.details === "object"
+    ? decision.details as Record<string, unknown> : {};
+  const audit = details.auditor && typeof details.auditor === "object"
+    ? details.auditor as Record<string, unknown> : {};
+  return audit.verdict === "block";
+}
+
 function canApproveDuringRun(decision: ExecutionData["decisions"][number]): boolean {
   if (decision.kind !== "permission" || !decision.details || typeof decision.details !== "object") return false;
+  if (isCriticalAuditorDecision(decision)) return false;
   const details = decision.details as Record<string, unknown>;
   if (decision.engine === "claude") return typeof details.approvalKey === "string" && details.approvalKey.length > 0;
   const action = details.action ?? details.permission;
@@ -714,6 +723,12 @@ export default function App() {
       setError("Escribe la respuesta antes de enviarla.");
       return;
     }
+    const selectedDecision = execution.decisions.find((item) => item.id === decisionId);
+    if ((action === "allow" || action === "allow-run") &&
+        selectedDecision && isCriticalAuditorDecision(selectedDecision) &&
+        !window.confirm("AUDITOR · RIESGO ALTO. Esta operación podría detener servicios, borrar datos o afectar recursos fuera del proyecto. ¿Has inspeccionado el comando EXACTO y autorizado conscientemente ejecutarlo una sola vez?")) {
+      return;
+    }
     setDecisionBusyId(decisionId);
     setError("");
     try {
@@ -809,17 +824,32 @@ export default function App() {
     ? terminalEvents
     : terminalEvents.filter((item) => !isLowSignalOpenCodeLog(item));
 
+  const auditorEvents = execution?.events.filter((event) => event.area === "AUDITOR") ?? [];
+  const auditorAutoCount = auditorEvents.filter((event) => event.message.startsWith("Permiso aprobado automáticamente")).length;
+  const auditorEscalationCount = auditorEvents.filter((event) => /revisión humana|alto riesgo|incidente operativo/i.test(event.message)).length;
   const decisionMonitoringPanel = (
 <section className="section-block decision-section" id="decisions">
             <div className="section-title-row">
               <div>
                 <div className="eyebrow">HUMAN IN THE LOOP / APPROVAL QUEUE</div>
                 <h2>Centro de decisiones</h2>
-                <p>Las sesiones se pausan cuando un agente necesita autorización o una aclaración. Tu respuesta se envía a la sesión que generó la solicitud.</p>
+                <p>El Auditor del sistema aprueba automáticamente solicitudes verificadas como seguras. Solo se muestran para tu decisión las preguntas y las operaciones desconocidas, sensibles o de alto riesgo.</p>
               </div>
               <span className={execution?.decisions.length ? "pending-tag decision-count" : "read-only-tag"}>
                 {execution?.decisions.length ?? 0} PENDIENTES
               </span>
+            </div>
+            <div className="auditor-status-panel" aria-label="Estado del agente Auditor">
+              <div className="auditor-status-heading">
+                <strong>◈ AGENTE AUDITOR · SEGURIDAD OPERATIVA</strong>
+                <span>{execution ? "ACTIVO EN LA RONDA" : "LISTO"}</span>
+              </div>
+              <p>Política verificable y conservadora: aprueba lecturas, pruebas y diagnósticos permitidos, con registro de cada decisión. No usa un modelo generativo para conceder permisos.</p>
+              <div className="auditor-status-details">
+                <span><strong>{auditorAutoCount}</strong> autoaprobaciones visibles</span>
+                <span><strong>{auditorEscalationCount}</strong> alertas/escalamientos visibles</span>
+                <span><strong>AUTOREPARACIÓN DESACTIVADA</strong></span>
+              </div>
             </div>
             {(!execution || execution.decisions.length === 0) && (
               <div className="decision-empty">
@@ -829,7 +859,7 @@ export default function App() {
             )}
             <div className="decision-list">
               {execution?.decisions.map((item) => (
-                <article className="decision-card" key={item.id}>
+                <article className={isCriticalAuditorDecision(item) ? "decision-card auditor-critical-decision" : "decision-card"} key={item.id}>
                   <div className="decision-card-head">
                     <div>
                       <span className="terminal-kicker">{item.engine === "claude" ? "CLAUDE CODE" : "OPENCODE"} · {item.kind === "permission" ? "AUTORIZACIÓN" : "ACLARACIÓN"}</span>
@@ -841,6 +871,11 @@ export default function App() {
                     </span>
                   </div>
                   <p>{item.description}</p>
+                  {isCriticalAuditorDecision(item) && (
+                    <div className="auditor-danger-warning" role="alert">
+                      RIESGO ALTO: el Auditor bloqueó la aprobación automática. Revisa el comando exacto y sus consecuencias antes de aprobar una sola vez; nunca actives permisos permanentes para esta acción.
+                    </div>
+                  )}
                   <details className="decision-details">
                     <summary>Ver contexto técnico</summary>
                     <pre>{JSON.stringify(item.details, null, 2)}</pre>
@@ -1542,7 +1577,7 @@ export default function App() {
                     <EngineActivityPanel engine="claude" execution={execution} roleNames={roleNames} statusLabels={statusLabels} />
                   </div>
 
-                  {execution.decisions.length > 0 && decisionMonitoringPanel}
+                  {decisionMonitoringPanel}
 
                   {(() => {
                     const currentAssistantMessage = workThread?.messages.find((message) =>
