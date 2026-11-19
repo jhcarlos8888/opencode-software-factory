@@ -57,6 +57,15 @@ export interface AgentResult {
   handoffOutput?: HandoffOutputRecord;
 }
 
+/**
+ * Only completed agent-authored reports can become transferable handoffs.
+ * A failed/cancelled/skipped agent may have explanatory error text, but that
+ * text is NOT a verified handoff; it stays in the run ledger.
+ */
+export function selectDeliverableHandoffSources(results: AgentResult[]): AgentResult[] {
+  return results.filter((result) => result.status === "succeeded" && Boolean(result.handoffOutput?.content));
+}
+
 export interface SummaryAgent {
   agentId: string;
   engine: CoordinationEngine;

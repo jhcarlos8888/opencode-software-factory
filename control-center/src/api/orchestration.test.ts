@@ -6,6 +6,7 @@ import {
 import assert from "node:assert/strict";
 import {
   buildApprovalAuditSummary, buildExecutionSummary, createHandoffDescriptor, createHandoffId,
+  selectDeliverableHandoffSources,
   extractCanonicalOpenCodeAssistantText, extractClaudeFinalText, formatApprovalAuditContext,
   hasConcurrentCrossEngineRun, hasHandoffIdAtStart, prepareHandoffOutput, type SummaryAgent
 } from "./orchestration.js";
@@ -764,4 +765,26 @@ test("explicit execution of all seven agents still fails if some are skipped", (
     results: []
   });
   assert.equal(summary.verdict, "failed");
+});
+
+
+test("failed phases cannot create synthetic handoffs for a subsequent agent", () => {
+  const reportId = "HANDOFF-BUILD-12345678";
+  const report = prepareHandoffOutput(reportId + "\nReal report", reportId);
+  const source = (agentId: string, status: "succeeded" | "failed" | "cancelled", handoffOutput?: typeof report) => ({
+    agentRunId: agentId + "-run", agentId, engine: "opencode" as const,
+    modelId: "opencode-go/glm-5.3-flash", sessionId: agentId + "-session", status,
+    startedAt: "2026-11-19T16:00:00Z", finishedAt: "2026-11-19T16:01:00Z",
+    handoffId: reportId, output: status === "succeeded" ? report.content : "FASE FALLIDA: permission rejected",
+    handoffOutput
+  });
+  const realReport = source("build", "succeeded", report);
+  const failedWithError = source("implementer", "failed");
+  const failedWithOldPayload = source("tester", "failed", report);
+  const cancelled = source("reviewer", "cancelled", report);
+  const successfulWithoutReport = source("architect", "succeeded");
+  assert.deepEqual(
+    selectDeliverableHandoffSources([realReport, failedWithError, failedWithOldPayload, cancelled, successfulWithoutReport]),
+    [realReport]
+  );
 });

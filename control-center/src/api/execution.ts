@@ -25,9 +25,11 @@ import { buildClaudeFactorySkillsSdkOptions, ensureClaudeFactorySkillsPlugin, ty
 import { classifyOpenCodeServerLog } from "./opencode-log-classifier.js";
 import { validateOpenCodeTurnResult } from "./opencode-turn-result.js";
 import { retryOpenCodeRead } from "./opencode-request-retry.js";
+import { buildOpenCodeChildPath } from "./opencode-environment.js";
 import {
   buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
-  extractClaudeFinalText, formatApprovalAuditContext, prepareHandoffOutput, type AgentResult, type HandoffDescriptor
+  extractClaudeFinalText, formatApprovalAuditContext, prepareHandoffOutput,
+  selectDeliverableHandoffSources, type AgentResult, type HandoffDescriptor
 } from "./orchestration.js";
 import {
   addExecutionEvent, addWorkMessage, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
@@ -135,7 +137,7 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
   // The user systemd service may not source NVM's shell initialization.
   // Prepend the Node runtime directory so OpenCode can spawn npx-backed MCPs.
   const runtimeBin = dirname(process.execPath);
-  const childPath = [runtimeBin, process.env.PATH ?? ""].filter(Boolean).join(delimiter);
+  const childPath = buildOpenCodeChildPath(runtimeBin, opencodeBinary, process.env.PATH);
   const child = spawn(opencodeBinary, ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--print-logs"], {
     // OpenCode discovers opencode.json and .opencode from its process cwd.
     // Start in the factory, not the user's project; the project is attached
@@ -738,7 +740,7 @@ function makeAgentPrompt(
     "Responde en español, con evidencia y límites explícitos. No crees subagentes ni delegues.",
     "",
     "PROTOCOLO DE ENTREGA:",
-    "Comienza con el identificador exacto " + handoffId + ". Indica agente, motor, modelo, INBOUND con los IDs exactos recibidos (" + expectedInbound + "), herramientas, hallazgos, discrepancias y recomendaciones.",
+    "PRIMERA LÍNEA CANÓNICA: escribe exactamente " + handoffId + " (sin #, prefijos, espacios ni texto previo). Después indica agente, motor, modelo, INBOUND con los IDs exactos recibidos (" + expectedInbound + "), herramientas, hallazgos, discrepancias y recomendaciones.",
     "No inventes handoffs. Usa solamente los IDs enumerados aquí. No declares ausentes agentes basándote solo en informes anteriores: los registros de ejecución son la fuente de verdad.",
     "Los metadatos de integridad calculados por el orquestador son autoritativos y prevalecen sobre cualquier frase del informe. Si idAuthor=ORQUESTADOR, no afirmes que el agente original emitió el ID. Si Truncado=SÍ, trata el contenido como incompleto y enumera qué no puedes verificar.",
     "",
@@ -1126,6 +1128,7 @@ async function executeRun(
       "Planificador: " + taskPlan.kind + "; complejidad " + taskPlan.complexity + "; profundidad " + taskPlan.depth + ".",
       depthGuidance,
       "Repositorio: " + projectPath,
+      "OpenCode CLI: " + opencodeBinary + ". Usa su ruta absoluta si el shell no la encuentra. No leas /proc/*/environ ni variables sensibles para descubrir ejecutables. Ante un rechazo de permiso, continúa con alternativas permitidas o informa del bloqueo.",
       "Cambios esperados por el planificador: " + (taskPlan.changesExpected ? "sí" : "no"),
       "Cada agente recibe los handoffs de las olas anteriores, con identidad, motor, modelo, sesión e intervalo temporal."
     ].join(String.fromCharCode(10));
@@ -1148,12 +1151,20 @@ async function executeRun(
         return cancelled;
       }
 
-      const delivered: HandoffDescriptor[] = inbound.map((result) =>
+      const deliverableInbound = selectDeliverableHandoffSources(inbound);
+      const unavailableInbound = inbound.filter((source) => !deliverableInbound.includes(source));
+      for (const unavailable of unavailableInbound) {
+        addLog(state.runId, "HANDOFF", "warning",
+          "Sin handoff de " + unavailable.agentId + " hacia " + agent.agentId +
+          ": fase " + unavailable.status + ". El error permanece en el ledger; no se fabrica identidad ni informe.",
+          agent.id);
+      }
+      const delivered: HandoffDescriptor[] = deliverableInbound.map((result) =>
         createHandoffDescriptor(result, agent.agentId, agent.id, agent.engine)
       );
       updateExecutionAgent(agent.id, { handoffIn: delivered });
-      for (let index = 0; index < inbound.length; index++) {
-        const source = inbound[index];
+      for (let index = 0; index < deliverableInbound.length; index++) {
+        const source = deliverableInbound[index];
         const descriptor = delivered[index];
         if (!source || !descriptor) continue;
         const outgoing = handoffOutByAgent.get(source.agentRunId) ?? [];
@@ -1233,7 +1244,13 @@ async function executeRun(
             ].join(String.fromCharCode(10))
           : structuralContext;
         const prompt = makeAgentPrompt(
-          agent, instructions, roleInstructions, agentStructuralContext, inbound, handoffId, taskPlan.changesExpected
+          agent, instructions, roleInstructions,
+          agentStructuralContext + (unavailableInbound.length
+            ? "\nFASES ANTERIORES SIN HANDOFF VALIDO: " +
+              unavailableInbound.map((source) => source.agentId + " (" + source.status + ")").join(", ") +
+              ". Consulta el ledger de la ronda para conocer sus errores; no afirmes haber recibido sus informes."
+            : ""),
+          deliverableInbound, handoffId, taskPlan.changesExpected
         );
         const output = agent.engine === "opencode"
           ? await runOpenCodeAgent(state, agent, projectPath, factoryRoot, prompt)
