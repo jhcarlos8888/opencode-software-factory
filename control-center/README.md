@@ -71,6 +71,13 @@ caracteres **independientemente** de la capacidad del archivo.
 ## Ejecución y permisos
 
 - Cada agente tiene motor, modelo favorito y perfil de permisos independiente.
+- En **Modelos favoritos**, el selector de OpenCode ahora distingue el
+  **Proveedor / conector**: elige **OpenCode Go** para ver sus modelos
+  separados del catálogo de NVIDIA, LM Studio y otros proveedores.
+  Los IDs de OpenCode mantienen el prefijo `opencode-go/`; Claude Code,
+  conectado al mismo proveedor, utiliza IDs sin dicho prefijo.
+  Los favoritos y asignaciones se mantienen guardados por separado.
+
 - Los perfiles disponibles son read-only, workspace-write y approval-required.
 - Los agentes de solo lectura usan el MCP local de archivos para consultar el proyecto; no reciben shell ni herramientas nativas de escritura.
 - Los accesos a rutas sensibles, credenciales, metadatos Git y rutas fuera del proyecto se bloquean en las capas de permisos y del MCP.

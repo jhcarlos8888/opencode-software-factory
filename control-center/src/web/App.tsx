@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { OpenCodeQuestionForm, type OpenCodeFormField } from "./OpenCodeQuestionForm";
 import { InstructionTxtPicker, type SelectedInstructionFile, type InstructionFileMetadata } from "./InstructionTxtPicker";
+import { catalogProviderOptions, modelsForOpenCodeProvider, preferredOpenCodeProvider } from "./model-catalog";
 import { MAX_WORK_INSTRUCTION_CHARS } from "../api/work-instruction-limit";
 
 type EngineId = "opencode" | "claude";
@@ -293,6 +294,7 @@ export default function App() {
   const [folderPicking, setFolderPicking] = useState(false);
   const [favorites, setFavorites] = useState<FavoriteModel[]>([]);
   const [favoriteEngine, setFavoriteEngine] = useState<EngineId>("opencode");
+  const [favoriteCatalogProvider, setFavoriteCatalogProvider] = useState("opencode-go");
   const [favoriteModelId, setFavoriteModelId] = useState("");
   const [favoriteTier, setFavoriteTier] = useState<ModelTier>("balanced");
   const [favoritesSaving, setFavoritesSaving] = useState(false);
@@ -335,6 +337,11 @@ export default function App() {
   const detectedClaudeProviderName = detectedClaudeProvider === "opencode-go" ? "OpenCode Go"
     : detectedClaudeProvider === "apmix" ? "APMix" : "Anthropic";
   const claudeDetectedModelCount = models.claude.filter((model) => model.source === "detected").length;
+  const openCodeProviders = useMemo(() => catalogProviderOptions(models.opencode), [models.opencode]);
+  const currentFavoriteProvider = preferredOpenCodeProvider(models.opencode, favoriteCatalogProvider);
+  const visibleFavoriteCatalog = favoriteEngine === "opencode"
+    ? modelsForOpenCodeProvider(models.opencode, currentFavoriteProvider)
+    : models.claude;
 
   useEffect(() => {
     void loadInitialData();
@@ -442,7 +449,12 @@ export default function App() {
       setClaudeProviderStatus(providerResponse);
       setFavorites(favoriteResponse.favorites);
       setProjectPath(projectPreferences.path);
-      setFavoriteModelId(openCodeModels.models[0]?.id ?? "");
+      setFavoriteModelId(
+        modelsForOpenCodeProvider(
+          openCodeModels.models,
+          preferredOpenCodeProvider(openCodeModels.models)
+        )[0]?.id ?? ""
+      );
       setAssignments(Object.fromEntries(assignmentResponse.assignments.map((item) => [item.agentId, item])));
       const preflight = preflightResponse.preflight;
       setAnalysis(preflight?.analysis ?? null);
@@ -523,15 +535,25 @@ export default function App() {
 
   function changeFavoriteEngine(engine: EngineId) {
     setFavoriteEngine(engine);
-    setFavoriteModelId(models[engine][0]?.id ?? "");
+    const options = engine === "opencode"
+      ? modelsForOpenCodeProvider(models.opencode, currentFavoriteProvider)
+      : models.claude;
+    setFavoriteModelId(options[0]?.id ?? "");
+  }
+
+  function changeFavoriteCatalogProvider(provider: string) {
+    setFavoriteCatalogProvider(provider);
+    setFavoriteModelId(modelsForOpenCodeProvider(models.opencode, provider)[0]?.id ?? "");
   }
 
   function addFavorite() {
-    if (!favoriteModelId) return;
+    const modelId = visibleFavoriteCatalog.some((model) => model.id === favoriteModelId)
+      ? favoriteModelId : (visibleFavoriteCatalog[0]?.id ?? "");
+    if (!modelId) return;
     const provider = favoriteEngine === "claude" ? detectedClaudeProvider : "opencode";
     setFavorites((current) => {
-      const next = current.filter((item) => !(item.engine === favoriteEngine && item.provider === provider && item.modelId === favoriteModelId));
-      return [...next, { engine: favoriteEngine, provider, modelId: favoriteModelId, tier: favoriteTier }];
+      const next = current.filter((item) => !(item.engine === favoriteEngine && item.provider === provider && item.modelId === modelId));
+      return [...next, { engine: favoriteEngine, provider, modelId, tier: favoriteTier }];
     });
   }
 
@@ -1116,6 +1138,7 @@ export default function App() {
             <div className="model-catalog-status">
               <span><strong>OpenCode</strong> · {models.opencode.length} modelos detectados en sus conectores</span>
               <span><strong>Claude Code</strong> · {detectedClaudeProviderName} detectado · {claudeDetectedModelCount} modelos del conector</span>
+              <span>OpenCode Go: {openCodeProviders.find((option) => option.id === "opencode-go")?.count ?? 0} modelos visibles en su proveedor</span>
               <span className={claudeProviderStatus?.configured ? "catalog-status-ready" : "catalog-status-review"}>
                 {claudeProviderStatus?.configured ? "Configuración local detectada" : "Revisar configuración local de Claude Code"}
               </span>
@@ -1128,12 +1151,34 @@ export default function App() {
                   <option value="claude">Claude Code · {detectedClaudeProviderName}</option>
                 </select>
               </div>
+              {favoriteEngine === "opencode" && (
+                <div className="select-field favorite-provider-select">
+                  <label htmlFor="favorite-provider">PROVEEDOR / CONECTOR</label>
+                  <select
+                    id="favorite-provider"
+                    value={currentFavoriteProvider}
+                    onChange={(event) => changeFavoriteCatalogProvider(event.target.value)}
+                  >
+                    <option value="all">Todos los proveedores · {models.opencode.length} modelos</option>
+                    {openCodeProviders.map((option) => (
+                      <option key={option.id} value={option.id}>
+                        {option.label} · {option.count} modelos
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               <div className="select-field favorite-model-select">
                 <label htmlFor="favorite-model">MODELO DISPONIBLE</label>
-                <select id="favorite-model" value={favoriteModelId} onChange={(event) => setFavoriteModelId(event.target.value)} disabled={models[favoriteEngine].length === 0}>
-                  {models[favoriteEngine].length === 0
-                    ? <option value="">No se detectaron modelos para este motor</option>
-                    : models[favoriteEngine].map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}
+                <select
+                  id="favorite-model"
+                  value={visibleFavoriteCatalog.some((model) => model.id === favoriteModelId) ? favoriteModelId : (visibleFavoriteCatalog[0]?.id ?? "")}
+                  onChange={(event) => setFavoriteModelId(event.target.value)}
+                  disabled={visibleFavoriteCatalog.length === 0}
+                >
+                  {visibleFavoriteCatalog.length === 0
+                    ? <option value="">No se detectaron modelos para este proveedor</option>
+                    : visibleFavoriteCatalog.map((model) => <option value={model.id} key={model.id}>{model.label}</option>)}
                 </select>
               </div>
               <div className="select-field">
@@ -1142,8 +1187,9 @@ export default function App() {
                   <option value="economy">Económico</option><option value="balanced">Equilibrado</option><option value="premium">Premium</option>
                 </select>
               </div>
-              <button className="primary-button" type="button" onClick={addFavorite} disabled={!favoriteModelId}>Añadir favorito <span>+</span></button>
+              <button className="primary-button" type="button" onClick={addFavorite} disabled={visibleFavoriteCatalog.length === 0}>Añadir favorito <span>+</span></button>
             </div>
+            <p className="favorite-provider-hint">Elige <strong>OpenCode → OpenCode Go</strong> para ver solo sus modelos. En Claude Code se muestran sin el prefijo <code>opencode-go/</code>, porque así los identifica ese motor.</p>
             <div className="favorite-list">
               {favorites.length === 0 && <div className="empty-favorites">Todavía no tienes favoritos. Añade modelos de OpenCode y Claude Code para habilitar la asignación automática.</div>}
               {favorites.map((item) => (

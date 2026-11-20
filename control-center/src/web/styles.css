@@ -263,7 +263,7 @@ h1 { margin: 8px 0 7px; font-size: clamp(25px, 3vw, 34px); letter-spacing: -1.1p
 .project-instructions-label { display:block; margin-top:16px; margin-bottom:7px; color:#64738a; font-size:9px; font-weight:800; letter-spacing:.65px; }
 .project-instructions { display:block; width:100%; resize:vertical; min-height:110px; border:1px solid #e1e7f0; border-radius:8px; padding:12px 13px; color:#33445e; background:#fcfdff; font:11px/1.6 inherit; outline:none; }
 .project-instructions:focus { border-color:#879ce8; box-shadow:0 0 0 3px #879ce81a; }
-.favorite-add-row { display:grid; grid-template-columns: .85fr 1.7fr 1fr auto; align-items:end; gap:12px; }
+.favorite-add-row { display:grid; grid-template-columns: minmax(120px,.8fr) minmax(155px,1fr) minmax(205px,1.6fr) minmax(105px,.75fr) auto; align-items:end; gap:12px; }
 .favorite-add-row .primary-button { min-height:38px; white-space:nowrap; }
 .favorite-model-select { min-width:0; }
 .favorite-list { display:grid; gap:7px; margin-top:14px; }
@@ -2467,4 +2467,18 @@ textarea::placeholder { color: #777f8b; }
   color: #b5ddff;
   font-size: 12px;
   overflow-wrap: anywhere;
+}
+
+/* Group the catalog by connector rather than making users scroll through
+   dozens of unrelated provider models before OpenCode Go. */
+.favorite-provider-select { min-width: 0; }
+.favorite-provider-hint { color: #aab7c5; font-size: 12px; line-height: 1.55; }
+.favorite-provider-hint code { color: #cde7ff; }
+@media (max-width: 1260px) {
+  .favorite-add-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .favorite-add-row .favorite-model-select { grid-column: 1 / -1; }
+}
+@media (max-width: 560px) {
+  .favorite-add-row { grid-template-columns: minmax(0, 1fr); }
+  .favorite-add-row .favorite-model-select { grid-column: auto; }
 }
