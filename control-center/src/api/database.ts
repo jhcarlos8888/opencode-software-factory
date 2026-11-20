@@ -4,6 +4,7 @@ import { dirname, join } from "node:path";
 import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import type { ExecutionSummary, HandoffDescriptor, HandoffOutputMetadata, HandoffOutputRecord } from "./orchestration.js";
+import { MAX_FILES_PER_WORK_THREAD, type InstructionFileMetadata, type StoredInstructionFile, type ValidInstructionFile } from "./instruction-files.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
 
 export type EngineId = "opencode" | "claude";
@@ -178,6 +179,17 @@ db.exec(`
     content TEXT NOT NULL,
     created_at TEXT NOT NULL
   );
+  CREATE TABLE IF NOT EXISTS work_instruction_files (
+    id TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL REFERENCES work_threads(id) ON DELETE CASCADE,
+    round_number INTEGER NOT NULL CHECK(round_number > 0),
+    name TEXT NOT NULL,
+    content TEXT NOT NULL,
+    sha256 TEXT NOT NULL,
+    byte_length INTEGER NOT NULL,
+    created_at TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_work_instruction_files_thread ON work_instruction_files(thread_id, round_number);
   CREATE INDEX IF NOT EXISTS idx_work_messages_thread ON work_messages(thread_id, id);
   CREATE INDEX IF NOT EXISTS idx_execution_events_run ON execution_events(run_id, id);
   CREATE INDEX IF NOT EXISTS idx_execution_decisions_pending ON execution_decisions(run_id, status);
@@ -606,6 +618,7 @@ export interface ExecutionConfigurationSnapshot {
   };
   roleInstructionDigests: Record<string, string>;
   roleInstructions: Record<string, string>;
+  instructionFiles?: Array<{ id: string; name: string; sha256: string; byteLength: number }>;
   workflowSkillDigest: string | null;
   workflowSkillContent: string;
 }
@@ -1049,6 +1062,7 @@ export function markUnfinishedExecutionsInterrupted(): void {
 export interface WorkThreadSnapshot {
   thread: WorkThreadRecord;
   messages: WorkMessageRecord[];
+  instructionFiles: InstructionFileMetadata[];
   rounds: ExecutionSnapshot[];
 }
 
@@ -1060,6 +1074,50 @@ export function createWorkThread(thread: Pick<WorkThreadRecord, "id" | "projectP
     INSERT INTO work_threads (id, project_path, objective, status, created_at, updated_at)
     VALUES (?, ?, ?, 'active', ?, ?)
   `).run(thread.id, thread.projectPath, thread.objective, now, now);
+}
+
+/** Persist only approved plaintext, never truncate source instructions. */
+export function saveWorkInstructionFile(
+  threadId: string, roundNumber: number, file: ValidInstructionFile
+): StoredInstructionFile {
+  if (!Number.isSafeInteger(roundNumber) || roundNumber < 1) {
+    throw new RangeError("Número de ronda inválido para el TXT.");
+  }
+  const countRow = db.prepare("SELECT COUNT(*) AS count FROM work_instruction_files WHERE thread_id = ?")
+    .get(threadId) as { count: number };
+  if (countRow.count >= MAX_FILES_PER_WORK_THREAD) {
+    throw new RangeError("Este proceso alcanzó el máximo de 8 archivos TXT. Reutiliza uno anterior.");
+  }
+  const record: StoredInstructionFile = {
+    ...file, id: randomUUID(), threadId, roundNumber, createdAt: new Date().toISOString()
+  };
+  db.prepare(`
+    INSERT INTO work_instruction_files
+      (id, thread_id, round_number, name, content, sha256, byte_length, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    record.id, record.threadId, record.roundNumber, record.name,
+    record.content, record.sha256, record.byteLength, record.createdAt
+  );
+  db.prepare("UPDATE work_threads SET updated_at = ? WHERE id = ?")
+    .run(record.createdAt, threadId);
+  return record;
+}
+
+export function listWorkInstructionFiles(threadId: string): InstructionFileMetadata[] {
+  return db.prepare(`
+    SELECT id, thread_id AS threadId, round_number AS roundNumber,
+      name, sha256, byte_length AS byteLength, created_at AS createdAt
+    FROM work_instruction_files WHERE thread_id = ? ORDER BY round_number, rowid
+  `).all(threadId) as unknown as InstructionFileMetadata[];
+}
+
+export function getWorkInstructionFile(threadId: string, fileId: string): StoredInstructionFile | null {
+  return db.prepare(`
+    SELECT id, thread_id AS threadId, round_number AS roundNumber,
+      name, content, sha256, byte_length AS byteLength, created_at AS createdAt
+    FROM work_instruction_files WHERE thread_id = ? AND id = ?
+  `).get(threadId, fileId) as StoredInstructionFile | undefined ?? null;
 }
 
 export function addWorkMessage(
@@ -1114,7 +1172,7 @@ export function getWorkThreadSnapshot(threadId: string): WorkThreadSnapshot | nu
   const rounds = runIds.map((item) => getExecutionSnapshot(item.id)).filter(
     (item): item is ExecutionSnapshot => item !== null
   );
-  return { thread: row, messages, rounds };
+  return { thread: row, messages, instructionFiles: listWorkInstructionFiles(threadId), rounds };
 }
 
 export function getLatestWorkThreadId(): string | null {

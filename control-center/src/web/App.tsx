@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { OpenCodeQuestionForm, type OpenCodeFormField } from "./OpenCodeQuestionForm";
+import { InstructionTxtPicker, type SelectedInstructionFile, type InstructionFileMetadata } from "./InstructionTxtPicker";
 import { MAX_WORK_INSTRUCTION_CHARS } from "../api/work-instruction-limit";
 
 type EngineId = "opencode" | "claude";
@@ -182,6 +183,7 @@ interface ExecutionConfigurationSnapshot {
   }>;
   roleInstructionDigests: Record<string, string>;
   roleInstructions: Record<string, string>;
+  instructionFiles?: Array<{ id: string; name: string; sha256: string; byteLength: number }>;
   workflowSkillDigest: string | null;
   workflowSkillContent: string;
 }
@@ -215,6 +217,7 @@ interface ExecutionData {
 interface WorkThreadSnapshot {
   thread: { id: string; projectPath: string; objective: string; status: "active" | "completed" | "failed"; createdAt: string; updatedAt: string };
   messages: WorkMessage[];
+  instructionFiles: InstructionFileMetadata[];
   rounds: ExecutionData[];
 }
 
@@ -313,6 +316,9 @@ export default function App() {
   const [handoffOutputLoading, setHandoffOutputLoading] = useState<Record<string, boolean>>({});
   const [handoffOutputErrors, setHandoffOutputErrors] = useState<Record<string, string>>({});
   const [continuationText, setContinuationText] = useState("");
+  const [selectedInstructionFile, setSelectedInstructionFile] = useState<SelectedInstructionFile | null>(null);
+  const [reuseInstructionFileId, setReuseInstructionFileId] = useState("");
+  const [instructionFileBusy, setInstructionFileBusy] = useState(false);
   const [continuationBusy, setContinuationBusy] = useState(false);
   const [executionStarting, setExecutionStarting] = useState(false);
   const [executionCancelling, setExecutionCancelling] = useState(false);
@@ -333,6 +339,13 @@ export default function App() {
   useEffect(() => {
     void loadInitialData();
   }, []);
+
+  // An attachment belongs only to the selected project and conversation.
+  // Never carry a pending TXT over when the user switches workspace/thread.
+  useEffect(() => {
+    setSelectedInstructionFile(null);
+    setReuseInstructionFileId("");
+  }, [projectPath, workThread?.thread.id]);
 
   useEffect(() => {
     const checkRuntimeBuild = () => {
@@ -612,7 +625,11 @@ export default function App() {
   async function submitWorkInstruction(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const instructions = continuationText.trim();
-    if (!instructions) return;
+    if (!instructions && !selectedInstructionFile && !reuseInstructionFileId) return;
+    if (instructionFileBusy) {
+      setError("Espera a que termine de cargar el archivo TXT.");
+      return;
+    }
     if (activeExecution || continuationBusy || executionStarting) {
       setError("Espera a que termine la ronda actual antes de enviar otra instrucción.");
       return;
@@ -631,11 +648,19 @@ export default function App() {
           execution: ExecutionData | null; workflow: WorkThreadSnapshot
         }>("/api/work-threads/" + workThread.thread.id + "/continue", {
           method: "POST",
-          body: JSON.stringify({ instructions })
+          body: JSON.stringify({
+            instructions,
+            ...(selectedInstructionFile
+              ? { instructionFile: { name: selectedInstructionFile.name, content: selectedInstructionFile.content } }
+              : {}),
+            ...(reuseInstructionFileId ? { reuseInstructionFileId } : {})
+          })
         });
         setExecution(result.execution);
         setWorkThread(result.workflow);
         setContinuationText("");
+        setSelectedInstructionFile(null);
+        setReuseInstructionFileId("");
         setNotice("Ronda " + (result.execution?.run.roundNumber ?? "nueva") + " iniciada. Se conservan el historial, los resultados y la evidencia anteriores.");
         recordActivity("WORKFLOW", "Continuación de proceso " + result.threadId + "; ejecución " + result.runId + ".", "success");
       } catch (cause) {
@@ -671,12 +696,17 @@ export default function App() {
         body: JSON.stringify({
           path: projectPath,
           instructions,
+          ...(selectedInstructionFile
+            ? { instructionFile: { name: selectedInstructionFile.name, content: selectedInstructionFile.content } }
+            : {}),
           preflightDepth: researchDepth
         })
       });
       setExecution(result.execution);
       setWorkThread(result.workflow);
       setContinuationText("");
+      setSelectedInstructionFile(null);
+      setReuseInstructionFileId("");
       setPreflightConsumed(true);
       setNotice("Proceso " + result.threadId.slice(0, 8) + " iniciado. Esta es la primera instrucción de la conversación; las siguientes continuarán aquí.");
       recordActivity("ORCHESTRATOR", "Ejecución real iniciada: " + result.runId + ".", "success");
@@ -1470,9 +1500,20 @@ export default function App() {
                     maxLength={MAX_WORK_INSTRUCTION_CHARS}
                     disabled={executionStarting || continuationBusy}
                   />
+                  <InstructionTxtPicker
+                    id="initial-instruction-txt"
+                    disabled={executionStarting || continuationBusy}
+                    selected={selectedInstructionFile}
+                    reusableFiles={[]}
+                    reuseFileId=""
+                    onSelected={setSelectedInstructionFile}
+                    onReuseChange={setReuseInstructionFileId}
+                    onBusyChange={setInstructionFileBusy}
+                    onError={setError}
+                  />
                   <div className="conversation-composer-footer">
                     <span>La preconsulta ya terminó. Esta instrucción iniciará el proceso y quedará guardada como el primer mensaje de la conversación. ({continuationText.length.toLocaleString("es-CO")} / {MAX_WORK_INSTRUCTION_CHARS.toLocaleString("es-CO")} caracteres)</span>
-                    <button className="primary-button" type="submit" disabled={!continuationText.trim() || executionStarting || continuationBusy}>
+                    <button className="primary-button" type="submit" disabled={(!continuationText.trim() && !selectedInstructionFile) || executionStarting || continuationBusy || instructionFileBusy}>
                       {executionStarting ? "Iniciando..." : "Comenzar trabajo"} <span>↗</span>
                     </button>
                   </div>
@@ -1656,9 +1697,20 @@ export default function App() {
                         maxLength={MAX_WORK_INSTRUCTION_CHARS}
                         disabled={activeExecution || continuationBusy}
                       />
+                      <InstructionTxtPicker
+                        id="continuation-instruction-txt"
+                        disabled={activeExecution || continuationBusy}
+                        selected={selectedInstructionFile}
+                        reusableFiles={workThread.instructionFiles ?? []}
+                        reuseFileId={reuseInstructionFileId}
+                        onSelected={setSelectedInstructionFile}
+                        onReuseChange={setReuseInstructionFileId}
+                        onBusyChange={setInstructionFileBusy}
+                        onError={setError}
+                      />
                       <div className="conversation-composer-footer">
                         <span>El proceso conserva el contexto, los resultados y la evidencia de las rondas anteriores. ({continuationText.length.toLocaleString("es-CO")} / {MAX_WORK_INSTRUCTION_CHARS.toLocaleString("es-CO")} caracteres)</span>
-                        <button className="primary-button" type="submit" disabled={!continuationText.trim() || activeExecution || continuationBusy || executionStarting}>
+                        <button className="primary-button" type="submit" disabled={(!continuationText.trim() && !selectedInstructionFile && !reuseInstructionFileId) || activeExecution || continuationBusy || executionStarting || instructionFileBusy}>
                           {continuationBusy || executionStarting ? "Preparando..." : "Enviar instrucción"} <span>↗</span>
                         </button>
                       </div>

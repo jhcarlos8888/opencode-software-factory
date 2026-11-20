@@ -38,6 +38,36 @@ La interfaz no es la frontera de seguridad: la API vuelve a comprobar estos requ
 
 Las continuaciones de un proceso de trabajo conservan el objetivo original, el historial conversacional, las configuraciones históricas, las decisiones y los handoffs de rondas anteriores.
 
+## Instrucciones extensas mediante archivos TXT
+
+El campo **Tu primera instrucción** y el chat de **¿Qué hacemos a continuación?**
+permiten adjuntar un archivo `.txt` guardado en UTF-8, sin necesidad de pegar
+su contenido en el formulario. El texto del chat continúa admitiendo 24.000
+caracteres **independientemente** de la capacidad del archivo.
+
+- Cada TXT puede ocupar hasta **128 KiB (131.072 bytes) UTF-8**; el sistema
+  acepta el documento completo o rechaza la solicitud explicando el límite.
+  No se recorta silenciosamente su contenido.
+- Se admite **un TXT activo por ronda**, junto con texto opcional escrito en
+  el chat. El selector permite subir uno nuevo o **reutilizar** un TXT de
+  una ronda anterior del mismo proceso. Hasta ocho archivos guardados por
+  proceso, con botón para descargar el original.
+- La fábrica guarda el contenido íntegro en **SQLite privado**, con nombre,
+  ronda de procedencia, tamaño y huella SHA-256. No copia el TXT al proyecto
+  de programación ni lo añade por accidente a sus commits.
+- El contenido íntegro del archivo elegido se incorpora a las instrucciones
+  de **cada agente que participe en esa ronda**, tanto en OpenCode como en
+  Claude Code, y también participa en la clasificación de la tarea. Los
+  archivos anteriores permanecen almacenados, pero **no se vuelven a
+  ejecutar automáticamente**: hay que seleccionarlos expresamente.
+- Si una lectura fuera a superar la ventana de contexto de un modelo,
+  el motor podría no procesarla en una sola interacción; un archivo más
+  corto o varias rondas reduce ese riesgo. Conservar cada byte en SQLite
+  e incluirlo en el prompt **no garantiza la comprensión del modelo**.
+- No adjuntes contraseñas, credenciales ni datos ajenos al propósito del
+  trabajo: los archivos se guardan como texto local y los modelos reciben
+  su contenido cuando se seleccionan.
+
 ## Ejecución y permisos
 
 - Cada agente tiene motor, modelo favorito y perfil de permisos independiente.

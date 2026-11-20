@@ -3,6 +3,7 @@
  * Separate from tool answers, approval receipts and log truncation limits.
  */
 export const MAX_WORK_INSTRUCTION_CHARS = 24_000;
+export const MAX_INSTRUCTION_FILE_BYTES = 128 * 1024;
 
 export function workInstructionLimitError(instructions: string): string | null {
   return instructions.length > MAX_WORK_INSTRUCTION_CHARS

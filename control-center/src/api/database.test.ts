@@ -48,6 +48,39 @@ test("SQLite retains all 24,000 characters of the first instruction and its chat
   assert.equal(database.getWorkThreadSnapshot("oversized-first-instruction-test"), null);
 });
 
+test("TXT attachment persists every byte, SHA-256 and source round and is confined to its work thread", async () => {
+  const { validateInstructionFile, MAX_FILES_PER_WORK_THREAD } = await import("./instruction-files.js");
+  const threadId = "txt-attachment-thread";
+  const otherThread = "txt-other-thread";
+  database.createWorkThread({ id: threadId, projectPath: isolatedStateDir, objective: "Instrucciones en TXT." });
+  database.createWorkThread({ id: otherThread, projectPath: isolatedStateDir, objective: "Proceso independiente." });
+  const content = "TAREA DE INVESTIGACIÓN\n".repeat(4500) + "\nFIN: validar última sección.";
+  const input = validateInstructionFile({ name: "instrucciones_largas.txt", content })!;
+  assert.ok(input.byteLength > 24_000);
+  const file = database.saveWorkInstructionFile(threadId, 1, input);
+  assert.equal(file.name, "instrucciones_largas.txt");
+  assert.equal(file.content, content);
+  assert.equal(file.roundNumber, 1);
+  const recovered = database.getWorkInstructionFile(threadId, file.id);
+  assert.equal(recovered?.content, content);
+  assert.equal(recovered?.byteLength, Buffer.byteLength(content, "utf8"));
+  assert.equal(recovered?.sha256, input.sha256);
+  assert.equal(database.getWorkInstructionFile(otherThread, file.id), null);
+  const visible = database.getWorkThreadSnapshot(threadId)!;
+  assert.equal(visible.instructionFiles.length, 1);
+  assert.equal(visible.instructionFiles[0]?.id, file.id);
+  assert.equal(visible.instructionFiles[0]?.sha256, input.sha256);
+  assert.equal("content" in visible.instructionFiles[0]!, false);
+  assert.equal(database.getWorkThreadSnapshot(otherThread)?.instructionFiles.length, 0);
+
+  const small = validateInstructionFile({ name: "nota.txt", content: "Seguir revisando." })!;
+  for (let i = 1; i < MAX_FILES_PER_WORK_THREAD; i++) {
+    database.saveWorkInstructionFile(threadId, i + 1, small);
+  }
+  assert.equal(database.listWorkInstructionFiles(threadId).length, MAX_FILES_PER_WORK_THREAD);
+  assert.throws(() => database.saveWorkInstructionFile(threadId, 9, small), /máximo de 8/);
+});
+
 test("SQLite retains every approval event beyond the UI event window and recovers unfinished work", () => {
   const runId = "database-integration-run";
   const threadId = "database-integration-thread";

@@ -2409,3 +2409,62 @@ textarea::placeholder { color: #777f8b; }
   .auditor-critical-decision { background:#3c2228; }
   .auditor-danger-warning { background:#57252c; color:#ffdcdf; }
 }
+
+/* TXT instructions belong to the same persisted chat as ordinary user text. */
+.instruction-txt-picker {
+  display: grid;
+  gap: 7px;
+  padding: 13px 15px;
+  border: 1px dashed #586575;
+  border-radius: 10px;
+  background: #252a32;
+  min-width: 0;
+}
+.instruction-txt-picker label {
+  color: #e7ebf0;
+  font-size: 13px;
+  font-weight: 700;
+}
+.instruction-txt-picker input[type="file"] {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  color: #d7dde7;
+  font: 13px/1.5 inherit;
+}
+.instruction-txt-picker small { color: #b0bac6; line-height: 1.5; }
+.instruction-txt-selection {
+  display: flex;
+  gap: 10px;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  overflow-wrap: anywhere;
+  color: #addbc2;
+  font-size: 13px;
+}
+.instruction-txt-selection button {
+  min-height: 34px;
+  padding: 5px 11px;
+  color: #fff;
+  background: #573840;
+  border: 1px solid #9e5b67;
+  border-radius: 7px;
+  cursor: pointer;
+}
+.instruction-txt-reuse { display: grid; gap: 7px; }
+.instruction-txt-reuse select {
+  width: 100%;
+  max-width: 100%;
+  padding: 9px 10px;
+  border-radius: 7px;
+  background: #1e2024;
+  color: #e4e9f0;
+  border: 1px solid #586575;
+}
+.instruction-txt-history { display: flex; flex-wrap: wrap; gap: 8px 14px; }
+.instruction-txt-history a {
+  color: #b5ddff;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}

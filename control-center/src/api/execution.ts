@@ -685,7 +685,8 @@ function makeAgentPrompt(
   projectContext: string,
   previousResults: AgentResult[],
   handoffId: string,
-  taskChangesExpected: boolean
+  taskChangesExpected: boolean,
+  instructionFileContext = ""
 ): string {
   const nl = String.fromCharCode(10);
   const roleNames: Record<string, string> = {
@@ -757,6 +758,8 @@ function makeAgentPrompt(
     "",
     "OBJETIVO E INSTRUCCIONES DEL USUARIO:",
     instructions,
+    "",
+    instructionFileContext,
     "",
     "CONTEXTO ESTRUCTURAL:",
     projectContext,
@@ -1118,6 +1121,7 @@ async function executeRun(
     roundNumber: number;
     continuityContext: string;
     skillContent: string;
+    instructionFileContext: string;
     roleInstructions: Record<string, string>;
   }
 ): Promise<void> {
@@ -1309,7 +1313,7 @@ async function executeRun(
               unavailableInbound.map((source) => source.agentId + " (" + source.status + ")").join(", ") +
               ". Consulta el ledger de la ronda para conocer sus errores; no afirmes haber recibido sus informes."
             : ""),
-          deliverableInbound, handoffId, taskPlan.changesExpected
+          deliverableInbound, handoffId, taskPlan.changesExpected, workflow.instructionFileContext
         );
         const output = agent.engine === "opencode"
           ? await runOpenCodeAgent(state, agent, projectPath, factoryRoot, prompt)
@@ -1509,6 +1513,9 @@ export interface StartExecutionOptions {
   threadId?: string | null;
   roundNumber?: number;
   continuityContext?: string;
+  instructionFileContext?: string;
+  instructionFilePlanningText?: string;
+  instructionFileMetadata?: Array<{ id: string; name: string; sha256: string; byteLength: number }>;
 }
 
 export async function startExecution(
@@ -1534,7 +1541,10 @@ export async function startExecution(
     const instructionLimitError = workInstructionLimitError(instructions);
     if (instructionLimitError) throw new RangeError(instructionLimitError);
     const assignments = listAssignments();
-    const taskPlan = planTask(instructions, depthOverride);
+    const taskPlan = planTask(
+      instructions + (options.instructionFilePlanningText ? "\n" + options.instructionFilePlanningText : ""),
+      depthOverride
+    );
     const selection = selectAgentsForTask(assignments, taskPlan);
     if (selection.unavailableRequiredAgentIds.length > 0) {
       const required = selection.unavailableRequiredAgentIds.join(", ");
@@ -1616,6 +1626,7 @@ export async function startExecution(
         },
         roleInstructionDigests: roleDigests,
         roleInstructions,
+        instructionFiles: options.instructionFileMetadata ?? [],
         workflowSkillDigest: workflowSkillSource
           ? createHash("sha256").update(workflowSkillSource).digest("hex") : null,
         workflowSkillContent: workflowSkillSource
@@ -1647,6 +1658,10 @@ export async function startExecution(
       try { updateExecutionRun(id, "failed", true); } catch { /* Preserve the original startup error. */ }
       throw error;
     }
+    for (const file of options.instructionFileMetadata ?? []) {
+      addLog(id, "INSTRUCTION-FILE", "success",
+        `TXT de instrucciones incorporado íntegramente para esta ronda: ${file.name}; ${file.byteLength} bytes UTF-8; SHA-256 ${file.sha256}. Contenido conservado en SQLite y disponible para cada agente.`);
+    }
     addLog(id, "AUDITOR", "success",
       "Auditor de permisos activo: aprueba únicamente operaciones de bajo riesgo dentro del proyecto; "
       + "operaciones desconocidas, destructivas y externas requieren intervención humana. "
@@ -1654,7 +1669,9 @@ export async function startExecution(
     runtimeByRun.set(id, state);
     void executeRun(state, resolvedProjectPath, instructions.trim(), factoryRoot, agents, taskPlan, {
       threadId: options.threadId ?? null, roundNumber, continuityContext,
-      skillContent: workflowSkillSource, roleInstructions
+      skillContent: workflowSkillSource,
+      instructionFileContext: options.instructionFileContext ?? "",
+      roleInstructions
     });
     return { runId: id };
   } finally {

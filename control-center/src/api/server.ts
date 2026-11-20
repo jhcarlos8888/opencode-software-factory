@@ -10,7 +10,7 @@ import { loadFactoryAssets, mergeAssignments } from "./factory.js";
 import {
   addWorkMessage, consumeProjectPreflight, createWorkThread, databaseInfo, decideProjectPreflight,
   getClaudeProviderPreference, getExecutionAgentHandoffOutput, getProjectPreferences, getProjectPreflight,
-  getWorkThreadSnapshot, listAssignments, listFavoriteModels, recordProjectPreflight, saveAssignments,
+  getWorkThreadSnapshot, getWorkInstructionFile, listAssignments, listFavoriteModels, recordProjectPreflight, saveAssignments, saveWorkInstructionFile,
   saveClaudeProviderPreference, saveFavoriteModels, saveProjectPreferences, synchronizeConfiguredClaudeModel,
   updateWorkThreadStatus,
   type AgentAssignment, type ClaudeProviderId, type EngineId, type FavoriteModel, type ModelTier, type PermissionMode, type PermissionProfile,
@@ -22,6 +22,7 @@ import { cancelExecution, getExecution, getLatestExecution, recoverExecutionStat
 import { compareRuntimeBuilds, parseRuntimeBuildInfo } from "./runtime-build.js";
 import { CONTROL_CENTER_SECURITY_HEADERS, inspectRequestSecurity } from "./request-security.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
+import { formatInstructionFilePrompt, validateInstructionFile } from "./instruction-files.js";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const factoryRoot = resolve(process.env.FACTORY_ROOT || resolve(currentDir, "../../.."));
@@ -644,6 +645,7 @@ function presentWorkThread(workflow: WorkThreadSnapshot): WorkThreadSnapshot {
   return {
     thread: workflow.thread,
     messages: workflow.messages,
+    instructionFiles: workflow.instructionFiles,
     rounds: workflow.rounds.map((round) => ({
       ...round,
       run: { ...round.run, continuityContext: "" },
@@ -658,6 +660,20 @@ app.get<{ Params: { threadId: string } }>("/api/work-threads/:threadId", async (
   if (!workflow) return reply.code(404).send({ error: "Proceso de trabajo no encontrado." });
   return { workflow: presentWorkThread(workflow) };
 });
+
+// The exact source text remains available to the human via the durable
+// thread; the regular thread snapshot exposes metadata only.
+app.get<{ Params: { threadId: string; fileId: string } }>(
+  "/api/work-threads/:threadId/instruction-files/:fileId",
+  async (request, reply) => {
+    const file = getWorkInstructionFile(request.params.threadId, request.params.fileId);
+    if (!file) return reply.code(404).send({ error: "Archivo TXT no encontrado para este proceso." });
+    const filename = file.name.replace(/[^A-Za-z0-9._-]/g, "_");
+    reply.header("Cache-Control", "no-store");
+    reply.header("Content-Disposition", `attachment; filename="${filename}"`);
+    return reply.type("text/plain; charset=utf-8").send(file.content);
+  }
+);
 
 app.get("/api/executions/latest", async () => ({
   execution: getLatestExecution()
@@ -678,7 +694,13 @@ app.get<{ Params: { runId: string } }>("/api/executions/:runId", async (request,
   return { execution };
 });
 
-app.post<{ Body: { path?: unknown; instructions?: unknown; preflightDepth?: unknown; taskDepth?: unknown } }>("/api/executions", async (request, reply) => {
+app.post<{ Body: { path?: unknown; instructions?: unknown; instructionFile?: unknown; preflightDepth?: unknown; taskDepth?: unknown } }>("/api/executions", async (request, reply) => {
+  let instructionFile;
+  try {
+    instructionFile = validateInstructionFile(request.body?.instructionFile);
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
   const projectPath = typeof request.body?.path === "string" ? request.body.path.trim() : getProjectPreferences().path;
   const rawInstructions = typeof request.body?.instructions === "string"
     ? request.body.instructions : getProjectPreferences().instructions;
@@ -688,9 +710,10 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; preflightDepth?: unkn
   if (!projectPath || !isAbsolute(projectPath)) {
     return reply.code(400).send({ error: "Selecciona una ruta absoluta para el proyecto." });
   }
-  if (!instructions) {
-    return reply.code(400).send({ error: "Escribe las instrucciones que deben ejecutar los agentes." });
+  if (!instructions && !instructionFile) {
+    return reply.code(400).send({ error: "Escribe una instrucción o adjunta un archivo TXT." });
   }
+  const effectiveInstructions = instructions || `Mi petición está definida en el archivo TXT adjunto. Léelo íntegramente y sigue su contenido para esta ronda: ${instructionFile?.name}.`;
   const preflightDepth = request.body?.preflightDepth;
   if (!["quick", "focused", "deep"].includes(String(preflightDepth))) {
     return reply.code(400).send({ error: "La profundidad de la preconsulta no coincide con la registrada." });
@@ -743,10 +766,16 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; preflightDepth?: unkn
     saveProjectPreferences(projectPath, "");
     const threadId = randomUUID();
     createdThreadId = threadId;
-    createWorkThread({ id: threadId, projectPath, objective: instructions });
-    addWorkMessage(threadId, null, 1, "user", instructions, "initial-instruction");
-    const result = await startExecution(projectPath, instructions, factoryRoot, taskDepth as "quick" | "focused" | "deep" | undefined, {
-      threadId, roundNumber: 1
+    createWorkThread({ id: threadId, projectPath, objective: effectiveInstructions });
+    const savedFile = instructionFile ? saveWorkInstructionFile(threadId, 1, instructionFile) : null;
+    addWorkMessage(threadId, null, 1, "user", effectiveInstructions, "initial-instruction");
+    const result = await startExecution(projectPath, effectiveInstructions, factoryRoot, taskDepth as "quick" | "focused" | "deep" | undefined, {
+      threadId, roundNumber: 1,
+      instructionFileContext: savedFile ? formatInstructionFilePrompt([savedFile]) : "",
+      instructionFilePlanningText: savedFile?.content ?? "",
+      instructionFileMetadata: savedFile
+        ? [{ id: savedFile.id, name: savedFile.name, sha256: savedFile.sha256, byteLength: savedFile.byteLength }]
+        : []
     });
     return reply.code(202).send({
       started: true, runId: result.runId, threadId, execution: getExecution(result.runId),
@@ -764,7 +793,7 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; preflightDepth?: unkn
 
 app.post<{
   Params: { threadId: string };
-  Body: { instructions?: unknown; taskDepth?: unknown };
+  Body: { instructions?: unknown; instructionFile?: unknown; reuseInstructionFileId?: unknown; taskDepth?: unknown };
 }>("/api/work-threads/:threadId/continue", async (request, reply) => {
   const workflow = getWorkThreadSnapshot(request.params.threadId);
   if (!workflow) return reply.code(404).send({ error: "Proceso de trabajo no encontrado." });
@@ -773,7 +802,30 @@ app.post<{
   const limitError = workInstructionLimitError(rawInstructions);
   if (limitError) return reply.code(400).send({ error: limitError });
   const instructions = rawInstructions.trim();
-  if (!instructions) return reply.code(400).send({ error: "Escribe la siguiente instrucción para continuar el proceso." });
+  let instructionFile;
+  try {
+    instructionFile = validateInstructionFile(request.body?.instructionFile);
+  } catch (error) {
+    return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+  }
+  const requestedFileId = request.body?.reuseInstructionFileId;
+  if (requestedFileId !== undefined && requestedFileId !== null &&
+      (typeof requestedFileId !== "string" || !/^[a-f0-9-]{36}$/.test(requestedFileId))) {
+    return reply.code(400).send({ error: "Identificador del archivo TXT anterior inválido." });
+  }
+  if (instructionFile && requestedFileId) {
+    return reply.code(400).send({ error: "Selecciona un archivo nuevo o reutiliza uno anterior, no ambos." });
+  }
+  const reusedFile = typeof requestedFileId === "string"
+    ? getWorkInstructionFile(request.params.threadId, requestedFileId) : null;
+  if (requestedFileId && !reusedFile) {
+    return reply.code(404).send({ error: "El archivo TXT no pertenece a este proceso." });
+  }
+  if (!instructions && !instructionFile && !reusedFile) {
+    return reply.code(400).send({ error: "Escribe una instrucción o selecciona un archivo TXT." });
+  }
+  const effectiveInstructions = instructions ||
+    `Mi petición está definida en el archivo TXT seleccionado. Léelo íntegramente y sigue su contenido para esta ronda: ${instructionFile?.name ?? reusedFile?.name}.`;
   const latestRound = workflow.rounds.at(-1);
   if (latestRound && ["queued", "running", "waiting"].includes(latestRound.run.status)) {
     return reply.code(409).send({ error: "La ronda actual todavía está activa. Puedes continuar cuando termine." });
@@ -798,14 +850,24 @@ app.post<{
     if (!existsSync(workflow.thread.projectPath) || !statSync(workflow.thread.projectPath).isDirectory()) {
       return reply.code(409).send({ error: "El proyecto original ya no está disponible en esa ruta." });
     }
-    addWorkMessage(request.params.threadId, null, roundNumber, "user", instructions, "continuation-instruction");
+    const savedFile = instructionFile
+      ? saveWorkInstructionFile(request.params.threadId, roundNumber, instructionFile)
+      : reusedFile;
+    addWorkMessage(request.params.threadId, null, roundNumber, "user", effectiveInstructions, "continuation-instruction");
     updateWorkThreadStatus(request.params.threadId, "active");
     const result = await startExecution(
       workflow.thread.projectPath,
-      instructions,
+      effectiveInstructions,
       factoryRoot,
       taskDepth as "quick" | "focused" | "deep" | undefined,
-      { threadId: request.params.threadId, roundNumber, continuityContext }
+      {
+        threadId: request.params.threadId, roundNumber, continuityContext,
+        instructionFileContext: savedFile ? formatInstructionFilePrompt([savedFile]) : "",
+        instructionFilePlanningText: savedFile?.content ?? "",
+        instructionFileMetadata: savedFile
+          ? [{ id: savedFile.id, name: savedFile.name, sha256: savedFile.sha256, byteLength: savedFile.byteLength }]
+          : []
+      }
     );
     return reply.code(202).send({
       started: true, runId: result.runId, threadId: request.params.threadId,
