@@ -1,12 +1,15 @@
 
 # OpenCode Software Factory
 
-Repositorio fuente de la fábrica de software multiagente: un instalador
-reversible que lleva agentes, comandos, skills y configuración a cualquier
-proyecto consumidor de OpenCode.
+Plataforma local de ingeniería de software multiagente que coordina OpenCode
+y Claude Code desde un centro de control web. Incluye un instalador reversible
+opcional para proyectos consumidores de OpenCode; no es necesario instalarlo
+en cada proyecto para utilizar el Control Center.
 
 ## Índice
 
+- [Inicio rápido](#inicio-rápido)
+- [Arquitectura y flujo de operación](#arquitectura-y-flujo-de-operación)
 - [Objetivos](#objetivos)
 - [Estructura del repositorio](#estructura-del-repositorio)
 - [Guía de uso](#guía-de-uso)
@@ -21,6 +24,90 @@ proyecto consumidor de OpenCode.
 - [Principios de calidad](#principios-de-calidad)
 - [Separación entre fábrica y proyectos consumidores](#separación-entre-fábrica-y-proyectos-consumidores)
 - [Limitaciones conocidas](#limitaciones-conocidas)
+- [Centro de operaciones multi-motor](#centro-de-operaciones-multi-motor)
+- [Uso del Centro de Control](#uso-del-centro-de-control)
+
+## Inicio rápido
+
+### Uso habitual en este equipo (servicio instalado)
+
+Desde cualquier terminal:
+
+```bash
+systemctl --user start factory-control-center.service
+systemctl --user status factory-control-center.service --no-pager
+curl -fsS http://127.0.0.1:4141/api/health | jq
+```
+
+Abre **http://127.0.0.1:4141/**. El servicio está habilitado para iniciar
+automáticamente con la sesión del usuario. La API y el frontend compilado
+comparten el puerto 4141, limitado a localhost. Comprueba que la salud
+devuelva `status: ok` y `build.runtimeMatchesDisk: true`.
+
+```bash
+# Logs en directo (Ctrl+C sale del visor, no detiene el servicio)
+journalctl --user -u factory-control-center.service -f
+# Reiniciar o detener: solo si no hay rondas activas
+systemctl --user restart factory-control-center.service
+systemctl --user stop factory-control-center.service
+# Habilitar inicio automático (requiere unidad ya instalada)
+systemctl --user enable factory-control-center.service
+```
+
+### Desarrollo o ejecución manual
+
+Requisitos del panel: Node.js >= 24, npm, Python 3, jq, Git y los CLI
+OpenCode/Claude Code configurados para los motores que se vayan a usar.
+Desde la raíz del repositorio:
+
+```bash
+cd control-center
+npm ci
+npm run dev
+```
+
+Abre http://127.0.0.1:5173 (Vite); la API usa 4141. Si el servicio
+systemd está activo, detenlo primero tras comprobar que no existen rondas
+activas. No ejecutes dos servidores en el mismo puerto. Para ejecución
+manual compilada, en vez de dev, usa `npm run build` y `npm start`;
+abre http://127.0.0.1:4141/. Ctrl+C termina el proceso manual.
+
+### Aplicar cambios al servicio instalado
+
+```bash
+cd control-center
+npm run deploy
+```
+
+El despliegue ya ejecuta `npm run verify`, compila y reinicia systemd;
+después comprueba la huella del build. No requiere ejecutar verify dos
+veces. Para verificar sin desplegar, usa `npm run verify`. No despliegues
+durante una ronda activa. El script presupone una unidad systemd existente;
+en una máquina nueva se puede usar el modo manual sin ella. En este equipo
+la unidad apunta a `~/.local/share/opencode-software-factory`, enlace al
+repositorio de trabajo. En otro equipo verifica las rutas con
+`systemctl --user cat factory-control-center.service`.
+
+## Arquitectura y flujo de operación
+
+- Frontend React/Vite y API Fastify/TypeScript en `control-center/`.
+- Orquestador con adaptadores OpenCode y Claude Code, asignación por agente
+  desde favoritos, ejecución por olas, handoffs, decisiones y arbitraje.
+- SQLite conserva procesos, rondas, historial, permisos y evidencias.
+- Auditor de permisos determinista: no es un octavo modelo ni una sandbox.
+- Flujo: seleccionar proyecto → preconsulta → aceptar propuesta o configurar
+  manualmente → guardar equipo → iniciar instrucciones → revisar decisiones
+  y resultados → continuar el proceso. Se admiten instrucciones TXT.
+- La instalación clásica de agentes es una modalidad separada del panel;
+  sus modelos y permisos estáticos no describen las asignaciones dinámicas
+  del Control Center.
+
+Referencias: [manual del panel](control-center/README.md),
+[guía de usuario](docs/GUIA-USUARIO-CONTROL-CENTER.md),
+[arquitectura](docs/multi-engine/01-arquitectura-multimotor.md),
+[hoja de ruta](docs/multi-engine/02-hoja-de-ruta.md) y
+[seguridad](docs/SECURITY-BASELINE.md). La salud del servicio no demuestra
+por sí sola la colaboración real entre motores ni la disponibilidad de cuotas.
 
 ## Objetivos
 
@@ -32,6 +119,8 @@ proyecto consumidor de OpenCode.
 
 ## Estructura del repositorio
 
+- `control-center/`: aplicación web, API, orquestación, adaptadores, pruebas y despliegue.
+- `docs/`: guía de operación, seguridad, arquitectura y hoja de ruta.
 - `.opencode/agents/`: 7 agentes Markdown (`build`, `architect`,
   `implementer`, `reviewer`, `tester`, `cloud-arbiter`, `reverse`).
 - `.opencode/commands/`: 5 comandos (`/planificar`, `/implementar`,
@@ -67,6 +156,9 @@ instalando la fábrica sobre un proyecto consumidor de ese stack, y el
 `self-test` trabaja con directorios temporales aislados.
 
 ## Guía de uso
+
+Esta sección documenta principalmente el instalador clásico de OpenCode.
+Para operar el panel multi-motor, consulta Inicio rápido.
 
 ### Requisitos previos
 
@@ -544,8 +636,7 @@ al modelo por defecto.
 
 Requisitos:
 
-- Plan OpenCode Go activo, con un límite de uso de aproximadamente
-  **60 $/mes** propio del plan Go.
+- Plan OpenCode Go activo, con cuotas sujetas al proveedor; consulta los límites vigentes en tu cuenta.
 - Conexión del workspace mediante `/connect` → **OpenCode Go**
   (autenticación con la cuenta de OpenCode).
 
@@ -596,8 +687,7 @@ y comandos de arranque (binarios, `npx`, URL remota): no contienen
 credenciales ni tokens.
 
 **SonarQube no se usa**: requiere servidor propio o cuenta SonarCloud con
-token, `sonar-scanner` no está instalado y tampoco hay Docker para
-levantarlo. Mientras tanto, la estrategia es la CLI-first descrita en
+token, `sonar-scanner` no está instalado y no hay un servidor SonarQube configurado. Mientras tanto, la estrategia es la CLI-first descrita en
 [Calidad Java](#calidad-java). Si algún día se adopta, la configuración del
 escáner, la URL del servidor y el **token van en la configuración global
 del usuario** o en variables de entorno.
@@ -635,8 +725,8 @@ duda.
 
 ## Limitaciones conocidas
 
-- **Sin Docker**: no se pueden ejecutar pruebas con Testcontainers ni
-  contenedores (`docker --version` → 127).
+- **Docker/Podman**: los CLI están instalados en este equipo; las pruebas con
+  contenedores dependen del daemon, imágenes y servicios requeridos.
 - **Sin herramientas SAST/secretos instaladas**: `semgrep`, `bandit`,
   `sonar-scanner`, `codeql`, `truffleHog` y `detect-secrets` no están en el
   PATH; se informan como "no disponibles".
@@ -669,7 +759,6 @@ Antes de desplegar cambios:
 
 ~~~bash
 cd control-center
-npm run verify
 npm run deploy
 ~~~
 

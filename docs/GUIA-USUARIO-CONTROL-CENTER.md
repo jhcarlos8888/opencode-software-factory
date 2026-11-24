@@ -8,9 +8,10 @@ Dirección local:
 
 http://127.0.0.1:4141/
 
-Comprobar su estado:
+Iniciar si está detenido y comprobar su estado:
 
 ~~~bash
+systemctl --user start factory-control-center.service
 systemctl --user status factory-control-center.service
 curl -sS http://127.0.0.1:4141/api/health | jq
 ~~~
@@ -29,7 +30,6 @@ No basta con compilar. El procedimiento normal de despliegue es:
 
 ~~~bash
 cd control-center
-npm run verify
 npm run deploy
 ~~~
 

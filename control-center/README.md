@@ -11,12 +11,24 @@ Interfaz local de operación de OpenCode Software Factory. Coordina agentes de O
 - Las credenciales permanecen en las instalaciones locales de cada herramienta; no se almacenan en el repositorio ni en el manifiesto del equipo.
 - La línea base de seguridad, incluida la excepción temporal de picomatch, está registrada en docs/SECURITY-BASELINE.md.
 
+## Arranque habitual (servicio instalado)
+
+~~~bash
+systemctl --user start factory-control-center.service
+systemctl --user status factory-control-center.service --no-pager
+curl -fsS http://127.0.0.1:4141/api/health | jq
+~~~
+
+Abre http://127.0.0.1:4141/. No inicies dev o start con el servicio activo;
+comparten el puerto 4141. Para detener o reiniciar, comprueba antes que no
+haya rondas activas. Consulta el [inicio rápido](../README.md#inicio-rápido).
+
 ## Desarrollo local
 
 Desde este directorio:
 
 ~~~bash
-npm install
+npm ci
 npm run dev
 ~~~
 
