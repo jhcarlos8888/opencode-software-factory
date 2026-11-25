@@ -223,3 +223,23 @@ test("Public source digests are limited to the selected repository and safe loca
     assert.equal(assessDiagnosticCommand(chain.replace("install.sh","zen-proxy.json"),root,root,instructions),null);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("Local administrative diagnostics return only bounded counts and metrics",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-log-count-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    writeFileSync(join(root,"package.json"),JSON.stringify({name:"zen-proxy"}));
+    writeFileSync(join(root,"zen-proxy.json"),JSON.stringify({host:"127.0.0.1",port:8787,upstream:"https://opencode.ai/inference/openai/v1"}));
+    const logs='curl -s --max-time 8 "http://127.0.0.1:8787/api/logs?n=8" | jq -c \'{count:(.logs|length)}\'';
+    const metrics="curl -s --max-time 8 http://127.0.0.1:8787/api/status | jq -c '{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}'";
+    const cleanCurl=![".curlrc",".config/curlrc"].some(name=>existsSync(join(homedir(),name)))&&!process.env.CURL_HOME&&!process.env.XDG_CONFIG_HOME;
+    if(cleanCurl){
+      assert.deepEqual(assessDiagnosticCommand(logs,root,root)?.resources,logs.split(" | "));
+      assert.deepEqual(assessDiagnosticCommand(metrics,root,root)?.resources,metrics.split(" | "));
+    }
+    assert.equal(assessDiagnosticCommand(logs.replace("?n=8","?limit=8"),root,root),null);
+    assert.equal(assessDiagnosticCommand(logs.replace("?n=8","?n=500"),root,root),null);
+    assert.equal(assessDiagnosticCommand(logs.replace("(.logs|length)",".logs"),root,root),null);
+    assert.equal(assessDiagnosticCommand(metrics.replace("ms:.sync.ms","error:.sync.error"),root,root),null);
+  }finally{rmSync(base,{recursive:true,force:true});}
+});

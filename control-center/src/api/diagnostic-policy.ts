@@ -123,11 +123,16 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
       const filters: Record<string,string[]> = {
         health: ["{ok,upstream,sync:.sync.ok,version}"],
         "v1/models": ["{count:(.data|length),ids:(.data|map(.id))}","{count:(.data|length)}"],
-        "api/status": ["{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)},requestsTotal:.requests.total}"]
+        "api/status": ["{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)},requestsTotal:.requests.total}","{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}","{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,errorPresent:(.sync.error|length>0),gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}"]
       };
       if(filters[projected[3]!]?.includes(projected[5]!.replace(/, +/g,","))){
         resources.push(projected[1]!,projected[4]!);continue;
       }
+    }
+    // Administrative logs are never printed. Only count the bounded slice.
+    const logs=/^(curl -s --max-time (?:[1-9]|10) "http:\/\/127\.0\.0\.1:([0-9]{1,5})\/api\/logs\?n=(?:[1-9]|[1-4]\d|50)") \| (jq -c '\{count:\(\.logs\|length\)\}')$/.exec(part);
+    if(logs && curlDefaultsAbsent() && localProxyPort(root)===Number(logs[2])){
+      resources.push(logs[1]!,logs[3]!);continue;
     }
     const curl=/^(curl (?:-sS -m|-fsS --max-time) (?:[1-9]|10) http:\/\/127\.0\.0\.1:([0-9]{1,5})\/(?:health|v1\/models)(?: 2>&1)?)(?: \| (head -c (?:[1-9]\d{0,3}|10000)))?$/.exec(part);
     if(curl && curlDefaultsAbsent() && localProxyPort(root)===Number(curl[2])){
