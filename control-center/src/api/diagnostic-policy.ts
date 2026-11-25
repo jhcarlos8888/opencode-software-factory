@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
-  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls -la(?: |$)|systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm test(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
+  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls -la(?: |$)|curl -fsSL --max-time |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
 }
 function canonicalRoot(root: string): boolean {
   try { return isAbsolute(root) && realpathSync(root) === root && lstatSync(root).isDirectory(); }
@@ -27,6 +27,14 @@ function trustedNodeTest(root: string): boolean {
     return scripts?.test==="node --test" && scripts.pretest===undefined && scripts.posttest===undefined;
   }catch{return false;}
 }
+function safeDryPack(root:string):boolean{
+  try{
+    const file=resolve(root,"package.json");
+    if(!safeSource(root,"package.json") || lstatSync(file).size>256*1024)return false;
+    const pkg=JSON.parse(readFileSync(file,"utf8"));
+    return !pkg.workspaces && ["prepack","prepare","postpack","prepublish","prepublishOnly"].every(name=>pkg.scripts?.[name]===undefined);
+  }catch{return false;}
+}
 function requestedPublicRepo(command: string, instructions: string, root: string): boolean {
   const m=/^git ls-remote (https:\/\/github\.com\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+) refs\/heads\/(?:main|master)$/.exec(command);
   if(!m)return false;
@@ -40,6 +48,28 @@ function requestedPublicRepo(command: string, instructions: string, root: string
   });
   return !result.error && result.status===1 && result.stdout==="" && result.stderr==="";
 }
+function repoMentioned(instructions:string,repo:string):boolean{
+  return (instructions.match(/https:\/\/github\.com\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+/g)??[])
+    .some(url=>url.replace(/\.git$/,"")==="https://github.com/"+repo);
+}
+function curlDefaultsAbsent():boolean{
+  const locations=[resolve(homedir(),".curlrc"),resolve(homedir(),".config/curlrc")];
+  if(process.env.CURL_HOME)locations.push(resolve(process.env.CURL_HOME,".curlrc"));
+  if(process.env.XDG_CONFIG_HOME)locations.push(resolve(process.env.XDG_CONFIG_HOME,"curlrc"));
+  return locations.every(file=>{try{lstatSync(file);return false;}catch(e){return (e as NodeJS.ErrnoException).code==="ENOENT";}});
+}
+function publicMetadata(part:string,instructions:string):string[]|null{
+  const m=/^(curl -fsSL --max-time (?:[1-9]|[1-5]\d|60) (?:'([^']+)'|([^\s'"]+))(?: 2>\/dev\/null)?)(?: \| (head -c (?:[1-9]\d{0,3}|10000)))?$/.exec(part);
+  if(!m || !curlDefaultsAbsent())return null;
+  const url=m[2]??m[3]??"";
+  const raw=/^https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/(?:package\.json|models\.json|README\.md)$/.exec(url);
+  const api=/^https:\/\/api\.github\.com\/repos\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:commits|issues)\?per_page=(?:[1-9]|[1-4]\d|50)$/.exec(url);
+  const registry=/^https:\/\/registry\.npmjs\.org\/(?:[a-z0-9_-]+|@[a-z0-9_-]+%2[fF][a-z0-9_-]+)\/latest$/.test(url);
+  // npm public metadata only, never credentials, query payloads or private registries.
+  if(!(raw&&repoMentioned(instructions,raw[1]!) || api&&repoMentioned(instructions,api[1]!) || registry))return null;
+  if((api||registry)&&!m[4])return null;
+  return m[4]?[m[1]!,m[4]]:[m[1]!];
+}
 type Recipe = { category:"inspection"|"test"; resources:string[] };
 /** Classify the exact complete native command, not a set of independent
  * wildcard grants. Only explicit bounded recipes, no arbitrary shell. */
@@ -51,15 +81,26 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
     const parts=command.split(/ \| |; /);
     return {category:"test",resources:parts};
   }
-  const parts=command.split(/; | && /);
-  if(parts.length>12)return null;
+  if(/^npm pack --dry-run --json(?: 2>&1(?: \| head -c (?:[1-9]\d{0,3}|10000)(?:; echo(?:; echo "EXIT_CODE=\$\{PIPESTATUS\[0\]\}")?)?)?)?$/.test(command) && safeDryPack(root)){
+    return {category:"inspection",resources:command.split(/ \| |; /)};
+  }
+  let remainder=command;
   const resources:string[]=[];
+  const loop=/^for f in ([A-Za-z0-9_. -]+); do (printf '%s  ' "\$f"); (curl -fsSL --max-time (?:[1-9]|[1-5]\d|60) "https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/\$f") \| sha256sum; done(?:; |$)/.exec(remainder);
+  if(loop){
+    const files=loop[1]!.split(" ");
+    if(files.length>20 || !files.every(f=>safeSource(root,f)) || !repoMentioned(instructions,loop[4]!) || !curlDefaultsAbsent())return null;
+    resources.push(loop[2]!,loop[3]!,"sha256sum");
+    remainder=remainder.slice(loop[0].length);
+  }
+  const parts=remainder?remainder.split(/; | && /):[];
+  if(parts.length>12)return null;
   for(const part of parts){
     const plain=part.replace(/ 2>&1$/,"");
     if(/^(?:node|npm|bun|git) --version$/.test(plain)){
       resources.push(part);continue;
     }
-    if(/^echo (?:'---[A-Za-z0-9 _()/\-]{0,40}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part) || part==="echo '---'" || part==='echo "---"'){
+    if(part==="echo" || /^echo (?:'---[A-Za-z0-9 _()/@.\-]{0,60}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part) || part==="echo '---'" || part==='echo "---"'){
       resources.push(part);continue;
     }
     if(part==="ls -la" || part==="ls -la ." ||
@@ -93,6 +134,8 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
         resources.push(part);continue;
       }
     }
+    const publicRead=publicMetadata(part,instructions);
+    if(publicRead){resources.push(...publicRead);continue;}
     if(requestedPublicRepo(plain,instructions,root)){resources.push(part);continue;}
     return null;
   }

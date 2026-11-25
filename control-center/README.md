@@ -328,3 +328,11 @@ define exactamente node --test y no hay scripts pretest/posttest; se trata
 de código ejecutable del proyecto confiable, no de una garantía de aislamiento.
 Se excluyen volcados de configuración y variables de entorno, lectura de
 credenciales, cambios de servicios y endpoints de administración no validados.
+
+Las consultas de metadatos públicos también admiten GET acotado al catálogo npm
+y al repositorio GitHub indicado por el usuario (incluida la comparación de
+hashes de una lista literal de archivos públicos), sin configuraciones curl
+personales, cabeceras de autenticación, uploads, redirecciones a archivos
+ni ejecución del contenido descargado. El empaquetado npm solo se admite en
+modo --dry-run --json, sin workspaces ni scripts de ciclo de vida. Las lecturas
+crudas de endpoints administrativos requieren comprobación contextual.
