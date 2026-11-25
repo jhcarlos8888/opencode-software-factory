@@ -12,6 +12,7 @@ test("Observed Zen Proxy diagnostic recipes require a matching native command an
     for(const file of ["zen-proxy.mjs","models.json","zen-proxy","install.sh"])writeFileSync(join(root,file),"fixture");
     writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test"}}));
     const recipes=[
+      ['pwd; ls -la; echo "---"',["pwd","ls -la",'echo "---"']],
       ["ls -la; echo '---'; git status 2>&1 | head -20",["ls -la","echo '---'","git status 2>&1","head -20"]],
       ["node --version; npm --version; echo '---'; ls -la .; echo '--- systemd user ---'; systemctl --user list-units --type=service --all 2>&1 | grep -i zen | head; echo '--- port ---'; (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep 8787",["node --version","npm --version","echo '---'","ls -la .","echo '--- systemd user ---'","systemctl --user list-units --type=service --all 2>&1","grep -i zen","head","echo '--- port ---'","ss -ltnp 2>/dev/null","netstat -ltnp","grep 8787"]],
       ["bun --version 2>&1; echo '--- local hashes ---'; sha256sum package.json zen-proxy.mjs models.json zen-proxy install.sh 2>&1",["bun --version 2>&1","echo '--- local hashes ---'","sha256sum package.json zen-proxy.mjs models.json zen-proxy install.sh 2>&1"]],
@@ -32,7 +33,7 @@ test("Observed Zen Proxy diagnostic recipes require a matching native command an
     }
     writeFileSync(join(root,".env"),"private");
     symlinkSync("/etc/passwd",join(root,"link.js"));
-    for(const command of ["ls -la ~","ls -la /etc","ls -la ../","ls -la; cat .env",
+    for(const command of ["ls -la ~","ls -la /etc","ls -la ../","pwd; ls -la; ls -la .. 2>/dev/null | head -20","ls -la; cat .env",
       "sha256sum .env","sha256sum ../a.js","sha256sum /etc/passwd","sha256sum link.js","sha256sum zen-proxy.json",
       "systemctl --user restart zen-proxy.service","systemctl --user list-units --type=service --all 2>&1 | grep -i zen | head /etc/passwd",
       "(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep 99999","node --version; echo $(whoami)",

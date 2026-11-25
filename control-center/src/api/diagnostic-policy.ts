@@ -194,7 +194,7 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
     if(part==='echo "GIT_EXIT=${PIPESTATUS[0]}"' || part==="echo" || /^echo (?:'---[A-Za-z0-9 _()/@.\-]{0,60}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part) || part==="echo '---'" || part==='echo "---"'){
       resources.push(part);continue;
     }
-    if(part==="ls -la" || part==="ls -la ." ||
+    if(part==="pwd" || part==="ls -la" || part==="ls -la ." ||
       (root.startsWith(homedir()+"/") && /^~\/[A-Za-z0-9_.\/-]+$/.test(part.slice(7)) &&
        part.startsWith("ls -la ") && part.slice(7).replace(/^~/,homedir())===root)){
       resources.push(part);continue;
