@@ -1,8 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync, rmSync, symlinkSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
-import { tmpdir } from "node:os";
+import { tmpdir, homedir } from "node:os";
 import { assessDiagnosticCommand, matchDiagnosticResources } from "./diagnostic-policy.js";
 import { assessOpenCodePermission, assessAuditorTool } from "./auditor-policy.js";
 
@@ -84,4 +84,29 @@ test("Build manifest discovery permits a finite literal list, not arbitrary file
     symlinkSync("/tmp",join(root,".github"));
     assert.equal(assessDiagnosticCommand(command,root,root),null);
   }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("Independent service and loopback metadata reads need no fabricated workdir",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-independent-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    writeFileSync(join(root,"package.json"),JSON.stringify({name:"zen-proxy"}));
+    const config={host:"127.0.0.1",port:8787,upstream:"https://opencode.ai/inference/openai/v1"};
+    writeFileSync(join(root,"zen-proxy.json"),JSON.stringify(config));
+    const command="systemctl --user show zen-proxy.service -p ActiveState -p SubState -p MainPID 2>&1";
+    const decide=(command:string,resources:string[],workdir?:string)=>assessOpenCodePermission({action:"shell",resources},root,"workspace-write",undefined,{command,...(workdir?{workdir}:{})});
+    assert.equal(decide(command,[command]).verdict,"auto");
+    assert.notEqual(decide(command,[command],"/tmp").verdict,"auto");
+    const model="curl -sS -m 10 http://127.0.0.1:8787/v1/models";
+    const chain=model+" | head -c 2000; echo";
+    // A user's curl config can intentionally disable the auto grant.
+    const cleanCurl=![".curlrc",".config/curlrc"].some(name=>existsSync(join(homedir(),name))) && !process.env.CURL_HOME && !process.env.XDG_CONFIG_HOME;
+    if(cleanCurl)assert.equal(decide(chain,[model,"head -c 2000","echo"]).verdict,"auto");
+    for(const bad of [command+" -p Environment",command.replace("zen-proxy.service","other.service"),
+      "systemctl --user cat zen-proxy.service","ls -la","curl -sS -m 10 http://127.0.0.1:8787/api/status",
+      "curl -sS -m 10 http://127.0.0.1:8787/api/logs","curl -sS -m 10 http://127.0.0.1:8787/api/test",
+      "curl -sS -m 10 http://127.0.0.1:9999/v1/models", model+" -H 'Authorization: secret'",model+"; touch /tmp/x"])assert.notEqual(decide(bad,[bad]).verdict,"auto",bad);
+    writeFileSync(join(root,"zen-proxy.json"),JSON.stringify({...config,defaultZenKey:"dummy"}));
+    assert.notEqual(decide(chain,[model,"head -c 2000","echo"]).verdict,"auto");
+  }finally{rmSync(base,{recursive:true,force:true});}
 });

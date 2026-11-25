@@ -117,3 +117,37 @@ Se utiliza el cwd informado por el hook SDK para la evaluación de Bash.
 Los pipelines Gradle sin PIPESTATUS reciben una limitación explícita sobre
 la evidencia de salida. Las reproducciones evalúan permisos; no ejecutan
 los comandos remotos ni vuelven a ejecutar los agentes.
+
+## Ronda Zen Proxy dca82e8f — 24 de noviembre, 21:23
+
+Evidencia: Build entregó HANDOFF-BUILD-DCA82E8F (autor agent); Architect
+(Claude) y Build (OpenCode) entregaron al Implementador (eventos 21158–60).
+Suite Node: 381 pruebas, 379 aprobadas, 2 omitidas, ninguna fallida,
+EXIT_CODE=0 (21055). La prueba de inferencia local terminó por timeout de
+90 segundos (21137); el servicio estaba activo, con diez modelos limitados.
+La comparación de hashes confirmó código principal actualizado (21242),
+catálogo local obsoleto (21241). No se demuestra la causa exacta del límite
+externo ni que reiniciar o reinstalar lo resuelva.
+
+Permisos: commits 65fdc85, 7aad5a4, 3709ee2 introdujeron recetas de
+diagnóstico local, metadatos públicos y detección de manifiestos.
+Las nuevas variantes sin workdir se admiten solo para operaciones que no
+dependen del directorio actual: versión, fecha UTC, estado systemd del
+servicio cuyo nombre coincide con el proyecto y campos de estado
+acotados, /health y /v1/models en loopback para Zen Proxy con manifiesto
+y configuración verificados sin imprimir credenciales. No se concede
+automáticamente acceso a /api/status sin sanitizar, /api/logs, /api/test,
+inferencia, archivos temporales fijos, argumentos de procesos, Environment,
+ExecStart o unidades completas. Las operaciones previamente autorizadas
+de forma puntual no constituyen permiso permanente. Los comandos que
+combinan cd y separadores capaces de continuar tras su fallo no se
+admiten sin evidencia del cwd. No se debilita el control de rutas.
+
+En la reproducción de 23 solicitudes registradas (21:23:33), diez
+obtuvieron auto; trece quedaron en revisión, incluidas solicitudes
+rechazadas anteriormente y variantes que requieren reglas adicionales.
+Las nuevas reglas se probaron contra recursos nativos, perfiles,
+destinos, credenciales y comandos adicionales. Verificación 218/218.
+La ronda sigue activa: no se ha reiniciado el servicio de la fábrica.
+Pendientes de mejora: PATH de Bun, lectura MCP paginada de archivos
+mayores a 128 KiB y diagnóstico de servicios sin revelar configuración.

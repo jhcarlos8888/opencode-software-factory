@@ -7,7 +7,7 @@
  */
 import { isAbsolute, relative, resolve } from "node:path";
 import { lstatSync, realpathSync } from "node:fs";
-import { assessDiagnosticCommand, matchDiagnosticResources } from "./diagnostic-policy.js";
+import { assessDiagnosticCommand, assessIndependentDiagnostic, matchDiagnosticResources } from "./diagnostic-policy.js";
 import { assessAuthorizedGitWorkflow, isGitWorkflowInspection, isContextualGitInspection, nativeGitCommandMatches, type GitRoundAuthority } from "./git-workflow-policy.js";
 
 export type AuditorVerdict = "auto" | "human" | "block";
@@ -261,7 +261,7 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
       return { verdict: "human", category: "high-risk", reason: "El comando solicita trabajar fuera del proyecto." };
     }
     if (input.env !== undefined || input.environment !== undefined) return { verdict: "human", category: "high-risk", reason: "El comando solicita alterar el entorno de ejecución." };
-    const diagnostic = assessDiagnosticCommand(shell, request.projectPath, typeof workdir === "string" ? workdir : undefined);
+    const diagnostic = assessDiagnosticCommand(shell, request.projectPath, typeof workdir === "string" ? workdir : undefined) ?? assessIndependentDiagnostic(shell, request.projectPath);
     if (diagnostic) return { verdict: "auto", category: diagnostic.category,
       reason: "Diagnóstico acotado del proyecto con directorio y comando verificados." };
     const gradle = (workdir === undefined || resolve(request.projectPath, String(workdir)) === request.projectPath) && isSafeGradleVerification(shell, request.projectPath);
@@ -295,11 +295,11 @@ export function assessOpenCodePermission(
   }
   if (tool === "shell" && permissionProfile === "workspace-write" &&
       Array.isArray(request.resources) && request.resources.every((r): r is string => typeof r === "string") &&
-      nativeInput && typeof nativeInput.command === "string" && nativeInput.workdir === projectPath &&
+      nativeInput && typeof nativeInput.command === "string" && (nativeInput.workdir === undefined || nativeInput.workdir === projectPath) &&
       (nativeInput.cwd === undefined || nativeInput.cwd === projectPath) &&
       nativeInput.env === undefined && nativeInput.environment === undefined &&
       !isProtectedShellCommand(nativeInput.command)) {
-    const diagnostic = assessDiagnosticCommand(nativeInput.command, projectPath, projectPath, authority?.instructions);
+    const diagnostic = assessDiagnosticCommand(nativeInput.command, projectPath, nativeInput.workdir === projectPath ? projectPath : undefined, authority?.instructions) ?? assessIndependentDiagnostic(nativeInput.command, projectPath);
     if (diagnostic && matchDiagnosticResources(request.resources, diagnostic.resources))
       return { verdict: "auto", category: diagnostic.category, reason: "Diagnóstico concreto verificado contra la llamada nativa; no se conceden comodines." };
   }

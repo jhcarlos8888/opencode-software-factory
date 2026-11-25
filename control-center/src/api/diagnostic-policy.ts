@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
-  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-la(?: |$)|-d node_modules|\.github\/workflows)|for f in |curl -fsSL --max-time |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
+  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-la(?: |$)|-d node_modules|\.github\/workflows)|for f in |curl (?:-fsSL --max-time |-sS -m |-fsS --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
 }
 function canonicalRoot(root: string): boolean {
   try { return isAbsolute(root) && realpathSync(root) === root && lstatSync(root).isDirectory(); }
@@ -70,6 +70,48 @@ function publicMetadata(part:string,instructions:string):string[]|null{
   if((api||registry)&&!m[4])return null;
   return m[4]?[m[1]!,m[4]]:[m[1]!];
 }
+// These recipes do not use relative filesystem paths or shell variables.
+// Missing cwd is acceptable only for this separately closed grammar.
+function localProxyPort(root:string):number|null{
+  if(basename(root).replace(/^\./,"")!=="zen-proxy")return null;
+  try{
+    const manifest=resolve(root,"package.json"),config=resolve(root,"zen-proxy.json");
+    for(const file of [manifest,config]){
+      const info=lstatSync(file);
+      if(!info.isFile()||info.isSymbolicLink()||realpathSync(file)!==file||info.size>65536)return null;
+    }
+    if(JSON.parse(readFileSync(manifest,"utf8")).name!=="zen-proxy")return null;
+    const cfg=JSON.parse(readFileSync(config,"utf8"));
+    if(cfg.host!=="127.0.0.1"||!Number.isInteger(cfg.port)||cfg.port<1||cfg.port>65535||
+      cfg.defaultZenKey||cfg.proxyKey||cfg.upstream!=="https://opencode.ai/inference/openai/v1")return null;
+    return cfg.port;
+  }catch{return null;}
+}
+export function assessIndependentDiagnostic(command:string,root:string):Recipe|null{
+  if(!canonicalRoot(root)||command.length>1800||/[\r\n\x00-\x1f\x60\\]/.test(command))return null;
+  const unit=basename(root).replace(/^\./,"")+".service";
+  const resources:string[]=[];
+  const parts=command.split(/; | && /);
+  if(parts.length>12)return null;
+  for(const part of parts){
+    const plain=part.replace(/ 2>&1$/,"");
+    if(/^(?:node|npm|bun|git) --version$/.test(plain) ||
+      plain==="date -u +%Y-%m-%dT%H:%M:%SZ" ||
+      part==="echo" ||
+      /^echo (?:'---[A-Za-z0-9 _()/\-]{0,40}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part)){
+      resources.push(part);continue;
+    }
+    const service=/^systemctl --user (?:is-active|is-enabled) ([A-Za-z0-9_-]+\.service)$/.exec(plain);
+    const metadata=/^systemctl --user show ([A-Za-z0-9_-]+\.service)((?: -p (?:ActiveState|SubState|MainPID|LoadState|UnitFileState|ExecMainStartTimestamp|FragmentPath)){1,7})$/.exec(plain);
+    if(service?.[1]===unit||metadata?.[1]===unit){resources.push(part);continue;}
+    const curl=/^(curl (?:-sS -m|-fsS --max-time) (?:[1-9]|10) http:\/\/127\.0\.0\.1:([0-9]{1,5})\/(?:health|v1\/models)(?: 2>&1)?)(?: \| (head -c (?:[1-9]\d{0,3}|10000)))?$/.exec(part);
+    if(curl && curlDefaultsAbsent() && localProxyPort(root)===Number(curl[2])){
+      resources.push(curl[1]!);if(curl[3])resources.push(curl[3]);continue;
+    }
+    return null;
+  }
+  return resources.length?{category:"inspection",resources}:null;
+}
 type Recipe = { category:"inspection"|"test"; resources:string[] };
 /** Classify the exact complete native command, not a set of independent
  * wildcard grants. Only explicit bounded recipes, no arbitrary shell. */
@@ -131,7 +173,7 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
     }
     const unit=basename(root).replace(/^\./,"")+".service";
     const service=/^systemctl --user (?:is-active|is-enabled) ([A-Za-z0-9_-]+\.service)$/.exec(plain);
-    const metadata=/^systemctl --user show ([A-Za-z0-9_-]+\.service)((?: -p (?:ActiveState|SubState|MainPID|LoadState|UnitFileState)){1,5})$/.exec(plain);
+    const metadata=/^systemctl --user show ([A-Za-z0-9_-]+\.service)((?: -p (?:ActiveState|SubState|MainPID|LoadState|UnitFileState|ExecMainStartTimestamp|FragmentPath)){1,7})$/.exec(plain);
     if(service?.[1]===unit || metadata?.[1]===unit){resources.push(part);continue;}
     if(plain==="~/.bun/bin/bun --version"){
       try{const bun=resolve(homedir(),".bun/bin/bun");
