@@ -47,3 +47,12 @@ test("handoff redaction hides secrets without truncating long reports", () => {
   assert.doesNotMatch(handoff.content, /handoff-secret-token-98765/);
   assert.match(handoff.content, /Authorization: Bearer \[REDACTED\]/);
 });
+
+test("Git remote URLs redact embedded HTTP credentials before logging", () => {
+  const raw = "origin https://user:my-secret-token@github.com/example/repo.git (fetch)\norigin https://tokenonly@dev.azure.com/org/project/_git/repo (push)";
+  const result = redactSecrets(raw);
+  assert.ok(!result.includes("my-secret-token"));
+  assert.ok(!result.includes("tokenonly"));
+  assert.match(result, /https:\/\/\[REDACTED\]@github\.com\/example\/repo\.git/);
+  assert.match(result, /https:\/\/\[REDACTED\]@dev\.azure\.com\/org\/project\/_git\/repo/);
+});

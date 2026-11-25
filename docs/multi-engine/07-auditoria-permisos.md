@@ -88,3 +88,18 @@ revisión. Una autorización puntual no equivale a una regla permanente.
   recorrido de directorios; se utiliza la enumeración confinada por descriptor.
 - SDK: distinguir únicamente el aviso de generación del título, sin ocultarlo.
   No se cambia el modelo ni el proveedor, ni se afirma haber reparado el SDK.
+
+## Ronda 4 — permisos de publicación Git
+
+La instrucción de la ronda solicitó explícitamente commit y push. Se
+recuperaron las cuatro solicitudes reales de OpenCode (inspección, add
+multilínea con siete rutas, commit con heredoc citado y push con seguimiento)
+y se contrastaron con sus mensajes nativos de session_message. Los cuatro
+casos obtuvieron auto en la nueva política: el remoto se verificó en el
+proyecto real sin mostrar credenciales; las tres mutaciones se evaluaron en
+un repositorio temporal con archivos ficticios, sin repetir operaciones del
+proyecto. El remoto Azure DevOps utiliza el identificador público de la
+organización repetido en su ruta; no se habilitan otros usuarios ni
+contraseñas incrustadas. Se añadieron pruebas de negación de autorización,
+rutas, índice, refspecs, destinos, coincidencia nativa y redacción de URLs.
+No se concedieron comodines persistentes.

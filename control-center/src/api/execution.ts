@@ -29,6 +29,7 @@ import { retryOpenCodeRead } from "./opencode-request-retry.js";
 import { buildOpenCodeChildPath } from "./opencode-environment.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
 import { assessAuditorTool, assessOpenCodePermission, isProtectedShellCommand, requestsSandboxBypass } from "./auditor-policy.js";
+import { findNativeGitToolInput } from "./git-workflow-policy.js";
 import { inspectAuditorShellReceipts, appendAuditorOperationalFindings } from "./auditor-operations.js";
 import {
   buildExecutionSummary, formatRoundSummaryMessage, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
@@ -452,7 +453,8 @@ function createOpenCodeDecision(
   agent: AgentInput,
   sessionId: string,
   request: OpenCodePermission,
-  kind: "permission" | "question" = "permission"
+  kind: "permission" | "question" = "permission",
+  nativeInput: Record<string, unknown> | null = null
 ): void {
   const requestId = String(request.id ?? "");
   if (!requestId) return;
@@ -466,7 +468,8 @@ function createOpenCodeDecision(
   const resourceText = resources.length ? ` Recursos solicitados (elementos separados): ${JSON.stringify(resources)}.` : "";
   const patternText = proposedPatterns.length ? ` Patrones propuestos (elementos separados): ${JSON.stringify(proposedPatterns)}.` : "";
   const assessment = kind === "permission"
-    ? assessOpenCodePermission(request, snapshot?.run.projectPath ?? "", agent.permissionProfile)
+    ? assessOpenCodePermission(request, snapshot?.run.projectPath ?? "", agent.permissionProfile,
+        { instructions: snapshot?.run.instructions ?? "", agentId: agent.agentId }, nativeInput)
     : null;
   const securityPrefix = assessment?.verdict === "block"
     ? "RIESGO ALTO · Revisión humana obligatoria. " : "";
@@ -519,8 +522,20 @@ async function pollOpenCodeAgent(
     if (!requestId) continue;
     const requestKey = `${sessionId}:${requestId}`;
     if (state.seenOpenCodePermissionRequests.has(requestKey)) continue;
+    const currentRun = getExecutionSnapshot(state.runId)?.run;
+    let nativeInput = findNativeGitToolInput(messages, request);
+    // Message and permission polling are parallel; a permission can arrive
+    // first. Fetch once more for the exact Git tool evidence before falling
+    // back to human review. Never infer a command from an agent's prose.
+    if (!nativeInput && Array.isArray(request.resources) &&
+        request.resources.some(resource => /^git (?:add |commit |push(?: |$)|remote -v$)/.test(resource))) {
+      const refreshedMessages = await openCodeRequest<unknown>(runtime, "GET",
+        "/api/session/" + encodeURIComponent(sessionId) + "/message", undefined, 3000).catch(() => null);
+      nativeInput = findNativeGitToolInput(refreshedMessages, request);
+    }
     const auditorDecision = assessOpenCodePermission(
-      request, getExecutionSnapshot(state.runId)?.run.projectPath ?? "", agent.permissionProfile
+      request, currentRun?.projectPath ?? "", agent.permissionProfile,
+      { instructions: currentRun?.instructions ?? "", agentId: agent.agentId }, nativeInput
     );
     if (auditorDecision.verdict === "auto") {
       try {
@@ -560,7 +575,7 @@ async function pollOpenCodeAgent(
         addLog(state.runId, agent.agentId.toUpperCase(), "warning", `No se pudo aplicar una autorización temporal; se solicita revisión manual: ${error instanceof Error ? error.message : String(error)}`, agent.id);
       }
     }
-    createOpenCodeDecision(state, agent, sessionId, request, "permission");
+    createOpenCodeDecision(state, agent, sessionId, request, "permission", nativeInput);
   }
   for (const form of parseOpenCodeData<Record<string, unknown>>(forms)) {
     const formId = String(form.id ?? "");
@@ -776,7 +791,7 @@ function makeAgentPrompt(
     "PROTOCOLO DE ENTREGA:",
     "PRIMERA LÍNEA CANÓNICA: escribe exactamente " + handoffId + " (sin #, prefijos, espacios ni texto previo). Después indica agente, motor, modelo, INBOUND con los IDs exactos recibidos (" + expectedInbound + "), herramientas, hallazgos, discrepancias y recomendaciones.",
     "Después del identificador incluye secciones Markdown ## RESUMEN EJECUTIVO, ## HALLAZGOS CLAVE, ## VERIFICACIONES EJECUTADAS y ## PRÓXIMOS PASOS. En el resumen responde directamente al objetivo de esta ronda: qué se hizo, qué no se hizo, qué cambió realmente y qué queda pendiente. Si solo analizaste, dilo. No confundas pruebas verdes de un contrato anterior con cumplimiento del nuevo requisito.",
-    "No incluyas frases de progreso antes de la primera línea de la respuesta final. No solicites dangerouslyDisableSandbox; usa el entorno permitido. No inventes handoffs. Usa solamente los IDs enumerados aquí. No declares ausentes agentes basándote solo en informes anteriores: los registros de ejecución son la fuente de verdad.",
+    "Para Git usa git add con rutas individuales, git commit -m con mensaje literal o heredoc EOF citado y git push sin opciones solo si el usuario lo solicita expresamente; no uses git add . ni cambies de destino. No incluyas frases de progreso antes de la primera línea de la respuesta final. No solicites dangerouslyDisableSandbox; usa el entorno permitido. No inventes handoffs. Usa solamente los IDs enumerados aquí. No declares ausentes agentes basándote solo en informes anteriores: los registros de ejecución son la fuente de verdad.",
     "Los metadatos de integridad calculados por el orquestador son autoritativos y prevalecen sobre cualquier frase del informe. Si idAuthor=ORQUESTADOR, no afirmes que el agente original emitió el ID. Si Truncado=SÍ, trata el contenido como incompleto y enumera qué no puedes verificar.",
     "",
     previous ? "HANDOFFS Y RESULTADOS DE FASES PREVIAS:" + nl + previous : "No hay handoffs previos. Trabaja independientemente dentro de esta ola."

@@ -7,6 +7,7 @@
  */
 import { isAbsolute, relative, resolve } from "node:path";
 import { lstatSync, realpathSync } from "node:fs";
+import { assessAuthorizedGitWorkflow, isGitWorkflowInspection, nativeGitCommandMatches, type GitRoundAuthority } from "./git-workflow-policy.js";
 
 export type AuditorVerdict = "auto" | "human" | "block";
 export interface AuditorAssessment {
@@ -80,6 +81,7 @@ function isSafeShell(command: string): boolean {
   // The common OpenCode shell renderer uses echo to display a test's native
   // exit status and other fixed separators. Interpolation is allowed ONLY for
   // the exact shell status variables, never arbitrary command expansion.
+  if (/^echo "(?:=== [A-Z][A-Z0-9 _()-]{0,40} ===|check-ok|exit=\$\?)"$/.test(value)) return true;
   if (/^echo (?:'---[A-Za-z0-9 _()-]{0,40}---'|"---[A-Za-z0-9 _()-]{0,40}---"|'---'|"---"|"(?:CHECK_EXIT|EXIT|EXIT_CODE|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT|CACHED_EXIT|EXIT_DIFF|EXIT_CACHED)=\$\?"|"(?:CHECK_EXIT|EXIT|EXIT_CODE|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT)=\$\{PIPESTATUS\[0\]\}")$/.test(value)) {
     return true;
   }
@@ -238,7 +240,7 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
       return { verdict: "human", category: "high-risk", reason: "El comando solicita trabajar fuera del proyecto." };
     }
     const gradle = (workdir === undefined || resolve(request.projectPath, String(workdir)) === request.projectPath) && isSafeGradleVerification(shell, request.projectPath);
-    if (gradle || isSafeShell(shell) || isSafeGitInspectionChain(shell, request.projectPath)) {
+    if (gradle || isSafeShell(shell) || isSafeGitInspectionChain(shell, request.projectPath) || (shell.trim() !== "git remote -v" && isGitWorkflowInspection(shell.trim(), request.projectPath))) {
       return { verdict: "auto", category: gradle || /npm run|smoke-test/.test(shell) ? "test" : "inspection",
         reason: "Comando exacto de comprobación autorizado por lista conservadora." };
     }
@@ -255,13 +257,22 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
 
 export function assessOpenCodePermission(
   request: Record<string, unknown>, projectPath: string,
-  permissionProfile: AuditorToolRequest["permissionProfile"]
+  permissionProfile: AuditorToolRequest["permissionProfile"],
+  authority?: GitRoundAuthority, nativeInput: Record<string, unknown> | null = null
 ): AuditorAssessment {
   const tool = String(request.action ?? request.permission ?? "");
   const metadata = object(request.metadata);
   const input = object(metadata.input);
-  if (requestsSandboxBypass(input) || requestsSandboxBypass(metadata) || requestsSandboxBypass(request)) {
+  if (requestsSandboxBypass(input) || requestsSandboxBypass(metadata) || requestsSandboxBypass(request) || requestsSandboxBypass(nativeInput)) {
     return { verdict: "block", category: "high-risk", reason: "No se autoriza desactivar el sandbox." };
+  }
+  if (tool === "shell" && permissionProfile === "workspace-write" && Array.isArray(request.resources) &&
+      request.resources.length > 0 && request.resources.length <= 12 &&
+      request.resources.every((r): r is string => typeof r === "string" && r.length > 0 && r.length <= 6500)) {
+    if (assessAuthorizedGitWorkflow(request.resources, projectPath, authority, nativeInput,
+        (value) => !isProtectedShellCommand(value) && isSafeShell(value) && /^(?:git |echo )/.test(value))) {
+      return { verdict: "auto", category: "workspace", reason: "Operación Git concreta autorizada expresamente en esta ronda por el usuario; archivos, comando nativo y destino comprobados." };
+    }
   }
   if (tool === "shell" && typeof input.command !== "string") {
     // OpenCode 2.1 supplies a *segmented* resources list for shell permissions,
@@ -280,9 +291,14 @@ export function assessOpenCodePermission(
     if (workdir !== undefined && (typeof workdir !== "string" || !isWithinProject(workdir, projectPath))) {
       return { verdict: "human", category: "high-risk", reason: "El comando solicita trabajar fuera del proyecto." };
     }
+    const remoteInspection = resources.includes("git remote -v");
+    if (remoteInspection && (!nativeInput || nativeInput.workdir !== projectPath ||
+        typeof nativeInput.command !== "string" || !nativeGitCommandMatches(nativeInput.command, resources))) {
+      return { verdict: "human", category: "unknown", reason: "La consulta de remoto exige verificar el comando nativo y la raíz real del proyecto." };
+    }
     const gradle = (workdir === undefined || resolve(projectPath, String(workdir)) === projectPath)
       && resources.some((resource) => isSafeGradleVerification(resource, projectPath));
-    if (permissionProfile === "workspace-write" && resources.every((resource) => isSafeShell(resource) || isSafeGitInspectionChain(resource, projectPath) ||
+    if (permissionProfile === "workspace-write" && resources.every((resource) => isSafeShell(resource) || isSafeGitInspectionChain(resource, projectPath) || isGitWorkflowInspection(resource, projectPath) ||
         (gradle && isSafeGradleVerification(resource, projectPath)))) {
       return { verdict: "auto", category: gradle || resources.some((r) => /npm run|smoke-test/.test(r)) ? "test" : "inspection",
         reason: "Todos los segmentos concretos del shell coinciden con comandos de lectura/pruebas autorizados." };

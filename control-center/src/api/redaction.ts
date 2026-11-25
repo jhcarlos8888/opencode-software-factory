@@ -7,7 +7,9 @@ const SECRET_TEXT_PATTERNS = [
 
 /** Redact secrets without changing report length limits or truncating handoffs. */
 export function redactSecrets(value: string): string {
-  let result = value;
+  // URLs from Git remotes may contain a token as username or user:password.
+  // Redact userinfo before persistent tool receipts, even on manual approvals.
+  let result = value.replace(/\b(https?:\/\/)[^/\s"'<>@]+@/gi, "$1[REDACTED]@");
   for (const pattern of SECRET_TEXT_PATTERNS) {
     result = result.replace(pattern, (...matches: unknown[]) => {
       const prefix = typeof matches[1] === "string" ? matches[1] : "";

@@ -250,8 +250,9 @@ no se convierten por ello en permisos de escritura.
 
 - Las cadenas de inspección Git pueden terminar un segmento reconocido con
   `| head -N` o `| head -n N` (1–100 líneas, sin archivos de entrada ni
-  redirecciones). No se permite Git remoto con credenciales potenciales
-  mediante `git remote -v` de forma automática. El perfil y las demás
+  redirecciones). La consulta `git remote -v` se permite en OpenCode solo si el comando
+  nativo coincide, la raíz es la asignada y las URLs no contienen
+  credenciales; se admite el identificador público repetido de Azure DevOps. El perfil y las demás
   restricciones del Auditor siguen vigentes.
 - Claude no puede solicitar `dangerouslyDisableSandbox` como excepción:
   el hook PreToolUse y la devolución de permisos rechazan esa solicitud,
@@ -270,3 +271,24 @@ no se convierten por ello en permisos de escritura.
   `query_source=generate_session_title` se muestra como información, sin
   ocultar el texto del SDK. Los errores de inferencia, autenticación,
   cuotas y diagnósticos desconocidos no se reclasifican.
+
+### Autorización Git vinculada a la instrucción de la ronda
+
+El Auditor permite al Implementador de OpenCode preparar archivos específicos,
+crear commits normales y publicar la rama actual cuando el usuario lo pide
+directamente en la instrucción de esa ronda (por ejemplo, «hagamos commit y
+push»). No se deduce autorización del planificador, del historial, de los
+informes de agentes ni de los patrones propuestos por el proveedor.
+Cada mutación se verifica por separado: comando nativo asociado al mensaje y
+llamada exactos, directorio raíz canónico, archivos regulares no sensibles,
+índice para commit y upstream de la rama actual en origin para push.
+No se autoriza automáticamente git add global, amend, force, mirror, refspecs
+arbitrarios, cambios de remoto, symlinks o scripts de shell. El mensaje de
+commit admite texto literal y el heredoc EOF citado exacto, no cat arbitrario.
+Las consultas de estado, resumen del commit y referencias origin admiten
+los formatos acotados observados, incluyendo nombres de rama con #.
+Las URLs con usuario o contraseña se redactan en los nuevos registros.
+Las inspecciones y operaciones Git siguen sujetas a los perfiles existentes;
+las verificaciones no constituyen un escáner exhaustivo de secretos ni un
+sandbox para hooks, filtros o credenciales Git. Si falta evidencia o la
+configuración no coincide, se solicita autorización humana.
