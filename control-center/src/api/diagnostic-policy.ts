@@ -269,10 +269,10 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
         resources.push(part);continue;
       }
     }
-    // Hash a public catalog without writing a downloaded file. The repo
-    // must be named in the round and the local counterpart must be safe.
-    const catalogDigest=/^(curl -sS --max-time (?:[1-9]|[1-5]\d|60) https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/models\.json) \| sha256sum$/.exec(part);
-    if(catalogDigest && safeSource(root,"models.json") && repoMentioned(instructions,catalogDigest[2]!) && curlDefaultsAbsent()){
+    // Hash public source without writing a downloaded file. The repo must
+    // be named in the round and the local counterpart must be safe.
+    const catalogDigest=/^(curl -sS --max-time (?:[1-9]|[1-5]\d|60) https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/([A-Za-z0-9_./-]+)) \| sha256sum$/.exec(part);
+    if(catalogDigest && safeSource(root,catalogDigest[3]!) && repoMentioned(instructions,catalogDigest[2]!) && curlDefaultsAbsent()){
       resources.push(catalogDigest[1]!,"sha256sum");continue;
     }
     const publicRead=publicMetadata(part,instructions);

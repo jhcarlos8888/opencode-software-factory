@@ -204,7 +204,7 @@ test("QA service aliases, listening port and projected health use only bounded m
   }finally{rmSync(base,{recursive:true,force:true});}
 });
 
-test("Public catalog digest is limited to the selected repository",()=>{
+test("Public source digests are limited to the selected repository and safe local files",()=>{
   const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-catalog-digest-")));
   try{
     writeFileSync(join(root,"models.json"),"{}");
@@ -216,5 +216,10 @@ test("Public catalog digest is limited to the selected repository",()=>{
     assert.equal(assessDiagnosticCommand(command.replace("/models.json","/README.md"),root,root,instructions),null);
     assert.equal(assessDiagnosticCommand(command.replace("20 https","120 https"),root,root,instructions),null);
     assert.equal(assessDiagnosticCommand(command,root,undefined,instructions),null);
+    for(const f of ["zen-proxy.mjs","package.json","install.sh"])writeFileSync(join(root,f),"fixture");
+    const chain=["zen-proxy.mjs","package.json","install.sh"].map(f=>"curl -sS --max-time 20 https://raw.githubusercontent.com/example/project/main/"+f+" | sha256sum").join("; ");
+    if(cleanCurl)assert.equal(assessDiagnosticCommand(chain,root,root,instructions)?.resources.length,6);
+    assert.equal(assessDiagnosticCommand(chain.replace("install.sh","../install.sh"),root,root,instructions),null);
+    assert.equal(assessDiagnosticCommand(chain.replace("install.sh","zen-proxy.json"),root,root,instructions),null);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
