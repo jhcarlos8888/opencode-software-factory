@@ -125,6 +125,12 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
     if(command===pair)return {category:"inspection",resources:["echo '--- conteo de procesos (solo número)'","printf 'zen-proxy.mjs: '",counts[0],"echo 0","printf 'zen-claude: '",counts[1],"echo 0"]};
   }
   if(/\\/.test(command))return null;
+  // The system-wide unit names are checked for existence only.
+  if(basename(root).replace(/^\./,"")==="zen-proxy" && /^[A-Za-z0-9_./-]+$/.test(root)){
+    const files=["/etc/systemd/system/zen-proxy.service","/etc/systemd/system/multi-user.target.wants/zen-proxy.service",resolve(root,"zen-proxy.mjs"),resolve(root,"zen-proxy.json")];
+    const presence='for p in '+files.join(" ")+'; do if test -e "$p"; then echo "existe: $p"; else echo "ausente: $p"; fi; done';
+    if(command===presence)return {category:"inspection",resources:['test -e "$p"','echo "existe: $p"','echo "ausente: $p"']};
+  }
   // Exact uninstaller inventory: names and existence only, no external
   // configuration contents. A symlinked drop-in directory needs review.
   const home=homedir();

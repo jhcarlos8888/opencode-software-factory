@@ -421,3 +421,14 @@ test("Process inspection does not disclose arguments or accept unrelated PIDs",(
     assert.equal(assessDiagnosticCommand(command,base,base),null);
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("System unit inventory checks only presence of exact uninstall targets",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-system-unit-presence-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    const cmd='for p in /etc/systemd/system/zen-proxy.service /etc/systemd/system/multi-user.target.wants/zen-proxy.service '+join(root,"zen-proxy.mjs")+' '+join(root,"zen-proxy.json")+'; do if test -e "$p"; then echo "existe: $p"; else echo "ausente: $p"; fi; done';
+    const check=(command:string)=>assessAuditorTool({engine:"claude",toolName:"Bash",input:{command,cwd:root},projectPath:root,permissionProfile:"workspace-write"}).verdict;
+    assert.equal(check(cmd),"auto");
+    for(const bad of [cmd.replace("zen-proxy.service","ssh.service"),cmd.replace('echo "existe: $p"','cat "$p"'),cmd+"; cat /etc/passwd"])assert.notEqual(check(bad),"auto");
+  }finally{rmSync(base,{recursive:true,force:true});}
+});

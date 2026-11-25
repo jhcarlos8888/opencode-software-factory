@@ -296,3 +296,7 @@ Se aprobó b2071fe0 tras verificar que PID 2788 era MainPID del
 servicio Zen Proxy. Nueva receta permanente para ps -o pid=,comm=
 -C bun/node y consulta de PID específico, limitada al usuario y cwd
 canónico del proyecto. No se exponen args, entorno ni cmdline.
+
+Se autorizó e7fba951: bucle de existencia de dos unidades de sistema
+y dos archivos del proyecto, sin leer su contenido. Receta exacta
+incorporada; no permite otros servicios ni modificación de /etc.
