@@ -115,7 +115,16 @@ function installedTool(path:string):boolean{
   }catch{return false;}
 }
 export function assessIndependentDiagnostic(command:string,root:string):Recipe|null{
-  if(!canonicalRoot(root)||command.length>1800||/[\r\n\x00-\x1f\x60\\]/.test(command))return null;
+  if(!canonicalRoot(root)||command.length>1800||/[\r\n\x00-\x1f\x60]/.test(command))return null;
+  if(basename(root).replace(/^\./,"")==="zen-proxy"){
+    const counts=["pgrep -c -f 'zen-proxy\\.mjs' 2>/dev/null","pgrep -c -f 'zen-claude' 2>/dev/null"] as const;
+    for(const count of counts){
+      if(command===count || command===count+" || echo 0")return {category:"inspection",resources:command.split(" || ")};
+    }
+    const pair="echo '--- conteo de procesos (solo número)'; printf 'zen-proxy.mjs: '; "+counts[0]+" || echo 0; printf 'zen-claude: '; "+counts[1]+" || echo 0";
+    if(command===pair)return {category:"inspection",resources:["echo '--- conteo de procesos (solo número)'","printf 'zen-proxy.mjs: '",counts[0],"echo 0","printf 'zen-claude: '",counts[1],"echo 0"]};
+  }
+  if(/\\/.test(command))return null;
   // Exact uninstaller inventory: names and existence only, no external
   // configuration contents. A symlinked drop-in directory needs review.
   const home=homedir();

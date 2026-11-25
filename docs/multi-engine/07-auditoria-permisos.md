@@ -282,3 +282,12 @@ drop-in canónico y presencia de ~/.config/opencode, ~/.claude y
 ejecución de wrappers ni eliminación de servicios o archivos.
 Pruebas positivas y negativas para destinos ajenos, expansión de
 comandos, listado recursivo y comandos anexados.
+
+Se revisó además 940918ad: conteos de procesos y listado de nombres
+con *zen* en directorios concretos. Se concedió una sola vez al
+confirmar que las coincidencias eran los tres lanzadores y el enlace
+default.target.wants/zen-proxy.service. La regla permanente reconoce
+solo los dos conteos pgrep -c -f exactos (no argumentos de procesos),
+sin autorizar glob general ni borrado. Los conteos no prueban por sí
+solos la ausencia de procesos: contrastar PID y estado de systemd.
+Verificación integral: 236/236.

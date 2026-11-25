@@ -397,3 +397,16 @@ test("Uninstall external inventory reports only fixed names and directory presen
     for(const bad of [cmd.replace(join(home,"Documents"),"/etc"),cmd.replace('echo "presente: $p"','cat "$p"'),cmd.replace("ls -1 ","ls -R "),cmd+"; cat /etc/passwd"])assert.notEqual(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command:bad,cwd:root},projectPath:root,permissionProfile:"workspace-write"}).verdict,"auto");
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("Uninstall process counts permit only exact numeric probes, not arbitrary process listing",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-process-count-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    const counts=["pgrep -c -f 'zen-proxy\\.mjs' 2>/dev/null","pgrep -c -f 'zen-claude' 2>/dev/null"] as const;
+    const pair="echo '--- conteo de procesos (solo número)'; printf 'zen-proxy.mjs: '; "+counts[0]+" || echo 0; printf 'zen-claude: '; "+counts[1]+" || echo 0";
+    const check=(command:string,path=root)=>assessAuditorTool({engine:"claude",toolName:"Bash",input:{command,cwd:path},projectPath:path,permissionProfile:"workspace-write"}).verdict;
+    for(const cmd of [...counts,...counts.map(c=>c+" || echo 0"),pair])assert.equal(check(cmd),"auto");
+    for(const bad of [pair+"; ls ~/.local/bin/*zen*",counts[0].replace("-c -f","-a -f"),counts[0].replace("zen-proxy","ssh"),counts[0]+"; echo $(id)"])assert.notEqual(check(bad),"auto");
+    assert.notEqual(check(pair,base),"auto");
+  }finally{rmSync(base,{recursive:true,force:true});}
+});
