@@ -382,3 +382,26 @@ Se incorpora una alternativa de conteo grep -cE con patrones
 literales y tres archivos canónicos exactos, propiedad del usuario
 y tamaño máximo de 1 MiB. No permite grep -n, auth.json, volcados de
 configuración ni comandos añadidos.
+
+### Desinstalación — actualización 09:22
+
+Se aprobó 10e49ea5, comparación de formato JSON con salida reducida
+a indicadores; se rechazó f9592d1d por temporales predecibles y
+riesgo de exposición transitoria de configuración privada.
+La variante 2e87d57c fue aprobada puntualmente tras verificar
+rutas, propiedad, respaldo privado, umask, temporales únicos y
+el cambio semántico exacto. Aunque la ejecución devolvió código 1,
+ambos JSON quedaron sin providers.zen-proxy y se comprobó igualdad
+estructural con sus respaldos tras retirar esa única entrada, modos
+0600 y 0664 preservados y ausencia de temporales. El respaldo sigue
+privado (0700), pendiente de limpieza final tras validación.
+Se autorizó una sola vez bed87dc8, detención y deshabilitación
+de la unidad concreta, verificando MainPID, propietario y cwd.
+Resultado: inactive, disabled, MainPID=0, puerto 8787 libre.
+No se añade autorización automática de stop/disable ni borrados.
+La solicitud a1435a37 sigue pendiente de revisión humana; el
+control de seguridad impidió su aprobación remota y no se repite.
+A las 09:22: 20 aprobadas, 4 rechazadas, 1 pendiente y una
+autoaprobación registrada aparte. La fábrica sigue saludable.
+opencode.json del repositorio tiene cambios del Implementador;
+no se incluyen en commits de documentación de la auditoría.
