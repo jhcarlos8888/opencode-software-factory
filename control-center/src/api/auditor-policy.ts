@@ -7,6 +7,7 @@
  */
 import { isAbsolute, relative, resolve } from "node:path";
 import { lstatSync, realpathSync } from "node:fs";
+import { assessDiagnosticCommand, matchDiagnosticResources } from "./diagnostic-policy.js";
 import { assessAuthorizedGitWorkflow, isGitWorkflowInspection, isContextualGitInspection, nativeGitCommandMatches, type GitRoundAuthority } from "./git-workflow-policy.js";
 
 export type AuditorVerdict = "auto" | "human" | "block";
@@ -260,6 +261,9 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
       return { verdict: "human", category: "high-risk", reason: "El comando solicita trabajar fuera del proyecto." };
     }
     if (input.env !== undefined || input.environment !== undefined) return { verdict: "human", category: "high-risk", reason: "El comando solicita alterar el entorno de ejecución." };
+    const diagnostic = assessDiagnosticCommand(shell, request.projectPath, typeof workdir === "string" ? workdir : undefined);
+    if (diagnostic) return { verdict: "auto", category: diagnostic.category,
+      reason: "Diagnóstico acotado del proyecto con directorio y comando verificados." };
     const gradle = (workdir === undefined || resolve(request.projectPath, String(workdir)) === request.projectPath) && isSafeGradleVerification(shell, request.projectPath);
     if (gradle || isSafeShell(shell) || isSafeGitInspectionChain(shell, request.projectPath, typeof workdir === "string" ? resolve(request.projectPath, workdir) : undefined) || (isGitWorkflowInspection(shell.trim(), request.projectPath) && (!isContextualGitInspection(shell.trim()) || (workdir !== undefined && resolve(request.projectPath, String(workdir)) === request.projectPath && input.env === undefined && input.environment === undefined)))) {
       return { verdict: "auto", category: gradle || /npm run|smoke-test/.test(shell) ? "test" : "inspection",
@@ -288,6 +292,16 @@ export function assessOpenCodePermission(
   const input = object(metadata.input);
   if (requestsSandboxBypass(input) || requestsSandboxBypass(metadata) || requestsSandboxBypass(request) || requestsSandboxBypass(nativeInput)) {
     return { verdict: "block", category: "high-risk", reason: "No se autoriza desactivar el sandbox." };
+  }
+  if (tool === "shell" && permissionProfile === "workspace-write" &&
+      Array.isArray(request.resources) && request.resources.every((r): r is string => typeof r === "string") &&
+      nativeInput && typeof nativeInput.command === "string" && nativeInput.workdir === projectPath &&
+      (nativeInput.cwd === undefined || nativeInput.cwd === projectPath) &&
+      nativeInput.env === undefined && nativeInput.environment === undefined &&
+      !isProtectedShellCommand(nativeInput.command)) {
+    const diagnostic = assessDiagnosticCommand(nativeInput.command, projectPath, projectPath, authority?.instructions);
+    if (diagnostic && matchDiagnosticResources(request.resources, diagnostic.resources))
+      return { verdict: "auto", category: diagnostic.category, reason: "Diagnóstico concreto verificado contra la llamada nativa; no se conceden comodines." };
   }
   if (tool === "shell" && permissionProfile === "workspace-write" && Array.isArray(request.resources) &&
       request.resources.length > 0 && request.resources.length <= 12 &&

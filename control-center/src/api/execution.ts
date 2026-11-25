@@ -29,6 +29,7 @@ import { retryOpenCodeRead } from "./opencode-request-retry.js";
 import { buildOpenCodeChildPath } from "./opencode-environment.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
 import { assessAuditorTool, assessOpenCodePermission, isProtectedShellCommand, requestsSandboxBypass } from "./auditor-policy.js";
+import { isDiagnosticCandidate } from "./diagnostic-policy.js";
 import { findNativeGitToolInput, isContextualGitInspection } from "./git-workflow-policy.js";
 import { inspectAuditorShellReceipts, appendAuditorOperationalFindings } from "./auditor-operations.js";
 import {
@@ -528,7 +529,7 @@ async function pollOpenCodeAgent(
     // first. Fetch once more for the exact Git tool evidence before falling
     // back to human review. Never infer a command from an agent's prose.
     if (!nativeInput && Array.isArray(request.resources) &&
-        request.resources.some(resource => typeof resource === "string" && (isContextualGitInspection(resource) || /^git (?:add |commit |push(?: |$))/.test(resource)))) {
+        request.resources.some(resource => typeof resource === "string" && (isDiagnosticCandidate(resource) || isContextualGitInspection(resource) || /^git (?:add |commit |push(?: |$))/.test(resource)))) {
       const refreshedMessages = await openCodeRequest<unknown>(runtime, "GET",
         "/api/session/" + encodeURIComponent(sessionId) + "/message", undefined, 3000).catch(() => null);
       nativeInput = findNativeGitToolInput(refreshedMessages, request);
@@ -592,9 +593,16 @@ async function pollOpenCodeAgent(
     const inserted = getExecutionSnapshot(state.runId)?.decisions.find((item) => item.engineRequestId === formId && item.engineSessionId === sessionId);
     if (inserted) addLog(state.runId, agent.agentId.toUpperCase(), "warning", `Pregunta pendiente: ${title}`, agent.id);
   }
-  const pending = getExecutionSnapshot(state.runId)?.decisions.filter((item) => item.status === "pending").length ?? 0;
-  if (pending > 0) updateExecutionRun(state.runId, "waiting");
-  else if (getExecutionSnapshot(state.runId)?.run.status === "waiting") updateExecutionRun(state.runId, "running");
+  const currentSnapshot = getExecutionSnapshot(state.runId);
+  if (currentSnapshot && ["waiting", "running"].includes(currentSnapshot.run.status)) {
+    const pending = currentSnapshot.decisions;
+    const currentAgent = currentSnapshot.agents.find(item => item.id === agent.id);
+    if (currentAgent?.status === "waiting" && !pending.some(item => item.agentRunId === agent.id)) {
+      updateExecutionAgent(agent.id, { status: "running" });
+    }
+    if (pending.length > 0 && currentSnapshot.run.status !== "waiting") updateExecutionRun(state.runId, "waiting");
+    else if (pending.length === 0 && currentSnapshot.run.status === "waiting") updateExecutionRun(state.runId, "running");
+  }
   // The messages endpoint returns the full assistant history, including
   // intermediate tool-calling turns. Only finish=stop is the canonical
   // final answer for this prompt; progress text remains in the activity log.

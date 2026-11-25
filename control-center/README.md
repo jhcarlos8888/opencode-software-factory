@@ -313,3 +313,18 @@ Gradle admite tail acotado; sin PIPESTATUS[0] se registra que el exit del
 filtro no prueba el resultado de Gradle. Se deben contrastar salida e informes
 JUnit. No se autorizan scripts arbitrarios, cambios de remoto o publicaciones
 sin la autorización expresa requerida por la política Git.
+
+### Diagnósticos locales acotados (Zen Proxy)
+
+El Auditor valida el comando nativo completo de OpenCode, su correspondencia
+con los recursos solicitados y el directorio canónico del proyecto. Admite
+consultas de versiones, listados de la raíz, inspección Git básica, hashes
+de archivos de código no sensibles, consultas filtradas de servicios y puertos,
+estado systemd del servicio con nombre correspondiente al proyecto y campos
+ActiveState/SubState/MainPID/LoadState/UnitFileState. Las consultas de HEAD a
+GitHub se limitan al repositorio HTTPS mencionado por el usuario en la ronda,
+sin reglas de reescritura. Las pruebas npm se permiten cuando package.json
+define exactamente node --test y no hay scripts pretest/posttest; se trata
+de código ejecutable del proyecto confiable, no de una garantía de aislamiento.
+Se excluyen volcados de configuración y variables de entorno, lectura de
+credenciales, cambios de servicios y endpoints de administración no validados.

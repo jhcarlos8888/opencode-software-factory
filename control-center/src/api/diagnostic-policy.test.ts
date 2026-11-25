@@ -1,0 +1,45 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, realpathSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
+import { assessDiagnosticCommand, matchDiagnosticResources } from "./diagnostic-policy.js";
+import { assessOpenCodePermission, assessAuditorTool } from "./auditor-policy.js";
+
+test("Observed Zen Proxy diagnostic recipes require a matching native command and selected root",()=>{
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-diagnostics-")));
+  try {
+    for(const file of ["zen-proxy.mjs","models.json","zen-proxy","install.sh"])writeFileSync(join(root,file),"fixture");
+    writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test"}}));
+    const recipes=[
+      ["ls -la; echo '---'; git status 2>&1 | head -20",["ls -la","echo '---'","git status 2>&1","head -20"]],
+      ["node --version; npm --version; echo '---'; ls -la .; echo '--- systemd user ---'; systemctl --user list-units --type=service --all 2>&1 | grep -i zen | head; echo '--- port ---'; (ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep 8787",["node --version","npm --version","echo '---'","ls -la .","echo '--- systemd user ---'","systemctl --user list-units --type=service --all 2>&1","grep -i zen","head","echo '--- port ---'","ss -ltnp 2>/dev/null","netstat -ltnp","grep 8787"]],
+      ["bun --version 2>&1; echo '--- local hashes ---'; sha256sum package.json zen-proxy.mjs models.json zen-proxy install.sh 2>&1",["bun --version 2>&1","echo '--- local hashes ---'","sha256sum package.json zen-proxy.mjs models.json zen-proxy install.sh 2>&1"]],
+      ['npm test -- --test-reporter=spec 2>&1 | tail -80; echo "EXIT_CODE=${PIPESTATUS[0]}"',["npm test -- --test-reporter=spec 2>&1","tail -80",'echo "EXIT_CODE=${PIPESTATUS[0]}"']]
+    ] as const;
+    for(const [command,resources] of recipes){
+      const result=assessDiagnosticCommand(command,root,root);
+      assert.ok(result,command);assert.ok(matchDiagnosticResources([...resources],result.resources));
+      const request={action:"shell",resources:[...resources],save:["*"]};
+      const native={command,workdir:root};
+      assert.equal(assessOpenCodePermission(request,root,"workspace-write",undefined,native).verdict,"auto",command);
+      assert.notEqual(assessOpenCodePermission(request,root,"read-only",undefined,native).verdict,"auto");
+      assert.notEqual(assessOpenCodePermission(request,root,"approval-required",undefined,native).verdict,"auto");
+      assert.notEqual(assessOpenCodePermission(request,root,"workspace-write",undefined,{...native,workdir:"/tmp"}).verdict,"auto");
+      assert.notEqual(assessOpenCodePermission(request,root,"workspace-write",undefined,{...native,command:command+"; touch /tmp/escape"}).verdict,"auto");
+      assert.notEqual(assessOpenCodePermission({...request,resources:[...resources,"cat .env"]},root,"workspace-write",undefined,native).verdict,"auto");
+      assert.equal(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command,cwd:root},projectPath:root,permissionProfile:"workspace-write"}).verdict,"auto",command);
+    }
+    writeFileSync(join(root,".env"),"private");
+    symlinkSync("/etc/passwd",join(root,"link.js"));
+    for(const command of ["ls -la ~","ls -la /etc","ls -la ../","ls -la; cat .env",
+      "sha256sum .env","sha256sum ../a.js","sha256sum /etc/passwd","sha256sum link.js","sha256sum zen-proxy.json",
+      "systemctl --user restart zen-proxy.service","systemctl --user list-units --type=service --all 2>&1 | grep -i zen | head /etc/passwd",
+      "(ss -ltnp 2>/dev/null || netstat -ltnp 2>/dev/null) | grep 99999","node --version; echo $(whoami)",
+      "npm test -- --require /tmp/evil.js","npm test 2>&1 | tail -101","npm test; git push",
+      "git ls-remote https://github.com/other/project.git refs/heads/main"])assert.equal(assessDiagnosticCommand(command,root,root),null,command);
+    writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test",pretest:"curl example.invalid"}}));
+    assert.equal(assessDiagnosticCommand("npm test",root,root),null);
+    assert.equal(assessDiagnosticCommand("node --version",root,undefined),null);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
