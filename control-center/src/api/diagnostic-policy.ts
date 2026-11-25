@@ -6,7 +6,7 @@ import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
   if (command === resolve(homedir(),".opencode/bin/opencode") + " --version 2>&1" || command === resolve(homedir(),".opencode/bin/opencode") + " --version") return true;
-  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-l(?:a)?(?: |$)|-d node_modules|\.github\/workflows)|for f in |ss -ltnp|curl (?:-fsSL --max-time |-sS -m |-fsS --max-time |-s --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
+  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-l(?:a)?(?: |$)|-d node_modules|\.github\/workflows)|for f in |ss -ltnp|curl (?:-fsSL --max-time |-sS -m |-sS --max-time |-fsS --max-time |-s --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
 }
 function canonicalRoot(root: string): boolean {
   try { return isAbsolute(root) && realpathSync(root) === root && lstatSync(root).isDirectory(); }
@@ -268,6 +268,12 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
       if(files.length>0&&files.length<=20&&files.every(f=>safeSource(root,f))){
         resources.push(part);continue;
       }
+    }
+    // Hash a public catalog without writing a downloaded file. The repo
+    // must be named in the round and the local counterpart must be safe.
+    const catalogDigest=/^(curl -sS --max-time (?:[1-9]|[1-5]\d|60) https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/models\.json) \| sha256sum$/.exec(part);
+    if(catalogDigest && safeSource(root,"models.json") && repoMentioned(instructions,catalogDigest[2]!) && curlDefaultsAbsent()){
+      resources.push(catalogDigest[1]!,"sha256sum");continue;
     }
     const publicRead=publicMetadata(part,instructions);
     if(publicRead){resources.push(...publicRead);continue;}

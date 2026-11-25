@@ -203,3 +203,18 @@ test("QA service aliases, listening port and projected health use only bounded m
     for(const bad of [service+" -p Environment",service.replace("zen-proxy","other-service"),socket.replace("8787","22"),socket+"; cat /etc/passwd",health.replace("/health","/api/status"),health.replace("{ok,upstream,sync:.sync.ok,version}","."),health+"; echo $(whoami)"])assert.equal(assessDiagnosticCommand(bad,root,root),null,bad);
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("Public catalog digest is limited to the selected repository",()=>{
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-catalog-digest-")));
+  try{
+    writeFileSync(join(root,"models.json"),"{}");
+    const instructions="Revisa https://github.com/example/project";
+    const command="curl -sS --max-time 20 https://raw.githubusercontent.com/example/project/main/models.json | sha256sum; sha256sum models.json";
+    const cleanCurl=![".curlrc",".config/curlrc"].some(name=>existsSync(join(homedir(),name)))&&!process.env.CURL_HOME&&!process.env.XDG_CONFIG_HOME;
+    if(cleanCurl)assert.deepEqual(assessDiagnosticCommand(command,root,root,instructions)?.resources,[command.split(" | ")[0],"sha256sum","sha256sum models.json"]);
+    assert.equal(assessDiagnosticCommand(command.replace("example/project","other/project"),root,root,instructions),null);
+    assert.equal(assessDiagnosticCommand(command.replace("/models.json","/README.md"),root,root,instructions),null);
+    assert.equal(assessDiagnosticCommand(command.replace("20 https","120 https"),root,root,instructions),null);
+    assert.equal(assessDiagnosticCommand(command,root,undefined,instructions),null);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
