@@ -245,3 +245,28 @@ El planificador reconoce requisitos de salida expresados como un resultado
 deseado (por ejemplo, que los campos de un endpoint devuelvan cadenas vacías),
 sin exigir la palabra «implementar»; las preguntas y revisiones explícitas
 no se convierten por ello en permisos de escritura.
+
+### Ajustes de seguridad y trazabilidad tras la auditoría de la ronda 3
+
+- Las cadenas de inspección Git pueden terminar un segmento reconocido con
+  `| head -N` o `| head -n N` (1–100 líneas, sin archivos de entrada ni
+  redirecciones). No se permite Git remoto con credenciales potenciales
+  mediante `git remote -v` de forma automática. El perfil y las demás
+  restricciones del Auditor siguen vigentes.
+- Claude no puede solicitar `dangerouslyDisableSandbox` como excepción:
+  el hook PreToolUse y la devolución de permisos rechazan esa solicitud,
+  incluso si el comando figura en la lista segura. Debe repetirlo sin esa opción.
+  Esto no equivale a certificar un aislamiento completo de todos los procesos.
+- Si una respuesta final de OpenCode contiene progreso seguido de un separador
+  explícito y un informe con el ID exacto, agente, motor, ejecución y registro
+  correspondientes, el orquestador separa el preámbulo (conservado en eventos)
+  y calcula la integridad del informe seleccionado. Los casos ambiguos
+  conservan la observación de identidad; no se reescribe el historial.
+- `search_text` acepta un archivo regular o un directorio relativo al
+  proyecto; mantiene límites de bytes, coincidencias, rutas y symlinks.
+  No busca en dependencias ni artefactos excluidos; para JUnit se utiliza
+  `summarize_junit`.
+- El diagnóstico exacto `unrecognized_model` con
+  `query_source=generate_session_title` se muestra como información, sin
+  ocultar el texto del SDK. Los errores de inferencia, autenticación,
+  cuotas y diagnósticos desconocidos no se reclasifican.

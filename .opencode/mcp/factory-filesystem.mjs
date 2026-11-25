@@ -278,7 +278,10 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
       throw new Error("La búsqueda requiere un texto literal de 1 a 256 caracteres.");
     }
     const start = await resolveInside(path);
-    if (!start.info.isDirectory()) throw new Error("El ámbito de búsqueda debe ser un directorio del proyecto.");
+    if (!start.info.isDirectory() && !start.info.isFile()) throw new Error("El ámbito de búsqueda debe ser un archivo regular o directorio del proyecto.");
+    if (start.relative.split("/").some(segment => IGNORED_DIRECTORIES.has(segment))) {
+      throw new Error("El ámbito de búsqueda selecciona una carpeta de dependencias o artefactos excluida.");
+    }
 
     const resultLimit = Math.max(1, Math.min(Number.isInteger(max_results) ? max_results : 50, MAX_SEARCH_RESULTS));
     const needle = case_sensitive ? query : query.toLocaleLowerCase();
@@ -287,72 +290,60 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
     let bytesScanned = 0;
     let truncated = false;
 
+    async function scanFile(absolute, rel, strict = false) {
+      if (truncated) return;
+      if (filesScanned >= MAX_SEARCH_FILES) { truncated = true; return; }
+      filesScanned++;
+      let info;
+      try { info = await lstat(absolute); } catch (error) { if (strict) throw error; return; }
+      if (!info.isFile() || info.isSymbolicLink()) {
+        if (strict) throw new Error("El archivo no es regular o es un enlace simbólico.");
+        return;
+      }
+      if (info.size > MAX_SEARCH_FILE_BYTES) { if (strict) throw new Error("El archivo supera el límite seguro de búsqueda."); return; }
+      if (bytesScanned + info.size > MAX_SEARCH_TOTAL_BYTES) { truncated = true; return; }
+      let buffer;
+      try {
+        const opened = await readFileNoFollow(absolute, rel, MAX_SEARCH_FILE_BYTES);
+        if (opened.info.dev !== info.dev || opened.info.ino !== info.ino) throw new Error("El archivo cambió de identidad.");
+        buffer = opened.buffer;
+      } catch (error) { if (strict) throw error; return; }
+      if (bytesScanned + buffer.length > MAX_SEARCH_TOTAL_BYTES) { truncated = true; return; }
+      bytesScanned += buffer.length;
+      if (buffer.includes(0)) {
+        if (strict) throw new Error("La búsqueda de archivos binarios no está permitida.");
+        return;
+      }
+      const lines = buffer.toString("utf8").split(/\r?\n/);
+      for (let index = 0; index < lines.length; index++) {
+        const line = lines[index];
+        const haystack = case_sensitive ? line : line.toLocaleLowerCase();
+        if (!haystack.includes(needle)) continue;
+        results.push({ path: rel, line: index + 1,
+          excerpt: line.length > 1200 ? line.slice(0, 1200) + "…" : line });
+        if (results.length >= resultLimit) { truncated = true; return; }
+      }
+    }
+
     async function visit(directory, relativeDirectory, depth) {
       if (truncated || depth > MAX_DEPTH) return;
       let entries;
-      try { entries = await readdir(directory, { withFileTypes: true }); } catch { return; }
+      try { entries = await readDirectoryNoFollow(directory, relativeDirectory); } catch { return; }
       entries.sort((a, b) => a.name.localeCompare(b.name));
-
       for (const entry of entries) {
         if (truncated) return;
         const rel = relativeDirectory === "." ? entry.name : relativeDirectory + "/" + entry.name;
         if (isSensitiveRelativePath(rel) || entry.isSymbolicLink()) continue;
-
         if (entry.isDirectory()) {
           if (IGNORED_DIRECTORIES.has(entry.name)) continue;
           await visit(resolve(directory, entry.name), rel, depth + 1);
-          continue;
-        }
-        if (!entry.isFile()) continue;
-
-        filesScanned += 1;
-        if (filesScanned > MAX_SEARCH_FILES) {
-          truncated = true;
-          return;
-        }
-
-        const absolute = resolve(directory, entry.name);
-        let info;
-        try { info = await lstat(absolute); } catch { continue; }
-        if (!info.isFile() || info.isSymbolicLink() || info.size > MAX_SEARCH_FILE_BYTES) continue;
-        if (bytesScanned + info.size > MAX_SEARCH_TOTAL_BYTES) {
-          truncated = true;
-          return;
-        }
-
-        let buffer;
-        try {
-          const opened = await readFileNoFollow(absolute, rel, MAX_SEARCH_FILE_BYTES);
-          if (opened.info.dev !== info.dev || opened.info.ino !== info.ino) continue;
-          buffer = opened.buffer;
-        } catch { continue; }
-        if (bytesScanned + buffer.length > MAX_SEARCH_TOTAL_BYTES) {
-          truncated = true;
-          return;
-        }
-        bytesScanned += buffer.length;
-        if (buffer.includes(0)) continue;
-
-        const content = buffer.toString("utf8");
-        const lines = content.split(/\r?\n/);
-        for (let index = 0; index < lines.length; index++) {
-          const line = lines[index];
-          const haystack = case_sensitive ? line : line.toLocaleLowerCase();
-          if (!haystack.includes(needle)) continue;
-          results.push({
-            path: rel,
-            line: index + 1,
-            excerpt: line.length > 1200 ? line.slice(0, 1200) + "…" : line
-          });
-          if (results.length >= resultLimit) {
-            truncated = true;
-            return;
-          }
+        } else if (entry.isFile()) {
+          await scanFile(resolve(directory, entry.name), rel);
         }
       }
     }
-
-    await visit(start.absolute, start.relative, 0);
+    if (start.info.isFile()) await scanFile(start.absolute, start.relative, true);
+    else await visit(start.absolute, start.relative, 0);
     return {
       query,
       root: start.relative,
@@ -478,7 +469,7 @@ const TOOL_DEFINITIONS = [
       type: "object",
       properties: {
         query: { type: "string", minLength: 1, maxLength: 256, description: "Texto literal a buscar." },
-        path: { type: "string", description: "Subdirectorio relativo dentro del proyecto; por defecto ." },
+        path: { type: "string", description: "Archivo o directorio relativo dentro del proyecto; por defecto ." },
         case_sensitive: { type: "boolean", description: "Distinguir mayúsculas y minúsculas." },
         max_results: { type: "integer", minimum: 1, maximum: MAX_SEARCH_RESULTS, description: "Máximo de coincidencias (por defecto 50)." }
       },

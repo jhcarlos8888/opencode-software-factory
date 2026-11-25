@@ -236,7 +236,35 @@ const EXPECTED_AGENTS = ["architect", "build", "implementer", "reviewer", "teste
 export function hasHandoffIdAtStart(output: string, handoffId: string): boolean {
   const firstLine = output.trimStart().split(/\r?\n/, 1)[0] ?? "";
   const normalized = firstLine.trim().replace(/^#{1,6}\s*/, "").replace(/^\*\*/, "").trimStart();
-  return normalized.startsWith(handoffId);
+  return normalized === handoffId || normalized === handoffId + "**";
+}
+
+/** Some OpenCode models return a short progress preamble and a separated
+ * final report in the same terminal message. Select the report only when the
+ * explicit separator, exact ID and local run/agent identities all agree.
+ * Never promote a mere reference to a handoff buried in arbitrary prose. */
+export function selectOpenCodeHandoffReport(output: string, identity: {
+  handoffId: string; agentId: string; runId: string; agentRunId: string;
+}): { report: string; preamble: string | null } {
+  const source = output.trimStart();
+  if (hasHandoffIdAtStart(source, identity.handoffId)) return { report: source, preamble: null };
+  const separators = [...source.matchAll(/(?:^|\r?\n)---[ \t]*\r?\n(?:[ \t]*\r?\n)*/g)];
+  const candidates = separators.filter(match => {
+    const start = (match.index ?? 0) + match[0].length;
+    return hasHandoffIdAtStart(source.slice(start), identity.handoffId);
+  });
+  if (candidates.length !== 1) return { report: source, preamble: null };
+  const separator = candidates[0]!;
+  const preamble = source.slice(0, separator.index).trim();
+  const report = source.slice((separator.index ?? 0) + separator[0].length);
+  if (!preamble || preamble.length > 1200 || /HANDOFF-[A-Z0-9-]+|^[ \t]*(?:[>#]|\x60{3})|^\s*[-*]\s+\*\*Agente:/m.test(preamble)) {
+    return { report: source, preamble: null };
+  }
+  const header = report.split(/\r?\n/).slice(1, 16);
+  const agent = header.some(line => line.trim().startsWith("- **Agente:** " + identity.agentId + " · **Motor:** opencode ·"));
+  const run = header.some(line => line.trim().startsWith("- **Ejecución:** " + identity.runId + " · **Registro:** " + identity.agentRunId + " ·"));
+  if (!agent || !run) return { report: source, preamble: null };
+  return { report, preamble };
 }
 
 export function extractCanonicalOpenCodeAssistantText(payload: unknown): string | null {

@@ -60,3 +60,31 @@ revisión. Una autorización puntual no equivale a una regla permanente.
   ese pipeline sin código de salida; se recomienda el formato EXIT_CODE.
 - Los intérpretes arbitrarios (Python, JShell) no reciben autorización
   global: una prueba puntual revisada no justifica permitir cualquier código.
+
+## Ronda 3 ee31fa64 — validación del despliegue (24 de noviembre)
+
+- 19516: la instrucción de contrato se clasificó como implementación, cinco agentes.
+- 19817, 19837: error inicial de compilación Java (excepción verificada no declarada), reparado por el Implementador; repetición con salida 0.
+- 19843, 19934, 20039, 20078: uso real de summarize_junit por los dos motores. 241 pruebas, sin fallos, errores ni omitidas.
+- 19911, 19955, 20003: pruebas independientes, check y build del Tester con salida 0.
+- 20038 y 20077: aprobaciones automáticas de Gradle con recuperación del código de salida en Claude.
+- 20041–20043: cadena de Git con separador que contiene paréntesis y diff acotado por head -80. Aprobación puntual. Candidato para una gramática restringida; no autorizar pipelines genéricos.
+- 20079–20080: autoaprobación de inspección Git con dangerouslyDisableSandbox=true. Revisar el tratamiento de esta opción explícita antes de ampliar permisos.
+- 19852 y 19978: search_text recibió una ruta de archivo en vez de directorio; los agentes recuperaron con la ruta correcta.
+- 20093–20094: finalización 20:02:32. Cinco de cinco especialistas planificados; 10 entregas, 6 entre motores, 4 verificadas con identidad completa; tres autoaprobaciones, una autorización puntual, ninguna pendiente. Resumen sustancial y chat persistido. Sin concurrencia entre motores en esta ronda, que siguió olas secuenciales.
+- Identidad del informe del Implementador sigue incorporada por el orquestador; el contenido se conserva. Pendientes del proyecto: contrato HTTP, verificación real con IKE y aislamiento de un test de adicionales.
+
+### Correcciones de la auditoría de la ronda 3
+
+- Sandbox: bloqueo explícito en el Auditor y en los dos puntos de control
+  de Claude; se solicita repetir sin excepción.
+- Git: filtro head numérico acotado sobre comandos de inspección reconocidos
+  y separadores literales entre comillas con paréntesis. git remote -v
+  permanece sujeto a revisión por potencial exposición de credenciales.
+- Handoff: separar progreso solo ante un delimitador explícito inequívoco
+  y coincidencia del ID, agente, motor y registro de la ejecución actual.
+  El preámbulo se conserva en eventos, no se modifica la evidencia histórica.
+- MCP: búsqueda de un archivo regular con los mismos controles que el
+  recorrido de directorios; se utiliza la enumeración confinada por descriptor.
+- SDK: distinguir únicamente el aviso de generación del título, sin ocultarlo.
+  No se cambia el modelo ni el proveedor, ni se afirma haber reparado el SDK.

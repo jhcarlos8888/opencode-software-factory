@@ -80,7 +80,7 @@ function isSafeShell(command: string): boolean {
   // The common OpenCode shell renderer uses echo to display a test's native
   // exit status and other fixed separators. Interpolation is allowed ONLY for
   // the exact shell status variables, never arbitrary command expansion.
-  if (/^echo (?:'---[A-Za-z0-9 _-]{0,40}---'|"---[A-Za-z0-9 _-]{0,40}---"|'---'|"---"|"(?:CHECK_EXIT|EXIT|EXIT_CODE|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT|CACHED_EXIT|EXIT_DIFF|EXIT_CACHED)=\$\?"|"(?:CHECK_EXIT|EXIT|EXIT_CODE|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT)=\$\{PIPESTATUS\[0\]\}")$/.test(value)) {
+  if (/^echo (?:'---[A-Za-z0-9 _()-]{0,40}---'|"---[A-Za-z0-9 _()-]{0,40}---"|'---'|"---"|"(?:CHECK_EXIT|EXIT|EXIT_CODE|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT|CACHED_EXIT|EXIT_DIFF|EXIT_CACHED)=\$\?"|"(?:CHECK_EXIT|EXIT|EXIT_CODE|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT)=\$\{PIPESTATUS\[0\]\}")$/.test(value)) {
     return true;
   }
   if (/[\$\\*?]/.test(value)) return false;
@@ -114,18 +114,32 @@ function isSafeShell(command: string): boolean {
 // Claude reports a whole Bash invocation rather than OpenCode's segments.
 // Only permit a literal cd to the selected project followed by a short AND
 // chain of already recognized Git inspections and fixed output separators.
+function isSafeGitInspectionSegment(segment: string): boolean {
+  if (segment.startsWith("echo ")) return isSafeShell(segment);
+  if (!segment.startsWith("git ")) return false;
+  const bounded = /^(git .+) \| head -(?:n )?(?:[1-9]\d?|100)$/.exec(segment);
+  return bounded ? isSafeShell(bounded[1]!) : isSafeShell(segment);
+}
+
 function isSafeGitInspectionChain(command: string, projectPath: string): boolean {
   if (!isAbsolute(projectPath) || command.length > 1200 ||
-      /[\r\n\x00-\x1f;|<>$\x60\\]/.test(command)) return false;
+      /[\r\n\x00-\x1f;<>$\x60\\]/.test(command)) return false;
   const parts = command.trim().split(" && ");
-  if (parts.length < 2 || parts.length > 12) return false;
+  if (parts.length > 12) return false;
   if (parts[0]?.startsWith("cd ")) {
-    if (/["'&]/.test(projectPath)) return false;
+    if (/["'&|;<>$\x60\\]/.test(projectPath)) return false;
     if (parts.shift() !== 'cd "' + projectPath + '"') return false;
   }
   return parts.some((part) => part.startsWith("git ")) &&
-    parts.every((part) => (part.startsWith("git ") || part.startsWith("echo ")) &&
-      isSafeShell(part));
+    parts.every(isSafeGitInspectionSegment);
+}
+
+/** Explicitly disabling the engine's sandbox is never an ordinary grant.
+ * Check both the policy and the mandatory Claude PreToolUse hook. */
+export function requestsSandboxBypass(input: unknown): boolean {
+  const record = object(input);
+  return Object.prototype.hasOwnProperty.call(record, "dangerouslyDisableSandbox") &&
+    record.dangerouslyDisableSandbox !== false && record.dangerouslyDisableSandbox !== undefined;
 }
 
 // Only the selected project's existing wrapper, with bounded test/build
@@ -209,6 +223,10 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
     return { verdict: "block", category: "high-risk",
       reason: "Operación de terminación/destrucción o control de servicio: no hay prueba de que el proceso pertenezca al agente. El Auditor la bloqueó." };
   }
+  if (requestsSandboxBypass(input)) {
+    return { verdict: "block", category: "high-risk",
+      reason: "La solicitud intenta desactivar el sandbox. Repite la operación sin dangerouslyDisableSandbox; el Auditor no autoriza esta excepción." };
+  }
   if (request.permissionProfile !== "workspace-write") {
     return { verdict: "human", category: "unknown",
       reason: "El perfil de permisos del agente no permite ampliar automáticamente su alcance." };
@@ -242,6 +260,9 @@ export function assessOpenCodePermission(
   const tool = String(request.action ?? request.permission ?? "");
   const metadata = object(request.metadata);
   const input = object(metadata.input);
+  if (requestsSandboxBypass(input) || requestsSandboxBypass(metadata) || requestsSandboxBypass(request)) {
+    return { verdict: "block", category: "high-risk", reason: "No se autoriza desactivar el sandbox." };
+  }
   if (tool === "shell" && typeof input.command !== "string") {
     // OpenCode 2.1 supplies a *segmented* resources list for shell permissions,
     // e.g. ["npm run check"] or ["git status --porcelain", "git diff --stat"].
@@ -261,7 +282,7 @@ export function assessOpenCodePermission(
     }
     const gradle = (workdir === undefined || resolve(projectPath, String(workdir)) === projectPath)
       && resources.some((resource) => isSafeGradleVerification(resource, projectPath));
-    if (permissionProfile === "workspace-write" && resources.every((resource) => isSafeShell(resource) ||
+    if (permissionProfile === "workspace-write" && resources.every((resource) => isSafeShell(resource) || isSafeGitInspectionChain(resource, projectPath) ||
         (gradle && isSafeGradleVerification(resource, projectPath)))) {
       return { verdict: "auto", category: gradle || resources.some((r) => /npm run|smoke-test/.test(r)) ? "test" : "inspection",
         reason: "Todos los segmentos concretos del shell coinciden con comandos de lectura/pruebas autorizados." };

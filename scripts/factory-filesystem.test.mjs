@@ -220,3 +220,27 @@ test("summarize_junit counts only confined report headers and refuses unsafe pat
     assert.equal(JSON.stringify(partial).includes("OUTSIDE-SECRET"), false);
   } finally { await rm(f.base, { recursive: true, force: true }); }
 });
+
+test("search_text accepts a regular project file without expanding the search or relaxing guards", async () => {
+  const f = await fixture();
+  try {
+    const fs = await createProjectFilesystem(f.project);
+    const result = await fs.searchText({ query: "FACTORY FILESYSTEM SAFE SEARCH", path: "src/App.java" });
+    assert.equal(result.count, 1);
+    assert.equal(result.files_scanned, 1);
+    assert.equal(result.matches[0].path, "src/App.java");
+    assert.equal(result.matches[0].line, 2);
+    assert.equal((await fs.searchText({ query: "FACTORY", path: "src/App.java", case_sensitive: true })).count, 0);
+    for (const path of [".env", ".git/config", "node_modules/dependency.js", "linked/outside.txt", "src/AppAlias.java", "../outside/outside.txt", "/etc/passwd"]) {
+      await assert.rejects(() => fs.searchText({ query: "secret", path }));
+    }
+    await writeFile(join(f.project, "src", "binary.dat"), Buffer.from([0, 1, 2]));
+    await assert.rejects(() => fs.searchText({ query: "x", path: "src/binary.dat" }), /binarios/);
+    await writeFile(join(f.project, "src", "large.txt"), "x".repeat(1024 * 1024 + 1));
+    await assert.rejects(() => fs.searchText({ query: "x", path: "src/large.txt" }), /límite/);
+    await writeFile(join(f.project, "src", "many.txt"), "match\nmatch\nmatch");
+    const limited = await fs.searchText({ query: "match", path: "src/many.txt", max_results: 2 });
+    assert.equal(limited.count, 2);
+    assert.equal(limited.truncated, true);
+  } finally { await rm(f.base, { recursive: true, force: true }); }
+});

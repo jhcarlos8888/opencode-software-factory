@@ -8,7 +8,7 @@ import {
   buildApprovalAuditSummary, buildExecutionSummary, createHandoffDescriptor, createHandoffId,
   selectDeliverableHandoffSources,
   extractCanonicalOpenCodeAssistantText, extractClaudeFinalText, formatApprovalAuditContext,
-  hasConcurrentCrossEngineRun, hasHandoffIdAtStart, prepareHandoffOutput, type SummaryAgent
+  hasConcurrentCrossEngineRun, hasHandoffIdAtStart, prepareHandoffOutput, selectOpenCodeHandoffReport, type SummaryAgent
 } from "./orchestration.js";
 
 test("OpenCode handoff capture selects only the terminal assistant message", () => {
@@ -828,4 +828,33 @@ test("a single explanation agent returns actual answer even without structured h
   const corrupted = buildExecutionSummary({ instructions: "Explica", agents: [{ ...result, handoffIn: [] }], results: [{ ...result, handoffOutput: { ...handoffOutput, sha256: "0".repeat(64) } }] });
   assert.doesNotMatch(corrupted.overview, /gestiona pólizas/);
   assert.match(corrupted.overview, /No se dispone de un informe/);
+});
+
+test("OpenCode canonical report with progress before explicit handoff separator retains real authorship", () => {
+  const identity = { handoffId: "HANDOFF-IMPLEMENTER-EE31FA64", agentId: "implementer",
+    runId: "ee31fa64-ba02-4b11-8a34-a5252c88155e", agentRunId: "07c89f9f-e7c8-4081-9ccc-17f775ec08b1" };
+  const preamble = "\x60assertNull\x60 ya no existe en el test. Trabajo terminado y verificado.";
+  const report = identity.handoffId + "\n\n- **Agente:** implementer · **Motor:** opencode · **Modelo:** glm\n- **Ejecución:** " + identity.runId + " · **Registro:** " + identity.agentRunId + " · Ronda 3\n\n## RESUMEN EJECUTIVO\nCambios comprobados.";
+  const output = preamble + "\n\n---\n\n" + report;
+  const selected = selectOpenCodeHandoffReport(output, identity);
+  assert.equal(selected.report, report);
+  assert.equal(selected.preamble, preamble);
+  assert.equal(prepareHandoffOutput(selected.report, identity.handoffId).idAuthor, "agent");
+  for (const invalid of [
+    output.replace("\n---\n", "\n"),
+    output.replace(identity.agentRunId, "wrong-record"),
+    output.replace(identity.runId, "wrong-run"),
+    output.replace("**Agente:** implementer", "**Agente:** tester"),
+    output.replace("**Motor:** opencode", "**Motor:** claude"),
+    output.replace(identity.handoffId, identity.handoffId + "-FAKE"),
+    "HANDOFF-TESTER-OTHER\n" + output,
+    ">\x20cita\n" + output,
+    output + "\n---\n" + report,
+    "x".repeat(1201) + output
+  ]) {
+    assert.equal(selectOpenCodeHandoffReport(invalid, identity).report, invalid);
+    assert.equal(selectOpenCodeHandoffReport(invalid, identity).preamble, null);
+  }
+  assert.equal(hasHandoffIdAtStart(identity.handoffId + "-FAKE", identity.handoffId), false);
+  assert.equal(selectOpenCodeHandoffReport(report, identity).preamble, null);
 });

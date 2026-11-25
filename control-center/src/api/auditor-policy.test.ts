@@ -282,3 +282,35 @@ test("Gradle test recipes permit only bounded tasks in the actual selected works
     assert.notEqual(decide("./gradlew test").verdict, "auto");
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
+
+test("Explicit sandbox bypass is never auto-approved, even for a known inspection", () => {
+  for (const value of [true, "true", 1, null]) {
+    for (const profile of ["workspace-write", "read-only", "approval-required"] as const) {
+      assert.equal(claude("Bash", { command: "git diff --stat", dangerouslyDisableSandbox: value }, profile).verdict, "block");
+      assert.equal(opencode("shell", { command: "git diff --stat", dangerouslyDisableSandbox: value }, profile).verdict, "block");
+      assert.equal(assessOpenCodePermission({ action: "shell", resources: ["git diff --stat"], metadata: { dangerouslyDisableSandbox: value } }, projectPath, profile).verdict, "block");
+    }
+  }
+  assert.equal(claude("Bash", { command: "git diff --stat", dangerouslyDisableSandbox: false }).verdict, "auto");
+});
+
+test("Observed Git diff with fixed separator and bounded head is permitted, not general pipelines", () => {
+  const command = 'cd "' + projectPath + '" && git status --porcelain=v1 -uall && echo "---DIFFSTAT---" && git diff --stat && echo "---DIFF SERVICIO (helpers)---" && git diff domain/usecase/src/main/java/com/previsora/impl/AsistenciasService.java | head -80';
+  assert.equal(claude("Bash", { command }).verdict, "auto");
+  assert.equal(claude("Bash", { command: "git diff --stat | head -n 80" }).verdict, "auto");
+  assert.equal(assessOpenCodePermission({ action: "shell", resources: ["git diff --stat", 'echo "---DIFF SERVICIO (helpers)---"', "git diff src/App.java | head -80"] }, projectPath, "workspace-write").verdict, "auto");
+  for (const unsafe of [
+    command.replace("head -80", "head -80 /etc/passwd"),
+    command.replace("head -80", "head -101"),
+    command.replace("head -80", "head -80 | sh"),
+    command.replace("head -80", "head -80 > output"),
+    command.replace("head -80", "head -80 && git push"),
+    command.replace("head -80", "head -80 || true"),
+    command.replace("git diff domain", "git diff --ext-diff domain"),
+    command.replace("git diff domain", "git diff ../domain"),
+    command.replace("(helpers)", "$(whoami)"),
+    command.replace(projectPath, "/tmp/other"),
+    "git remote -v", "git remote -v | head -10", "npm run check | head -10"
+  ]) assert.notEqual(claude("Bash", { command: unsafe }).verdict, "auto", unsafe);
+  assert.notEqual(claude("Bash", { command }, "read-only").verdict, "auto");
+});

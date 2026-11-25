@@ -22,16 +22,17 @@ import { createClaudeFactoryMcpConfig, isAllowedFactoryFilesystemMcpTool, isFact
 import { planTask, resolveAgentPermissionProfile, selectAgentsForTask, type ResearchDepth, type TaskPlan } from "./task-planner.js";
 import { parseOpenCodeFormAnswers } from "./opencode-forms.js";
 import { buildClaudeFactorySkillsSdkOptions, ensureClaudeFactorySkillsPlugin, type ClaudeFactorySkillsPlugin } from "./claude-skills.js";
+import { classifyClaudeSdkLog } from "./claude-log-classifier.js";
 import { classifyOpenCodeServerLog } from "./opencode-log-classifier.js";
 import { validateOpenCodeTurnResult } from "./opencode-turn-result.js";
 import { retryOpenCodeRead } from "./opencode-request-retry.js";
 import { buildOpenCodeChildPath } from "./opencode-environment.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
-import { assessAuditorTool, assessOpenCodePermission, isProtectedShellCommand } from "./auditor-policy.js";
+import { assessAuditorTool, assessOpenCodePermission, isProtectedShellCommand, requestsSandboxBypass } from "./auditor-policy.js";
 import { inspectAuditorShellReceipts, appendAuditorOperationalFindings } from "./auditor-operations.js";
 import {
   buildExecutionSummary, formatRoundSummaryMessage, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
-  extractClaudeFinalText, formatApprovalAuditContext, prepareHandoffOutput,
+  extractClaudeFinalText, formatApprovalAuditContext, prepareHandoffOutput, selectOpenCodeHandoffReport,
   selectDeliverableHandoffSources, type AgentResult, type HandoffDescriptor
 } from "./orchestration.js";
 import {
@@ -775,7 +776,7 @@ function makeAgentPrompt(
     "PROTOCOLO DE ENTREGA:",
     "PRIMERA LÍNEA CANÓNICA: escribe exactamente " + handoffId + " (sin #, prefijos, espacios ni texto previo). Después indica agente, motor, modelo, INBOUND con los IDs exactos recibidos (" + expectedInbound + "), herramientas, hallazgos, discrepancias y recomendaciones.",
     "Después del identificador incluye secciones Markdown ## RESUMEN EJECUTIVO, ## HALLAZGOS CLAVE, ## VERIFICACIONES EJECUTADAS y ## PRÓXIMOS PASOS. En el resumen responde directamente al objetivo de esta ronda: qué se hizo, qué no se hizo, qué cambió realmente y qué queda pendiente. Si solo analizaste, dilo. No confundas pruebas verdes de un contrato anterior con cumplimiento del nuevo requisito.",
-    "No inventes handoffs. Usa solamente los IDs enumerados aquí. No declares ausentes agentes basándote solo en informes anteriores: los registros de ejecución son la fuente de verdad.",
+    "No incluyas frases de progreso antes de la primera línea de la respuesta final. No solicites dangerouslyDisableSandbox; usa el entorno permitido. No inventes handoffs. Usa solamente los IDs enumerados aquí. No declares ausentes agentes basándote solo en informes anteriores: los registros de ejecución son la fuente de verdad.",
     "Los metadatos de integridad calculados por el orquestador son autoritativos y prevalecen sobre cualquier frase del informe. Si idAuthor=ORQUESTADOR, no afirmes que el agente original emitió el ID. Si Truncado=SÍ, trata el contenido como incompleto y enumera qué no puedes verificar.",
     "",
     previous ? "HANDOFFS Y RESULTADOS DE FASES PREVIAS:" + nl + previous : "No hay handoffs previos. Trabaja independientemente dentro de esta ola."
@@ -882,7 +883,10 @@ async function runClaudeAgent(
       // is therefore the enforcement point for project filesystem isolation.
       stderr: (data) => {
         const detail = sanitizeText(data).trim();
-        if (detail) addLog(state.runId, agent.agentId.toUpperCase(), "warning", "Claude SDK: " + detail.slice(0, 3000), agent.id);
+        if (detail) {
+          const diagnostic = classifyClaudeSdkLog(detail);
+          addLog(state.runId, agent.agentId.toUpperCase(), diagnostic.kind, diagnostic.message.slice(0, 3000), agent.id);
+        }
       },
       hooks: {
         PreToolUse: [{
@@ -902,6 +906,12 @@ async function runClaudeAgent(
                 permissionDecisionReason: reason
               }
             });
+
+            if (toolName === "Bash" && requestsSandboxBypass(toolInput)) {
+              addLog(state.runId, "AUDITOR", "warning",
+                "Bloqueo de aislamiento: " + agent.agentId + " solicitó desactivar el sandbox; debe repetir sin esa opción.", agent.id);
+              return deny("No desactives el sandbox. Repite el comando sin dangerouslyDisableSandbox.");
+            }
 
             const mcpServerName = hookInput.mcp_server && typeof hookInput.mcp_server === "object"
               ? String((hookInput.mcp_server as Record<string, unknown>).name ?? "")
@@ -953,6 +963,10 @@ async function runClaudeAgent(
         }]
       },
       canUseTool: async (toolName, input, options) => {
+        if (toolName === "Bash" && requestsSandboxBypass(input)) {
+          addLog(state.runId, "AUDITOR", "warning", "Solicitud de desactivar el sandbox rechazada: " + agent.agentId, agent.id);
+          return { behavior: "deny", message: "Repite el comando sin dangerouslyDisableSandbox.", toolUseID: options.toolUseID };
+        }
         if (isFactoryFilesystemToolName(toolName)) {
           return { behavior: "allow", toolUseID: options.toolUseID };
         }
@@ -1323,7 +1337,14 @@ async function executeRun(
         const finishedAt = new Date().toISOString();
         const snapshot = getExecutionSnapshot(state.runId);
         const sessionId = snapshot?.agents.find((item) => item.id === agent.id)?.sessionId ?? null;
-        const handoffOutput = prepareHandoffOutput(redactSecrets(output), handoffId);
+        const safeOutput = redactSecrets(output);
+        const selected = agent.engine === "opencode"
+          ? selectOpenCodeHandoffReport(safeOutput, { handoffId, agentId: agent.agentId,
+              runId: state.runId, agentRunId: agent.id })
+          : { report: safeOutput, preamble: null };
+        if (selected.preamble) addLog(state.runId, agent.agentId.toUpperCase(), "info",
+          "Preámbulo de progreso separado del informe canónico (ID y registro comprobados): " + selected.preamble, agent.id);
+        const handoffOutput = prepareHandoffOutput(selected.report, handoffId);
         const result: AgentResult = {
           agentRunId: agent.id, agentId: agent.agentId, engine: agent.engine, modelId: agent.modelId,
           sessionId, status: "succeeded", startedAt, finishedAt, handoffId,
