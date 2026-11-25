@@ -442,3 +442,21 @@ del ejecutable OpenCode canónico. No autoriza otros argumentos,
 escrituras ni enlaces a binarios ajenos. La variante multilínea
 observada sigue requiriendo revisión; no se amplían permisos de
 shell por equivalencia textual.
+
+### Desinstalación — QA 09:45
+
+Implementador completado; evento 22185 confirma recepción de
+los cuatro handoffs por Tester, incluido el Arquitecto de Claude.
+Se rechazó 4d340bda por enumeración de directorios educativos
+ajenos al objetivo y se indicaron las cuatro raíces verificadas.
+Se concedieron puntualmente 10a739f3 (proyecciones estructurales
+de opencode.json y claves de scripts) y be3d09ae (solo metadatos
+de cuatro rutas por proyecto, sin leer .env). ExamResolve y
+aulaResearchStudio tienen JSON válidos sin marcadores Zen Proxy;
+autogestionback no tiene los cuatro archivos consultados en su raíz.
+Se añaden alternativas exactas de QA: pgrep -c -x bun/node y
+systemctl --user list-unit-files 'zen-proxy*', acotadas a la raíz
+Zen Proxy; no se permite obtener argumentos de procesos ni
+enumerar unidades arbitrarias. Las consultas multilínea externas
+siguen bajo revisión específica. El servicio continúa ausente,
+el puerto libre y la raíz de trabajo y respaldo privado intactos.

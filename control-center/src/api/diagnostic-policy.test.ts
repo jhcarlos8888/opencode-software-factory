@@ -521,3 +521,16 @@ test("Installed Claude launcher metadata and version are confined to the version
     assert.equal(assessDiagnosticCommand(launcher+" --version",root,root),null);
   }finally{if(old===undefined)delete process.env.HOME;else process.env.HOME=old;rmSync(base,{recursive:true,force:true});}
 });
+
+test("QA exact process counts and scoped unit listing retain conservative boundaries",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-qa-unit-probes-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    for(const command of ["pgrep -c -x bun","pgrep -c -x node","systemctl --user list-unit-files 'zen-proxy*'"]){
+      assert.deepEqual(assessDiagnosticCommand(command,root,root)?.resources,[command]);
+      assert.equal(assessOpenCodePermission({permission:"shell",resources:[command]},root,"workspace-write",{agentId:"tester",instructions:"Verificar desinstalación"},{command,workdir:root}).verdict,"auto");
+    }
+    for(const command of ["pgrep -a -x bun","pgrep -c -x ssh","systemctl --user list-unit-files '*'","systemctl --user list-unit-files 'zen-proxy*'; env"])assert.equal(assessDiagnosticCommand(command,root,root),null);
+    assert.equal(assessDiagnosticCommand("pgrep -c -x bun",base,base),null);
+  }finally{rmSync(base,{recursive:true,force:true});}
+});

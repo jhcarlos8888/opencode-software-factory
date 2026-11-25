@@ -6,6 +6,7 @@ import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
   if (/^(?:command -v (?:zen-proxy|zen-claude|claude-zen)|readlink -f [A-Za-z0-9_./-]+)(?: 2>&1)?$/.test(command)) return true;
+  if (/^pgrep -c -x (?:bun|node)$/.test(command)) return true;
   if (command==="ps -C bun -o pid= 2>/dev/null | wc -l") return true;
   if (["readlink -f "+resolve(homedir(),".local/bin/claude"),"ls -ld "+resolve(homedir(),".local/bin/claude"),"ls -ld "+resolve(homedir(),".opencode/bin/opencode"),resolve(homedir(),".local/bin/claude")+" --version"].some(probe=>command===probe||command===probe+" 2>&1")) return true;
   if (command.startsWith("grep -cE ")) return true;
@@ -262,6 +263,9 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
     if([service?.[1],metadata?.[1]].some(name=>name===unit||name+".service"===unit)){resources.push(part);continue;}
     // Post-uninstall checks: return counts, not process arguments or service contents.
     if(basename(root).replace(/^\./,"")==="zen-proxy"){
+      if(/^pgrep -c -x (?:bun|node)$/.test(part) || part==="systemctl --user list-unit-files 'zen-proxy*'"){
+        resources.push(part);continue;
+      }
       if(part==="systemctl --user list-unit-files 2>/dev/null | grep -c zen-proxy" ||
         part==="ps -C bun -o pid= 2>/dev/null | wc -l"){
         resources.push(...part.split(" | "));continue;
