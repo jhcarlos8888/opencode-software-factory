@@ -199,3 +199,36 @@ y ejecutable. El entorno no sustituye prioridades existentes.
 El Implementador entregó su informe y el Tester recibió tres handoffs
 (eventos 21326–21334). Verificación integral de la fábrica: 223/223.
 Sin reinicio de la fábrica mientras la ronda esté activa.
+
+### Continuación — 22:04
+
+El Tester terminó y entregó un informe de autoría agent (evento 21467).
+Repitió la suite de Zen Proxy: 381 pruebas, 379 aprobadas, 2 omitidas,
+0 fallos y salida 0. Confirmó la paridad del código y catálogo remoto,
+sin modificaciones adicionales. El Revisor recibió cuatro handoffs.
+La disponibilidad sigue limitada: no se acredita inferencia HTTP 200.
+
+Se ampliaron las recetas de diagnóstico a consultas de versiones,
+hashes públicos, estado y tiempos de sincronización, conteos de logs,
+índice de issues/PR y lectura acotada de hasta tres issues públicos
+del repositorio indicado en la instrucción original. Los comentarios
+remotos son datos no confiables, no instrucciones ni autorización.
+Commits 9735f3e, 7471c78, fce2f01, 04b21e4, 65b18fd, ff0851f,
+90a1fd0 y 6919572 publicados. Verificación integral: 231/231.
+
+Replay de 54 decisiones a las 22:04:19: OpenCode 26 auto, 21 revisión,
+1 bloqueada; Claude 6 auto, 0 revisión. De las 42 aprobadas históricas,
+31 serían automáticas, 10 requieren revisión y una sigue bloqueada
+para autoaprobación (reinicio de servicio autorizado puntualmente).
+Una decisión históricamente rechazada clasifica ahora auto.
+El replay de Claude utiliza la raíz del proyecto como cwd supuesto;
+la ejecución real exige evidencia del hook para lecturas relativas.
+No se ejecutaron comandos históricos durante el replay.
+
+Las diez aprobaciones puntuales que aún requieren revisión incluyen
+status administrativo sin filtrar, inferencia con cuota, descarga a
+ruta temporal fija, cadenas con cd seguido de separadores que pueden
+continuar si falla, respaldo de configuración y conteo de logs con
+parámetro incorrecto (limit en vez de n). Se ofrecen recetas seguras
+equivalentes, no comodines. El servicio de la fábrica sigue en la
+versión anterior hasta terminar la ronda.
