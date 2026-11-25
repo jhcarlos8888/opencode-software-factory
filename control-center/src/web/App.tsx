@@ -1878,7 +1878,7 @@ export default function App() {
                         <strong>Hallazgos principales</strong>
                         {execution.run.summary.findings.length ? (
                           <ul>{execution.run.summary.findings.map((item, index) => <li key={index}>{item}</li>)}</ul>
-                        ) : <p className="summary-muted">El árbitro no separó hallazgos en una lista; consulta su informe completo en la consola.</p>}
+                        ) : <p className="summary-muted">No se pudieron extraer hallazgos separados; consulta los informes completos de los especialistas.</p>}
                       </div>
                       <div>
                         <strong>Próximos pasos</strong>
@@ -1899,7 +1899,7 @@ export default function App() {
                   <div className="execution-summary-pending">
                     <strong>{activeExecution ? "Resumen ejecutivo en preparación" : "No se generó un resumen ejecutivo"}</strong>
                     <span>{activeExecution
-                      ? "Se publicará cuando terminen las olas de especialistas y el árbitro consolide los handoffs."
+                      ? "Se publicará cuando terminen los especialistas, con o sin árbitro técnico."
                       : "Consulta los eventos de la consola para conocer el detalle disponible."}</span>
                   </div>
                 )}

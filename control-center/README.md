@@ -230,3 +230,18 @@ La suite automatizada valida los componentes y sus límites, pero no sustituye u
 - El JDK del sistema debe estar en el PATH para que ./run-tests.sh funcione sin ajustes. La presencia de un JDK dentro de un IDE no equivale a tenerlo disponible en el entorno del servicio.
 - La colaboración entre motores solo se considera plenamente verificada cuando existen handoffs de ambas direcciones con identidad, contenido y recepción acreditados; una entrega cuyo ID añade el orquestador no acredita por sí sola la identidad original.
 - Los agentes y herramientas externas pueden tener límites propios de disponibilidad, cuotas o capacidades. La fábrica debe reportar lo que no pudo ejecutar como no verificado, nunca como aprobado.
+
+### Consolidación de rondas y continuidad
+
+Todas las rondas entregan una respuesta con el contenido real de los
+informes disponibles, incluso si no se selecciona el Árbitro técnico. El
+orquestador extrae conclusiones, hallazgos, verificaciones y recomendaciones
+con atribución al especialista; si faltan secciones, muestra un extracto
+del informe. No confunde una fase técnicamente finalizada con una
+implementación efectuada. Los informes completos y el registro de seguridad
+permanecen disponibles. Al iniciar, se recuperan de forma idempotente los
+resúmenes históricos que solo mostraban métricas y conservan informes válidos.
+El planificador reconoce requisitos de salida expresados como un resultado
+deseado (por ejemplo, que los campos de un endpoint devuelvan cadenas vacías),
+sin exigir la palabra «implementar»; las preguntas y revisiones explícitas
+no se convierten por ello en permisos de escritura.

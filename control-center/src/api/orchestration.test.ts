@@ -788,3 +788,44 @@ test("failed phases cannot create synthetic handoffs for a subsequent agent", ()
     [realReport]
   );
 });
+
+test("a second-round diagnosis without Arbiter consolidates actual reports and never invents implementation", () => {
+  const runId = "12345678-test";
+  const result = (agentId: string, body: string) => {
+    const handoffId = createHandoffId(agentId, runId);
+    const handoffOutput = prepareHandoffOutput(handoffId + "\n\n" + body, handoffId);
+    return { agentRunId: agentId + "-run", agentId, engine: "claude" as const, modelId: "test-model",
+      sessionId: agentId + "-session", status: "succeeded" as const, startedAt: null, finishedAt: null,
+      handoffId, output: handoffOutput.content, handoffOutput };
+  };
+  const architect = result("architect", "**3. Resumen del proyecto y mapa de módulos**\n\nProyecto Java.\n\n**5. Hallazgos con evidencia concreta**\n- El contrato actual acepta null.\n\n**7. Recomendaciones y contexto para los siguientes agentes**\n1. Normalizar los campos.");
+  const reviewer = result("reviewer", "## 0. Qué revisé frente a la instrucción de esta ronda\n\nEl árbol no implementa la instrucción. No edité archivos.\n\n## 1. Hallazgos\n### H1 — Defecto: entrega null\n\n- Evidencia: AsistenciasService.java:2276.\n\n## 3. Verificaciones ejecutadas\n- BUILD SUCCESSFUL; las pruebas validan el contrato anterior.\n\n## 4. Recomendaciones para el siguiente paso\n1. Corregir el servicio y las pruebas.\n\nBLOQUEADO — DEFECTO DEMOSTRADO");
+  const results = [architect, reviewer];
+  const summary = buildExecutionSummary({ instructions: "Diagnóstico", agents: [
+    ...results.map(r => ({ ...r, handoffIn: [] })),
+    { agentId: "cloud-arbiter", engine: "claude", status: "skipped", startedAt: null, finishedAt: null, handoffIn: [] }
+  ], results });
+  assert.equal(summary.generatedBy, "orchestrator");
+  assert.match(summary.overview, /Revisor.*informe de esta ronda/);
+  assert.match(summary.overview, /no implementa la instrucción/);
+  assert.match(summary.overview, /BUILD SUCCESSFUL/);
+  assert.match(summary.overview, /BLOQUEADO/);
+  assert.match(summary.overview, /Proyecto Java/);
+  assert.ok(summary.findings.some(x => x.includes("entrega null")));
+  assert.ok(summary.nextSteps.some(x => x.includes("Corregir el servicio")));
+  assert.equal(summary.verdict, "observations");
+});
+
+test("a single explanation agent returns actual answer even without structured headings", () => {
+  const handoffId = createHandoffId("architect", "12345678-test");
+  const handoffOutput = prepareHandoffOutput(handoffId + "\nEl proyecto gestiona pólizas y asistencias.", handoffId);
+  const result = { agentRunId: "a", agentId: "architect", engine: "claude" as const, modelId: "test",
+    sessionId: "s", status: "succeeded" as const, startedAt: null, finishedAt: null,
+    handoffId, output: handoffOutput.content, handoffOutput };
+  const summary = buildExecutionSummary({ instructions: "Explica el proyecto", agents: [{ ...result, handoffIn: [] }], results: [result] });
+  assert.match(summary.overview, /gestiona pólizas y asistencias/);
+  assert.equal(summary.generatedBy, "orchestrator");
+  const corrupted = buildExecutionSummary({ instructions: "Explica", agents: [{ ...result, handoffIn: [] }], results: [{ ...result, handoffOutput: { ...handoffOutput, sha256: "0".repeat(64) } }] });
+  assert.doesNotMatch(corrupted.overview, /gestiona pólizas/);
+  assert.match(corrupted.overview, /No se dispone de un informe/);
+});

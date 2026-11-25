@@ -331,3 +331,30 @@ test("project preflight is bound to project path and discovery depth, then is si
   assert.equal(refreshed?.teamSaved, false);
   assert.equal(refreshed?.consumed, false);
 });
+
+test("metrics-only historical response is recovered atomically from retained reports, once", async () => {
+  const { buildExecutionSummary, prepareHandoffOutput, createHandoffId } = await import("./orchestration.js");
+  const id = "historical-summary-recovery-run";
+  const threadId = "historical-summary-recovery-thread";
+  const agentId = "historical-summary-recovery-agent";
+  database.createWorkThread({ id: threadId, projectPath: isolatedStateDir, objective: "Diagnóstico" });
+  database.createExecutionRecords({ id, projectPath: isolatedStateDir, instructions: "Diagnóstico",
+    status: "running", startedAt: new Date().toISOString(), threadId, roundNumber: 2,
+    configurationSnapshot: null, continuityContext: "" }, [{ id: agentId, agentId: "reviewer",
+    engine: "claude", modelId: "test", permissionProfile: "read-only", status: "running" }]);
+  const handoffId = createHandoffId("reviewer", id);
+  database.updateExecutionAgent(agentId, { status: "succeeded", handoffOutput: prepareHandoffOutput(
+    handoffId + "\n## RESUMEN EJECUTIVO\nEl cambio no fue aplicado.\n## HALLAZGOS CLAVE\n- El servicio devuelve null.\n## PRÓXIMOS PASOS\n- Implementar el ajuste.", handoffId) });
+  const prior = buildExecutionSummary({ instructions: "Diagnóstico", agents: database.getExecutionSnapshot(id)!.agents, results: [] });
+  prior.overview = "Se completaron 1 de 7 agentes registrados. Se entregaron 0 handoffs.";
+  database.updateExecutionSummary(id, prior);
+  database.addWorkMessage(threadId, id, 2, "assistant", "Ronda 2\n" + prior.overview, "round-summary");
+  database.updateExecutionRun(id, "succeeded", true);
+  assert.equal(database.recoverMetricsOnlySummaries(), 1);
+  const snapshot = database.getWorkThreadSnapshot(threadId)!;
+  assert.match(snapshot.rounds[0]!.run.summary!.overview, /El cambio no fue aplicado/);
+  assert.match(snapshot.messages[0]!.content, /Implementar el ajuste/);
+  assert.equal(snapshot.rounds[0]!.run.summary!.verdict, prior.verdict);
+  assert.deepEqual(snapshot.rounds[0]!.run.summary!.approvals, prior.approvals);
+  assert.equal(database.recoverMetricsOnlySummaries(), 0);
+});

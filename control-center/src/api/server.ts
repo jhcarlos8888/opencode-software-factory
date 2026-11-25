@@ -12,7 +12,7 @@ import {
   getClaudeProviderPreference, getExecutionAgentHandoffOutput, getProjectPreferences, getProjectPreflight,
   getWorkThreadSnapshot, getWorkInstructionFile, listAssignments, listFavoriteModels, recordProjectPreflight, saveAssignments, saveWorkInstructionFile,
   saveClaudeProviderPreference, saveFavoriteModels, saveProjectPreferences, synchronizeConfiguredClaudeModel,
-  updateWorkThreadStatus,
+  updateWorkThreadStatus, recoverMetricsOnlySummaries,
   type AgentAssignment, type ClaudeProviderId, type EngineId, type FavoriteModel, type ModelTier, type PermissionMode, type PermissionProfile,
   type WorkThreadSnapshot
 } from "./database.js";
@@ -73,6 +73,8 @@ async function synchronizeConfiguredClaudeModelAtStartup(): Promise<void> {
 
 await synchronizeConfiguredClaudeModelAtStartup();
 recoverExecutionState();
+const recoveredSummaries = recoverMetricsOnlySummaries();
+if (recoveredSummaries) console.info("[Factory Control Center] Resúmenes históricos recuperados: " + recoveredSummaries);
 
 const app = Fastify({
   logger: true,

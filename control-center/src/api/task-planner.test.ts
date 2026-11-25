@@ -210,3 +210,19 @@ test("explicitly requested changes remain actionable beside negative constraints
     assert.equal(plan.kind, "implementation", request);
   }
 });
+
+test("follow-up desired API response contract is implementation rather than diagnosis", () => {
+  for (const request of [
+    "Por ejemplo si el api externo los atributos responden los valores en vacio pues obviamente los campos de las respuestas finales de los endpoints tambien deberian estar asi mismo no vamos a incluirle null por que asi no esta llegando en el api externa.",
+    "Los campos de la respuesta deben devolver cadenas vacías.",
+    "Los endpoints deberían conservar los atributos del proveedor."
+  ]) {
+    const plan = planTask(request);
+    assert.equal(plan.kind, "implementation", request);
+    assert.equal(plan.changesExpected, true);
+    for (const role of ["implementer", "tester", "reviewer", "cloud-arbiter"]) assert.ok(plan.recommendedAgents.includes(role));
+  }
+  for (const request of ["¿Por qué los campos deberían devolver cadenas vacías?", "Explica si los endpoints deben devolver null.", "No modifiques nada, solo revisa si los campos deben devolver null."]) {
+    assert.notEqual(planTask(request).kind, "implementation", request);
+  }
+});

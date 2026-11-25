@@ -40,7 +40,16 @@ export function planTask(instructions: string, depthOverride?: ResearchDepth): T
   // Check it before the testing branch, so "verifica ... y levanta el
   // proyecto; haz commit y push" does not become a read-only task.
   const asksForOperations = /\b(?:levantar|levantemos|levanta|arrancar|arranquemos|arranca|iniciar el servidor|iniciar la aplicacion|poner en marcha|desplegar|despliega|deploy|npm start|commit|commitear|push)\b/.test(actionableText);
-  const asksForChange = (explicitChangeVerb || naturalChangeVerb || followUpChangeRequest || asksForOperations)
+  // A user often resolves a pending contract decision by specifying the
+  // required output, not by saying "implement". Do not treat the explanatory
+  // "porque/por que" later in that requirement as a diagnosis request.
+  const requiredOutputBehavior =
+    /\b(?:campos?|atributos?|respuestas?|endpoints?|api|json|valores?|propiedades?|objetos?|resultados?)\b.{0,120}\b(?:deben|deberian|debe|deberia|tienen que|tiene que|necesitan|necesita|quiero que|necesito que)\b.{0,90}\b(?:estar|ser|salir|responder|devolver|retornar|entregar|incluir|conservar|mantener|mostrar|venir|quedar|contener|tener|llegar)\w*\b/.test(actionableText)
+    || /\b(?:no vamos a|no quiero que|no deben|no deberian|no debe|no deberia)\s+(?:incluir|devolver|retornar|responder|entregar|mostrar)\w*\s+(?:null|nulos?|vacio|vacios|undefined)\b/.test(text);
+  const asksOnlyToAssess = /\b(?:solo|solamente|unicamente)\s+(?:revisa|analiza|verifica|explica|investiga|diagnostica|comprueba|evalua)\b/.test(text)
+    || /\b(?:revisa|analiza|verifica|comprueba|evalua|investiga|confirma)\s+(?:si|como|por que)\b/.test(text)
+    || /^\s*¿/.test(instructions);
+  const asksForChange = (explicitChangeVerb || naturalChangeVerb || followUpChangeRequest || asksForOperations || (requiredOutputBehavior && !asksOnlyToAssess))
     && (!asksHowRatherThanDo || explicitFollowThrough);
   const asksForTests = /prueba|pruebas|test|testing|validar|valida|verifica|verificacion|cobertura/.test(text);
   const asksForDiagnosis = /error|falla|fallo|bug|problema|no funciona|investiga|diagnostica|causa|por que/.test(text);

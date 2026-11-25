@@ -582,6 +582,108 @@ function assessHandoffIntegrity(
   return summary;
 }
 
+const REPORT_ROLE_LABELS: Record<string, string> = {
+  architect: "Arquitecto", build: "Build", implementer: "Implementador",
+  reverse: "Ingeniería inversa", tester: "QA / Tester", reviewer: "Revisor",
+  "cloud-arbiter": "Árbitro técnico"
+};
+
+function specialistSection(source: string, heading: RegExp): string {
+  const lines = source.split(/\r?\n/);
+  const title = (line: string) => normalizeHeadingLine(line).replace(/^\d+[.)]\s*/, "");
+  const isSection = (line: string) => markdownHeading(line) ||
+    /^\s*\*\*\d+[.)]\s+.+\*\*\s*$/.test(line);
+  const start = lines.findIndex((line) => isSection(line) && heading.test(title(line)));
+  if (start < 0) return extractSection(source, heading);
+  const level = markdownHeading(lines[start] ?? "")?.level ?? 2;
+  const result: string[] = [];
+  for (const line of lines.slice(start + 1)) {
+    const next = markdownHeading(line);
+    if ((next && next.level <= level) || /^\s*\*\*\d+[.)]\s+.+\*\*\s*$/.test(line)) break;
+    result.push(line);
+  }
+  return result.join("\n").trim();
+}
+
+function boundedReportExcerpt(value: string, limit: number): string {
+  const clean = value.trim();
+  if (clean.length <= limit) return clean;
+  const candidate = clean.slice(0, limit);
+  const boundary = candidate.lastIndexOf("\n");
+  return (boundary > limit * 0.65 ? candidate.slice(0, boundary) : candidate) +
+    "\n[… extracto; consulta el informe completo del agente.]";
+}
+
+function specialistFindings(section: string): string[] {
+  // Reviewer reports often use H1/H2 subheadings followed by evidence, not
+  // bullets describing the finding itself. Keep the heading and evidence.
+  const lines = section.split(/\r?\n/);
+  const headings: string[] = [];
+  for (let i = 0; i < lines.length; i++) {
+    const heading = markdownHeading(lines[i] ?? "");
+    if (!heading || heading.level < 3) continue;
+    const evidence = lines.slice(i + 1).find((line) => line.trim().length > 0);
+    headings.push(boundedReportExcerpt(heading.title +
+      (evidence && !markdownHeading(evidence) ? " · " + evidence.trim().replace(/^[-*]\s+/, "") : ""), 650));
+  }
+  return headings.length ? headings.slice(0, 8) : extractFindings(section);
+}
+
+/** Build a useful, explicitly attributed answer even when no Arbiter is
+ * planned. No model calls, no fabricated changes or verification. Only use
+ * persisted successful reports with valid content; truncated/legacy reports
+ * are explicitly labeled. Preserve the full original reports separately. */
+export function consolidateSpecialistReports(results: AgentResult[], integrity: HandoffIntegritySummary): {
+  overview: string; findings: string[]; nextSteps: string[];
+} {
+  const priority = ["cloud-arbiter", "reviewer", "implementer", "tester", "architect", "build", "reverse"];
+  const reports = results.filter((r) => r.status === "succeeded" && r.handoffOutput?.content &&
+    !integrity.invalidReports.includes(r.agentId) && !integrity.missingReports.includes(r.agentId))
+    .sort((a,b) => priority.indexOf(a.agentId) - priority.indexOf(b.agentId));
+  const overview: string[] = [];
+  const findings: string[] = [];
+  const nextSteps: string[] = [];
+  for (const report of reports) {
+    const source = report.handoffOutput!.content;
+    const label = REPORT_ROLE_LABELS[report.agentId] ?? report.agentId;
+    const limitation = report.handoffOutput!.truncated ? " (informe incompleto)" :
+      integrity.legacyReports.includes(report.agentId) ? " (metadatos históricos incompletos)" : "";
+    const executive = specialistSection(source, /^(?:RESUMEN EJECUTIVO|EXECUTIVE SUMMARY|CONCLUSI[ÓO]N|RESULTADO(?: FINAL)?|QU[ÉE] REVIS[ÉE]|QU[ÉE] SE HIZO|RESUMEN DEL PROYECTO|RESUMEN DE CAMBIOS)\b/i);
+    const checks = specialistSection(source, /^(?:VERIFICACIONES(?: EJECUTADAS)?|PRUEBAS(?: EJECUTADAS)?|VALIDACI[ÓO]N|HERRAMIENTAS UTILIZADAS Y VERIFICACIONES)\b/i);
+    const findingSection = specialistSection(source, /^(?:HALLAZGOS(?: CLAVE)?|KEY FINDINGS|DEFECTOS|INCIDENCIAS)\b/i);
+    const steps = specialistSection(source, /^(?:PR[ÓO]XIMOS PASOS|SIGUIENTES PASOS|RECOMENDACIONES|NEXT STEPS|SIGUIENTE ACCI[ÓO]N)\b/i);
+    const body = source.split(/\r?\n/).filter((line) =>
+      !/^\s*(?:[#*]+\s*)?HANDOFF-[A-Z0-9-]+(?:\*+)?\s*$/.test(line) &&
+      !line.startsWith("[Identificador añadido por el orquestador:")).join("\n").trim();
+    const conclusion = executive || boundedReportExcerpt(body, reports.length === 1 ? 6000 : 1800);
+    if (!conclusion) continue;
+    const terminalNote = source.split(/\r?\n/).map(line => line.trim()).filter(line =>
+      /^(?:BLOQUEADO|NO APROBADO|RECHAZADO|APROBADO CON OBSERVACIONES)\b/i.test(line)).at(-1);
+    overview.push(label + limitation + " — informe de esta ronda:\n" +
+      boundedReportExcerpt(conclusion, reports.length === 1 ? 6000 : 2200) +
+      (checks && !conclusion.includes(checks) ? "\n\nVerificaciones reportadas:\n" + boundedReportExcerpt(checks, 1400) : "") +
+      (terminalNote ? "\n\nVeredicto del especialista: " + terminalNote : ""));
+    findings.push(...specialistFindings(findingSection).map(item => label + ": " + item));
+    nextSteps.push(...extractNextSteps(steps).map(item => label + ": " + boundedReportExcerpt(item, 600)));
+  }
+  // Keep the conversation bounded while retaining explicit attribution.
+  return {
+    overview: overview.join("\n\n"),
+    findings: [...new Set(findings)].slice(0, 12),
+    nextSteps: [...new Set(nextSteps)].slice(0, 12)
+  };
+}
+
+/** One formatter for both live completion and historical summary recovery. */
+export function formatRoundSummaryMessage(roundNumber: number, status: string, summary: ExecutionSummary): string {
+  return [
+    "Ronda " + roundNumber + " · " + status,
+    summary.headline, summary.overview,
+    summary.findings.length ? "Hallazgos:\n" + summary.findings.map(x => "- " + x).join("\n") : "",
+    summary.nextSteps.length ? "Siguientes pasos:\n" + summary.nextSteps.map(x => "- " + x).join("\n") : ""
+  ].filter(Boolean).join("\n\n");
+}
+
 export function buildExecutionSummary(input: {
   instructions: string;
   agents: SummaryAgent[];
@@ -642,8 +744,11 @@ export function buildExecutionSummary(input: {
   const executive = extractSection(cloudOutput, /^(?:RESUMEN EJECUTIVO|EXECUTIVE SUMMARY)\b/i);
   const findingsSection = extractSection(cloudOutput, /^(?:HALLAZGOS CLAVE|HALLAZGOS|KEY FINDINGS)\b/i);
   const nextStepsSection = extractSection(cloudOutput, /^(?:PRÓXIMOS PASOS|PROXIMOS PASOS|SIGUIENTE ACCIÓN|NEXT STEPS)\b/i);
-  const findings = extractFindings(findingsSection);
-  const nextSteps = extractNextSteps(nextStepsSection);
+  const specialistSummary = consolidateSpecialistReports(input.results, integrity);
+  const arbiterFindings = extractFindings(findingsSection);
+  const arbiterNextSteps = extractNextSteps(nextStepsSection);
+  const findings = arbiterFindings.length ? arbiterFindings : specialistSummary.findings;
+  const nextSteps = arbiterNextSteps.length ? arbiterNextSteps : specialistSummary.nextSteps;
   const failedPipeline = failed.length > 0;
   const collaborationIncomplete = collaborationExpected && (!collaborationVerified || !concurrentCrossEngineVerified);
   const approvalAuditIncomplete = approvals.pending > 0 || approvals.responding > 0 || approvals.orphaned > 0;
@@ -663,7 +768,7 @@ export function buildExecutionSummary(input: {
   return {
     verdict,
     headline,
-    overview: executive || fallback,
+    overview: executive || specialistSummary.overview || (fallback + " No se dispone de un informe de contenido válido para resumir; estas métricas no acreditan el cumplimiento funcional."),
     findings,
     nextSteps,
     integrity,

@@ -3,7 +3,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { chmodSync, lstatSync, mkdirSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
-import type { ExecutionSummary, HandoffDescriptor, HandoffOutputMetadata, HandoffOutputRecord } from "./orchestration.js";
+import { buildExecutionSummary, createHandoffId, formatRoundSummaryMessage, type ExecutionSummary, type HandoffDescriptor, type HandoffOutputMetadata, type HandoffOutputRecord, type AgentResult } from "./orchestration.js";
 import { MAX_FILES_PER_WORK_THREAD, type InstructionFileMetadata, type StoredInstructionFile, type ValidInstructionFile } from "./instruction-files.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
 
@@ -980,6 +980,53 @@ export function getExecutionAgentHandoffOutput(runId: string, agentRunId: string
   return row?.handoffOutputJson
     ? JSON.parse(row.handoffOutputJson) as HandoffOutputRecord
     : null;
+}
+
+/** Repair only the old metrics-only summaries of finished runs. Original
+ * reports, timestamps, verdicts and approval/security ledger remain intact.
+ * Update the persisted chat response atomically with the summary; idempotent. */
+export function recoverMetricsOnlySummaries(): number {
+  const candidates = db.prepare("SELECT id FROM execution_runs WHERE status IN ('succeeded','failed') AND summary_json LIKE '%Se completaron % agentes registrados. Se entregaron % handoffs.%'").all() as { id: string }[];
+  let recovered = 0;
+  for (const { id } of candidates) {
+    const snapshot = getExecutionSnapshot(id);
+    const prior = snapshot?.run.summary;
+    if (!snapshot || !prior || prior.generatedBy !== "orchestrator" ||
+        !/^Se completaron \d+ de \d+ agentes registrados\. Se entregaron \d+ handoffs\./.test(prior.overview) ||
+        prior.findings?.length || prior.nextSteps?.length ||
+        prior.overview.includes("No se dispone de un informe")) continue;
+    const results: AgentResult[] = [];
+    for (const agent of snapshot.agents) {
+      if (agent.status !== "succeeded") continue;
+      const record = getExecutionAgentHandoffOutput(id, agent.id);
+      if (!record) continue;
+      results.push({ agentRunId: agent.id, agentId: agent.agentId, engine: agent.engine,
+        modelId: agent.modelId, sessionId: agent.sessionId, status: agent.status,
+        startedAt: agent.startedAt, finishedAt: agent.finishedAt, handoffId: createHandoffId(agent.agentId, id),
+        output: record.content, handoffOutput: record });
+    }
+    if (!results.length) continue;
+    const rebuilt = buildExecutionSummary({ instructions: snapshot.run.instructions, agents: snapshot.agents, results });
+    if (!rebuilt.overview || rebuilt.overview.startsWith("Se completaron ")) continue;
+    const summary: ExecutionSummary = { ...prior, overview: rebuilt.overview,
+      findings: rebuilt.findings, nextSteps: rebuilt.nextSteps };
+    const response = formatRoundSummaryMessage(snapshot.run.roundNumber,
+      snapshot.run.status === "failed" ? "Terminada con errores" : "Completada", summary);
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      db.prepare("UPDATE execution_runs SET summary_json = ? WHERE id = ?").run(JSON.stringify(summary), id);
+      db.prepare("UPDATE work_messages SET content = ? WHERE run_id = ? AND role = 'assistant' AND kind = 'round-summary' AND instr(content, ?) > 0")
+        .run(response.slice(0, 30000), id, prior.overview);
+      addExecutionEvent(id, "EXECUTIVE-SUMMARY", "info",
+        "Resumen histórico recuperado de informes persistidos; no se reejecutaron agentes ni se alteró el veredicto original.");
+      db.exec("COMMIT");
+      recovered++;
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+  return recovered;
 }
 
 export function getLatestExecutionId(): string | null {

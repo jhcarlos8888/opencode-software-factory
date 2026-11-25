@@ -30,7 +30,7 @@ import { workInstructionLimitError } from "./work-instruction-limit.js";
 import { assessAuditorTool, assessOpenCodePermission, isProtectedShellCommand } from "./auditor-policy.js";
 import { inspectAuditorShellReceipts, appendAuditorOperationalFindings } from "./auditor-operations.js";
 import {
-  buildExecutionSummary, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
+  buildExecutionSummary, formatRoundSummaryMessage, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
   extractClaudeFinalText, formatApprovalAuditContext, prepareHandoffOutput,
   selectDeliverableHandoffSources, type AgentResult, type HandoffDescriptor
 } from "./orchestration.js";
@@ -774,6 +774,7 @@ function makeAgentPrompt(
     "",
     "PROTOCOLO DE ENTREGA:",
     "PRIMERA LÍNEA CANÓNICA: escribe exactamente " + handoffId + " (sin #, prefijos, espacios ni texto previo). Después indica agente, motor, modelo, INBOUND con los IDs exactos recibidos (" + expectedInbound + "), herramientas, hallazgos, discrepancias y recomendaciones.",
+    "Después del identificador incluye secciones Markdown ## RESUMEN EJECUTIVO, ## HALLAZGOS CLAVE, ## VERIFICACIONES EJECUTADAS y ## PRÓXIMOS PASOS. En el resumen responde directamente al objetivo de esta ronda: qué se hizo, qué no se hizo, qué cambió realmente y qué queda pendiente. Si solo analizaste, dilo. No confundas pruebas verdes de un contrato anterior con cumplimiento del nuevo requisito.",
     "No inventes handoffs. Usa solamente los IDs enumerados aquí. No declares ausentes agentes basándote solo en informes anteriores: los registros de ejecución son la fuente de verdad.",
     "Los metadatos de integridad calculados por el orquestador son autoritativos y prevalecen sobre cualquier frase del informe. Si idAuthor=ORQUESTADOR, no afirmes que el agente original emitió el ID. Si Truncado=SÍ, trata el contenido como incompleto y enumera qué no puedes verificar.",
     "",
@@ -1465,13 +1466,8 @@ async function executeRun(
     const terminalStatus: ExecutionStatus = state.cancelled ? "cancelled" : hasFailed ? "failed" : "succeeded";
     if (workflow.threadId) {
       const finalStatus = state.cancelled || hasFailed ? "failed" : "completed";
-      const response = [
-        "Ronda " + workflow.roundNumber + " · " + (state.cancelled ? "Cancelada" : hasFailed ? "Terminada con errores" : "Completada"),
-        auditedSummary.headline,
-        auditedSummary.overview,
-        auditedSummary.findings.length ? "Hallazgos: " + auditedSummary.findings.join(" | ") : "",
-        auditedSummary.nextSteps.length ? "Siguientes pasos: " + auditedSummary.nextSteps.join(" | ") : ""
-      ].filter(Boolean).join("\n\n");
+      const response = formatRoundSummaryMessage(workflow.roundNumber,
+        state.cancelled ? "Cancelada" : hasFailed ? "Terminada con errores" : "Completada", auditedSummary);
       addWorkMessage(workflow.threadId, state.runId, workflow.roundNumber, "assistant", response, "round-summary");
       updateWorkThreadStatus(workflow.threadId, finalStatus);
       workflowResponseSaved = true;
