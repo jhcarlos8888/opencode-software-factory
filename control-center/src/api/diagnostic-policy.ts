@@ -1,10 +1,11 @@
-import { lstatSync, realpathSync, readFileSync } from "node:fs";
+import { lstatSync, realpathSync, readFileSync, accessSync, constants } from "node:fs";
 import { homedir } from "node:os";
 import { basename, isAbsolute, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
+  if (command === "command -v bun" || command === resolve(homedir(),".bun/bin/bun")+" --version 2>/dev/null") return true;
   if (command === resolve(homedir(),".opencode/bin/opencode") + " --version 2>&1" || command === resolve(homedir(),".opencode/bin/opencode") + " --version") return true;
   return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-l(?:a)?(?: |$)|-d node_modules|\.github\/workflows)|for f in |ss -ltnp|curl (?:-fsSL --max-time |-sS -m |-sS --max-time |-fsS --max-time |-s --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
 }
@@ -88,6 +89,13 @@ function localProxyPort(root:string):number|null{
     return cfg.port;
   }catch{return null;}
 }
+function installedTool(path:string):boolean{
+  try{
+    if(!/^[A-Za-z0-9_./-]+$/.test(path)||realpathSync(path)!==path||!lstatSync(path).isFile())return false;
+    accessSync(path,constants.X_OK);
+    return true;
+  }catch{return false;}
+}
 export function assessIndependentDiagnostic(command:string,root:string):Recipe|null{
   if(!canonicalRoot(root)||command.length>1800||/[\r\n\x00-\x1f\x60\\]/.test(command))return null;
   const unit=basename(root).replace(/^\./,"")+".service";
@@ -102,11 +110,18 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
       /^echo (?:'---[A-Za-z0-9 _()/\-]{0,40}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part)){
       resources.push(part);continue;
     }
+    const bun=resolve(homedir(),".bun/bin/bun");
+    if(part==="command -v bun" || part==='command -v bun || echo "bun-no-en-PATH"'){
+      resources.push(...part.split(" || "));continue;
+    }
+    if(installedTool(bun) && [bun+" --version",bun+" --version 2>/dev/null",bun+' --version 2>/dev/null || echo "bun-no-encontrado"'].includes(part)){
+      resources.push(...part.split(" || "));continue;
+    }
     const cli=resolve(homedir(),".opencode/bin/opencode");
     if(/^[A-Za-z0-9_./-]+$/.test(cli) &&
       (part===cli+" --version" || part===cli+" --version 2>&1" || part===cli+" --version 2>&1 | head -5")){
       try {
-        if(realpathSync(cli)!==cli || !lstatSync(cli).isFile())return null;
+        if(!installedTool(cli))return null;
         resources.push(...part.split(" | "));continue;
       }catch{return null;}
     }

@@ -243,3 +243,19 @@ test("Local administrative diagnostics return only bounded counts and metrics",(
     assert.equal(assessDiagnosticCommand(metrics.replace("ms:.sync.ms","error:.sync.error"),root,root),null);
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("Toolchain fallback probes are bounded to installed CLI versions",()=>{
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-toolchain-probe-")));
+  try{
+    const cli=join(homedir(),".opencode/bin/opencode");
+    const bun=join(homedir(),".bun/bin/bun");
+    const lookup='command -v bun || echo "bun-no-en-PATH"';
+    assert.deepEqual(assessDiagnosticCommand(lookup,root,root)?.resources,lookup.split(" || "));
+    const command=cli+' --version; '+lookup+'; '+bun+' --version 2>/dev/null || echo "bun-no-encontrado"';
+    const result=assessDiagnosticCommand(command,root,root);
+    if(result)assert.deepEqual(result.resources,[cli+" --version","command -v bun",'echo "bun-no-en-PATH"',bun+" --version 2>/dev/null",'echo "bun-no-encontrado"']);
+    assert.equal(assessDiagnosticCommand(lookup.replace("bun ||","other-tool ||"),root,root),null);
+    assert.equal(assessDiagnosticCommand(lookup.replace('echo "bun-no-en-PATH"',"bun install"),root,root),null);
+    assert.equal(assessDiagnosticCommand(command.replace(bun+" --version",bun+" run build"),root,root),null);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
