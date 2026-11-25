@@ -61,6 +61,11 @@ function curlDefaultsAbsent():boolean{
   return locations.every(file=>{try{lstatSync(file);return false;}catch(e){return (e as NodeJS.ErrnoException).code==="ENOENT";}});
 }
 function publicMetadata(part:string,instructions:string):string[]|null{
+  // Public issue index only: exact projection and bounded page/line limits.
+  const issues=/^(curl -fsSL (?:--max-time|-m) (?:[1-9]|[1-5]\d|60) 'https:\/\/api\.github\.com\/repos\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/issues\?state=all&per_page=(?:[1-9]|[1-4]\d|50)&sort=updated' 2>&1) \| (jq -c '\.\[\] \| \{n:\.number, state:\.state, title:\.title, comments:\.comments, created:\.created_at, pr:\(\.pull_request!=null\)\}' 2>&1) \| (head -(?:[1-9]\d?|100))$/.exec(part);
+  if(issues && repoMentioned(instructions,issues[2]!) && curlDefaultsAbsent()){
+    return [issues[1]!,issues[3]!,issues[4]!];
+  }
   const m=/^(curl -fsSL (?:--max-time|-m) (?:[1-9]|[1-5]\d|60) (?:'([^']+)'|([^\s'"]+))(?: 2>\/dev\/null)?)(?: \| (head -c (?:[1-9]\d{0,3}|10000)))?$/.exec(part);
   if(!m || !curlDefaultsAbsent())return null;
   const url=m[2]??m[3]??"";
@@ -138,7 +143,7 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
       const filters: Record<string,string[]> = {
         health: ["{ok,upstream,sync:.sync.ok,version}"],
         "v1/models": ["{count:(.data|length),ids:(.data|map(.id))}","{count:(.data|length)}"],
-        "api/status": ["{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)},requestsTotal:.requests.total}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length),gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)},requestsTotal:.requests.total,followsCatalog:.models.followsCatalog,served:(.models.served|length)}","{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}","{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,errorPresent:(.sync.error|length>0),gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}"]
+        "api/status": ["{uptime,sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,running:.sync.running}}","{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)},requestsTotal:.requests.total}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length),gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)},requestsTotal:.requests.total,followsCatalog:.models.followsCatalog,served:(.models.served|length)}","{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}","{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,errorPresent:(.sync.error|length>0),gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}"]
       };
       if(filters[projected[3]!]?.includes(projected[5]!.replace(/, +/g,","))){
         resources.push(projected[1]!,projected[4]!);continue;

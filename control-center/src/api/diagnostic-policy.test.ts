@@ -289,3 +289,23 @@ test("Claude public source comparison requires trusted round authority and exact
     assert.notEqual(assessAuditorTool({...request,input:{command:command+"; git push",cwd:root}}).verdict,"auto");
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("Public issue index and sync timing have narrow projections",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-issue-index-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    writeFileSync(join(root,"package.json"),JSON.stringify({name:"zen-proxy"}));
+    writeFileSync(join(root,"zen-proxy.json"),JSON.stringify({host:"127.0.0.1",port:8787,upstream:"https://opencode.ai/inference/openai/v1"}));
+    const issues="curl -fsSL -m 30 'https://api.github.com/repos/example/project/issues?state=all&per_page=30&sort=updated' 2>&1 | jq -c '.[] | {n:.number, state:.state, title:.title, comments:.comments, created:.created_at, pr:(.pull_request!=null)}' 2>&1 | head -40";
+    const timing="curl -sS -m 8 http://127.0.0.1:8787/api/status | jq -c '{uptime, sync:{ok:.sync.ok, at:.sync.at, ms:.sync.ms, running:.sync.running}}'; date -u +%Y-%m-%dT%H:%M:%SZ";
+    const authority="Analiza https://github.com/example/project";
+    const cleanCurl=![".curlrc",".config/curlrc"].some(name=>existsSync(join(homedir(),name)))&&!process.env.CURL_HOME&&!process.env.XDG_CONFIG_HOME;
+    if(cleanCurl){
+      assert.ok(assessDiagnosticCommand(issues,root,root,authority));
+      assert.equal(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command:timing},projectPath:root,permissionProfile:"workspace-write"}).verdict,"auto");
+      assert.equal(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command:issues,cwd:root},projectPath:root,permissionProfile:"workspace-write",roundInstructions:authority}).verdict,"auto");
+    }
+    for(const bad of [issues.replace("example/project","other/project"),issues.replace("per_page=30","per_page=300"),issues.replace("title:.title","body:.body"),issues.replace("head -40","head -400"),issues+"; cat /etc/passwd"])assert.equal(assessDiagnosticCommand(bad,root,root,authority),null,bad);
+    assert.equal(assessDiagnosticCommand(timing.replace("running:.sync.running","error:.sync.error"),root,root),null);
+  }finally{rmSync(base,{recursive:true,force:true});}
+});
