@@ -460,3 +460,29 @@ Zen Proxy; no se permite obtener argumentos de procesos ni
 enumerar unidades arbitrarias. Las consultas multilínea externas
 siguen bajo revisión específica. El servicio continúa ausente,
 el puerto libre y la raíz de trabajo y respaldo privado intactos.
+
+### Desinstalación — auditoría de escalados 09:52
+
+A las 09:50 se observaron 50 solicitudes de revisión (42 aprobadas,
+6 rechazadas, 2 pendientes) y 2 autoaprobaciones reales en eventos
+21790 y 22278. La compilación activa sigue siendo la del 25 de
+noviembre a las 03:10 UTC; las mejoras del día están sin desplegar.
+Replay de las 50 decisiones sobre el estado actual: 5 automáticas,
+44 humanas, 1 bloqueada. Los resultados dependen también de la
+existencia y estado de rutas/procesos (no son una reconstrucción
+de las condiciones originales). Se autorizaron puntualmente
+fd911c5b y 2cb66b52, consultas de versiones y estado; se añade una
+receta de versiones de ambos motores con marcadores de salida y
+metadatos acotados de la unidad de la fábrica. No se autoriza
+listado general de sockets, manipulación de servicios ni otros
+argumentos. Replay tras el cambio y dos nuevas solicitudes:
+52 decisiones, 6 automáticas, 45 humanas y 1 bloqueada; entre
+las aprobadas, 6 automáticas, 37 humanas y 1 bloqueada, y 6
+rechazadas siguen humanas. Se resolvieron las dos nuevas
+solicitudes bc258e7a y e2973af7, sondas HTTP locales y nombres
+de archivos de cuatro raíces verificadas, de forma puntual.
+El resultado demuestra que no basta ampliar recetas: se propone
+un contrato de capacidades de lectura con raíces explícitas por
+ronda, proyecciones estructuradas y aprobación separada de
+escritura; las operaciones destructivas conservan revisión.
+Verificación integral: 245/245; no se reinicia la fábrica.

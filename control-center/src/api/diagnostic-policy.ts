@@ -132,6 +132,16 @@ function installedTool(path:string):boolean{
 }
 export function assessIndependentDiagnostic(command:string,root:string):Recipe|null{
   if(!canonicalRoot(root)||command.length>1800||/[\r\n\x00-\x1f\x60]/.test(command))return null;
+  // Version probes composed with exit markers: validate both installed
+  // executables and the entire command before returning any resources.
+  const opencode=resolve(homedir(),".opencode/bin/opencode");
+  const claude=resolve(homedir(),".local/bin/claude");
+  const versionParts=[opencode+" --version",'echo "opencode_rc=$?"',claude+" --version",'echo "claude_rc=$?"'];
+  if(command===versionParts.join("; ")){
+    if(!installedTool(opencode)||!installedClaudeLauncher(claude))return null;
+    return {category:"inspection",resources:versionParts};
+  }
+
   if(basename(root).replace(/^\./,"")==="zen-proxy"){
     const counts=["pgrep -c -f 'zen-proxy\\.mjs' 2>/dev/null","pgrep -c -f 'zen-claude' 2>/dev/null"] as const;
     for(const count of counts){
@@ -258,6 +268,10 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
       resources.push(part);continue;
     }
     if(installedTool(cli) && plain==="ls -ld "+cli){resources.push(part);continue;}
+    // Only factory health metadata, never service mutation or environment.
+    if(/^systemctl(?: --user)? show factory-control-center\.service(?: -p (?:ActiveState|SubState|MainPID|LoadState)){1,4}$/.test(plain)){
+      resources.push(part);continue;
+    }
     const service=/^systemctl --user (?:is-active|is-enabled) ([A-Za-z0-9_-]+(?:\.service)?)$/.exec(plain);
     const metadata=/^systemctl --user show ([A-Za-z0-9_-]+(?:\.service)?)((?: -p (?:ActiveState|SubState|MainPID|LoadState|UnitFileState|ExecMainStartTimestamp|FragmentPath|NRestarts)){1,8})$/.exec(plain);
     if([service?.[1],metadata?.[1]].some(name=>name===unit||name+".service"===unit)){resources.push(part);continue;}

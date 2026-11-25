@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, realpathSync, writeFileSync, rmSync, symlinkSync, mkdirSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
-import { assessDiagnosticCommand, matchDiagnosticResources } from "./diagnostic-policy.js";
+import { assessDiagnosticCommand, assessIndependentDiagnostic, matchDiagnosticResources } from "./diagnostic-policy.js";
 import { assessOpenCodePermission, assessAuditorTool } from "./auditor-policy.js";
 
 test("Observed Zen Proxy diagnostic recipes require a matching native command and selected root",()=>{
@@ -533,4 +533,28 @@ test("QA exact process counts and scoped unit listing retain conservative bounda
     for(const command of ["pgrep -a -x bun","pgrep -c -x ssh","systemctl --user list-unit-files '*'","systemctl --user list-unit-files 'zen-proxy*'; env"])assert.equal(assessDiagnosticCommand(command,root,root),null);
     assert.equal(assessDiagnosticCommand("pgrep -c -x bun",base,base),null);
   }finally{rmSync(base,{recursive:true,force:true});}
+});
+
+test("Both engine version probes preserve exit markers without general shell grants",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-dual-cli-")));
+  const old=process.env.HOME;
+  try{
+    process.env.HOME=base;
+    const root=join(base,"project"),oc=join(base,".opencode/bin/opencode"),cl=join(base,".local/bin/claude"),target=join(base,".local/share/claude/versions/2.1.327");
+    mkdirSync(root);
+    for(const dir of [join(base,".opencode/bin"),join(base,".local/bin"),join(base,".local/share/claude/versions")])mkdirSync(dir,{recursive:true});
+    for(const file of [oc,target]){writeFileSync(file,"fixture");chmodSync(file,0o700);}
+    symlinkSync(target,cl);
+    const parts=[oc+" --version",'echo "opencode_rc=$?"',cl+" --version",'echo "claude_rc=$?"'];
+    const command=parts.join("; ");
+    assert.deepEqual(assessIndependentDiagnostic(command,root)?.resources,parts);
+    assert.equal(assessOpenCodePermission({permission:"shell",resources:parts},root,"workspace-write",{agentId:"tester",instructions:"Verificar CLI"},{command,workdir:root}).verdict,"auto");
+    for(const bad of [command+"; env",command.replace("claude_rc=$?","claude_rc=$(env)"),command.replace("--version","--help")])assert.equal(assessIndependentDiagnostic(bad,root),null);
+    const unit="systemctl --user show factory-control-center.service -p ActiveState -p SubState -p MainPID";
+    assert.deepEqual(assessDiagnosticCommand(unit,root,root)?.resources,[unit]);
+    assert.equal(assessDiagnosticCommand(unit+" -p Environment",root,root),null);
+    assert.equal(assessDiagnosticCommand(unit.replace("show","stop"),root,root),null);
+    rmSync(cl);symlinkSync("/bin/sh",cl);
+    assert.equal(assessIndependentDiagnostic(command,root),null);
+  }finally{if(old===undefined)delete process.env.HOME;else process.env.HOME=old;rmSync(base,{recursive:true,force:true});}
 });
