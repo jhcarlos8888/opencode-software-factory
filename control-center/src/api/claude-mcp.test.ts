@@ -16,7 +16,7 @@ test("Claude receives only the project-rooted factory filesystem MCP", () => {
 });
 
 test("only named read-only factory filesystem MCP tools are allowed", () => {
-  for (const tool of ["list_files", "read_file", "search_text"]) {
+  for (const tool of ["list_files", "read_file", "search_text", "summarize_junit"]) {
     assert.equal(isAllowedFactoryFilesystemMcpTool(`mcp__factory_filesystem__${tool}`, "factory_filesystem"), true);
     assert.equal(isFactoryFilesystemToolName(`mcp__factory_filesystem__${tool}`), true);
   }

@@ -2,7 +2,7 @@ import { join, resolve } from "node:path";
 
 export const FACTORY_FILESYSTEM_SERVER_NAME = "factory_filesystem";
 
-const FACTORY_FILESYSTEM_TOOLS = new Set(["list_files", "read_file", "search_text"]);
+const FACTORY_FILESYSTEM_TOOLS = new Set(["list_files", "read_file", "search_text", "summarize_junit"]);
 
 /**
  * A per-session, project-rooted stdio MCP configuration for Claude Code.
@@ -23,7 +23,7 @@ export function createClaudeFactoryMcpConfig(factoryRoot: string, nodeExecutable
 }
 
 /**
- * Only the three read-only tools from our private MCP may bypass the general
+ * Only the named read-only tools from our private MCP may bypass the general
  * MCP deny rule. The server itself exposes no write/shell/network methods.
  */
 export function isAllowedFactoryFilesystemMcpTool(toolName: string, serverName?: string): boolean {

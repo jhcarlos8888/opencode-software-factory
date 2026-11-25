@@ -770,6 +770,7 @@ function makeAgentPrompt(
     "INSTRUCCIÓN ESPECÍFICA DEL ORQUESTADOR:",
     roleOverrides[agent.agentId] ?? "Cumple exclusivamente tu función como especialista.",
     "Responde en español, con evidencia y límites explícitos. No crees subagentes ni delegues.",
+    "VERIFICACIÓN: usa el wrapper ./gradlew test, build o check con --console=plain y --rerun-tasks cuando corresponda, desde la raíz del proyecto, sin exportar variables si el entorno ya está configurado. Para contar resultados JUnit usa el MCP factory_filesystem summarize_junit con la lista de módulos relativos (incluye . si procede); no ejecutes Python, JShell ni pipelines ls/sed para contar informes. Distingue informes existentes de pruebas recién ejecutadas.",
     "",
     "PROTOCOLO DE ENTREGA:",
     "PRIMERA LÍNEA CANÓNICA: escribe exactamente " + handoffId + " (sin #, prefijos, espacios ni texto previo). Después indica agente, motor, modelo, INBOUND con los IDs exactos recibidos (" + expectedInbound + "), herramientas, hallazgos, discrepancias y recomendaciones.",
@@ -859,7 +860,7 @@ async function runClaudeAgent(
         append: role + "\n\nSKILLS INTERNAS DE LA FÁBRICA: están disponibles mediante el plugin local factory-skills: " +
           skillsPlugin.skillIds.join(", ") +
           ". Selecciona y carga con la herramienta Skill las habilidades pertinentes para esta tarea; no afirmes haber usado una Skill cuyo contenido no hayas consultado." +
-          "\n\nLECTURA SEGURA DEL PROYECTO: usa exclusivamente el MCP interno factory_filesystem y sus herramientas list_files, read_file y search_text. No uses Read, Glob, Grep, LS, shell ni otros MCP para enumerar o leer archivos. El MCP está limitado al proyecto activo, rechaza traversal, symlinks y secretos, y solo ofrece lectura/búsqueda. La fábrica administra otras fases de trabajo: no invoques subagentes ni delegues."
+          "\n\nLECTURA SEGURA DEL PROYECTO: usa exclusivamente el MCP interno factory_filesystem y sus herramientas list_files, read_file, search_text y summarize_junit. No uses Read, Glob, Grep, LS, shell ni otros MCP para enumerar o leer archivos. El MCP está limitado al proyecto activo, rechaza traversal, symlinks y secretos, y solo ofrece lectura/búsqueda. La fábrica administra otras fases de trabajo: no invoques subagentes ni delegues."
       },
       disallowedTools: agent.permissionProfile === "read-only"
         ? ["Bash", "BashOutput", "KillShell", "Edit", "Write", "NotebookEdit", "MultiEdit", "NotebookWrite", "NotebookCellEdit", "Agent", "Task", "TaskCreate", "TaskGet", "TaskStop"]
@@ -907,8 +908,8 @@ async function runClaudeAgent(
             if (hookInput.mcp_server || toolName.startsWith("mcp__")) {
               if (isAllowedFactoryFilesystemMcpTool(toolName, mcpServerName)) return {};
               addLog(state.runId, agent.agentId.toUpperCase(), "warning",
-                "Bloqueo de aislamiento: solo se permite el MCP interno factory_filesystem y sus tres herramientas de solo lectura.", agent.id);
-              return deny("La sesión solo puede invocar list_files, read_file y search_text del MCP interno factory_filesystem.");
+                "Bloqueo de aislamiento: solo se permite el MCP interno factory_filesystem y sus herramientas de solo lectura.", agent.id);
+              return deny("La sesión solo puede invocar list_files, read_file, search_text y summarize_junit del MCP interno factory_filesystem.");
             }
             if (agent.permissionProfile === "read-only" &&
                 (writeTools.has(toolName) || shellTools.has(toolName) || delegationTools.has(toolName))) {

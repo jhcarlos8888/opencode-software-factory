@@ -105,13 +105,28 @@ deterministas integrado en el orquestador. Supervisa las solicitudes tanto de
 OpenCode como de Claude Code y registra sus decisiones en los eventos
 `AUDITOR` de SQLite y en el Centro de decisiones.
 
-- **Autoaprobación de bajo riesgo:** consultas Git de solo lectura,
+- **Autoaprobación de bajo riesgo:** consultas Git de solo lectura
+  con argumentos expresamente permitidos (por ejemplo, `git status --porcelain=v1 -uall`,
+  `git rev-parse --abbrev-ref HEAD`, `git diff --stat` y
+  `git show --stat <hash>`),
   `npm run check`, `npm run test:unit`, `npm run smoke` (incluida la
   visualización limitada `2>&1 | tail -20; echo "SMOKE_EXIT=${PIPESTATUS[0]}"`),
   y algunas
   acciones de navegador local (navegar a inicio/salud, redimensionar,
   consola, capturas confinadas). Cada permiso se concede **una sola vez**,
   con el perfil `workspace-write` y durante la ronda activa.
+- **Gradle:** desde la raíz canónica del proyecto, wrapper regular sin symlink,
+  tareas test/build/check o tests de módulos, con flags explícitos
+  (--console=plain, --rerun-tasks, --offline, --no-daemon) y formato
+  acotado de salida que conserva EXIT_CODE. Igual que npm, ejecuta código
+  del proyecto; solo utilizar workspaces confiables. No autoriza publish,
+  bootRun, init scripts, opciones arbitrarias ni rutas externas.
+- **Resultados JUnit:** ambos motores pueden usar la herramienta de solo
+  lectura summarize_junit del MCP factory_filesystem, con módulos
+  relativos explícitos. Resume contadores de los XML convencionales sin
+  shell, sin ejecutar código ni mostrar logs. No demuestra por sí sola
+  que los informes sean recientes. Python y JShell arbitrarios requieren
+  revisión puntual.
 - **Decisión humana:** operaciones desconocidas, respuestas a formularios,
   navegación web externa, `browser_evaluate`, clics arbitrarios,
   instalación de dependencias, modificaciones Git (commit, push) o

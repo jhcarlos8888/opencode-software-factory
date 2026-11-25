@@ -149,7 +149,7 @@ test("the exact OpenCode environment-resolved launcher starts the MCP in the sel
     assert.equal(responses[0].result.serverInfo.name, "factory-filesystem");
     assert.deepEqual(
       responses[1].result.tools.map((tool) => tool.name).sort(),
-      ["list_files", "read_file", "search_text"]
+      ["list_files", "read_file", "search_text", "summarize_junit"]
     );
     assert.match(responses[1].result.tools[0].description, /proyecto/i);
   } finally {
@@ -157,7 +157,7 @@ test("the exact OpenCode environment-resolved launcher starts the MCP in the sel
   }
 });
 
-test("the stdio MCP protocol exposes only the three safe read-only tools", async () => {
+test("the stdio MCP protocol exposes only the named safe read-only tools", async () => {
   const f = await fixture();
   try {
     const script = new URL("../.opencode/mcp/factory-filesystem.mjs", import.meta.url);
@@ -188,7 +188,7 @@ test("the stdio MCP protocol exposes only the three safe read-only tools", async
     assert.equal(responses[0].id, 1);
     assert.equal(responses[0].result.serverInfo.name, "factory-filesystem");
     const tools = responses[1].result.tools.map((tool) => tool.name).sort();
-    assert.deepEqual(tools, ["list_files", "read_file", "search_text"]);
+    assert.deepEqual(tools, ["list_files", "read_file", "search_text", "summarize_junit"]);
     assert.equal(responses[2].id, 3);
     assert.equal(responses[2].result.isError, false);
     assert.match(responses[2].result.content[0].text, /README.md/);
@@ -196,4 +196,27 @@ test("the stdio MCP protocol exposes only the three safe read-only tools", async
   } finally {
     await rm(f.base, { recursive: true, force: true });
   }
+});
+
+test("summarize_junit counts only confined report headers and refuses unsafe paths", async () => {
+  const f = await fixture();
+  try {
+    const dir = join(f.project, "domain", "model", "build", "test-results", "test");
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "TEST-example.xml"), '<?xml version="1.0"?><testsuite name="sample" tests="4" failures="1" errors="0" skipped="1"><system-out>PRIVATE-LOG</system-out></testsuite>');
+    const fs = await createProjectFilesystem(f.project);
+    const result = await fs.summarizeJUnit({ modules: ["domain/model"] });
+    assert.deepEqual(result.totals, { tests: 4, failures: 1, errors: 0, skipped: 1 });
+    assert.equal(result.complete, true);
+    assert.equal(JSON.stringify(result).includes("PRIVATE-LOG"), false);
+    await assert.rejects(() => fs.summarizeJUnit({ modules: ["../outside"] }));
+    await assert.rejects(() => fs.summarizeJUnit({ modules: ["/etc"] }));
+    await symlink(join(f.outside, "outside.txt"), join(dir, "TEST-link.xml"));
+    await writeFile(join(dir, "TEST-bad.xml"), '<!DOCTYPE testsuite [<!ENTITY x SYSTEM "file:///etc/passwd">]><testsuite tests="1" failures="0" errors="0" skipped="0"></testsuite>');
+    const partial = await fs.summarizeJUnit({ modules: ["domain/model"] });
+    assert.equal(partial.complete, false);
+    assert.equal(partial.issues.length, 2);
+    assert.deepEqual(partial.totals, result.totals);
+    assert.equal(JSON.stringify(partial).includes("OUTSIDE-SECRET"), false);
+  } finally { await rm(f.base, { recursive: true, force: true }); }
 });

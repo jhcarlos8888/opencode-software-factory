@@ -1,3 +1,6 @@
+import { mkdtempSync, writeFileSync, rmSync, symlinkSync, realpathSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { assessAuditorTool, assessOpenCodePermission, isBoundedTestOutputPipeline, isProtectedShellCommand } from "./auditor-policy.js";
@@ -180,4 +183,102 @@ test("OpenCode split permission resources for bounded smoke display auto-approve
   assert.equal(assessOpenCodePermission({ action: "shell", resources, save: ["*"] }, projectPath, "workspace-write").verdict, "auto");
   assert.equal(assessOpenCodePermission({ action: "shell", resources: [...resources, "rm -rf data"] }, projectPath, "workspace-write").verdict, "block");
   assert.notEqual(assessOpenCodePermission({ action: "shell", resources: [...resources, "npm run deploy"] }, projectPath, "workspace-write").verdict, "auto");
+});
+
+test("Auditor recognizes the actual QA Git status and log request from 2026-11-24", () => {
+  const resources = ["git status --porcelain=v1 -uall", 'echo "---DIFFSTAT---"', "git diff --stat", 'echo "---BRANCH---"', "git log --oneline -3"];
+  const request = { action: "shell", resources, save: ["git status *", "echo *", "git diff *", "git log *"] };
+  assert.equal(assessOpenCodePermission(request, projectPath, "workspace-write").verdict, "auto");
+  for (const profile of ["read-only", "approval-required"] as const) {
+    assert.notEqual(assessOpenCodePermission(request, projectPath, profile).verdict, "auto");
+  }
+  for (const command of resources) assert.equal(claude("Bash", { command }).verdict, "auto");
+});
+
+test("Common bounded Git inspection variants remain safe without wildcard grants", () => {
+  for (const command of [
+    "git status --porcelain=v2 --untracked-files=all",
+    "git status -sb -uno", "git status --short -unormal",
+    "git rev-parse --abbrev-ref HEAD", "git log -1 --format='%H %s'",
+    "git show --stat a8cbebe", 'git show a8cbebe --name-only --format=""',
+    "git show --stat --format='%H%n%an%n%s' a8cbebe",
+    "git diff --cached --name-status", "git diff --check -- src/app.ts"
+  ]) {
+    assert.equal(claude("Bash", { command }).verdict, "auto", command);
+    assert.equal(assessOpenCodePermission({ action: "shell", resources: [command] }, projectPath, "workspace-write").verdict, "auto", command);
+  }
+});
+
+test("New Git variants do not permit dangerous flags, paths, mutations or shell injection", () => {
+  for (const command of [
+    "git diff --ext-diff", "git diff --no-index /etc/passwd /tmp/file",
+    "git diff --output /tmp/file", "git diff -- ../another-project/file",
+    "git diff -- .git/config", "git diff -- .env.local",
+    "git status --porcelain=v1 -uall; git push", "git status --unknown",
+    "git show --ext-diff a8cbebe", "git show --output=/tmp/file a8cbebe",
+    "git show HEAD:../../secret", "git log --format=$(whoami)",
+    "git add .", "git commit -m change", "git push", "git checkout master",
+    'echo "---DIFFSTAT---"; git push'
+  ]) {
+    assert.notEqual(claude("Bash", { command }).verdict, "auto", command);
+    assert.notEqual(assessOpenCodePermission({ action: "shell", resources: ["git status --porcelain=v1 -uall", command] }, projectPath, "workspace-write").verdict, "auto", command);
+  }
+});
+
+test("Tester exit-code reporting is safe but arbitrary Java and Python snippets are not", () => {
+  for (const command of ['echo "EXIT_CODE=$?"', 'echo "EXIT_CODE=${PIPESTATUS[0]}"']) {
+    assert.equal(claude("Bash", { command }).verdict, "auto");
+    assert.equal(assessOpenCodePermission({ action: "shell", resources: [command] }, projectPath, "workspace-write").verdict, "auto");
+  }
+  for (const command of ['jshell -q', 'python3 -c "print(1)"', 'echo "EXIT_CODE=$(whoami)"']) {
+    assert.notEqual(claude("Bash", { command }).verdict, "auto");
+  }
+});
+
+test("Claude observed project-root Git inspection chain is approved without widening scope", () => {
+  const root = "/home/user/projects/Java project";
+  const command = 'cd "' + root + '" && git status --porcelain=v1 -uall && echo "---DIFFSTAT---" && git diff --stat && echo "---DIFF NAMES---" && git diff --name-only';
+  const decide = (command: string, permissionProfile: "workspace-write" | "read-only" | "approval-required" = "workspace-write") =>
+    assessAuditorTool({ engine: "claude", toolName: "Bash", input: { command }, projectPath: root, permissionProfile }).verdict;
+  assert.equal(decide(command), "auto");
+  assert.equal(decide(command, "read-only"), "human");
+  assert.equal(decide(command, "approval-required"), "human");
+  for (const unsafe of [
+    command.replace(root, "/tmp/another project"),
+    command + " && git push",
+    command + " && npm run smoke",
+    command + " && git diff --ext-diff",
+    command + " && echo $(whoami)",
+    command + " || git status",
+    command.replace("git diff --stat", "git diff --stat > output"),
+    'cd "' + root + '/.." && git status',
+  ]) assert.notEqual(decide(unsafe), "auto", unsafe);
+});
+
+test("Gradle test recipes permit only bounded tasks in the actual selected workspace", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "factory-gradle-")));
+  try {
+    writeFileSync(join(root, "gradlew"), "#!/bin/sh\n", { mode: 0o755 });
+    const pipeline = ' 2>&1 | tail -40; echo "EXIT_CODE=${PIPESTATUS[0]}"';
+    const command = 'cd "' + root + '" && ./gradlew test --rerun-tasks --console=plain' + pipeline;
+    const decide = (command: string, profile: "workspace-write" | "read-only" | "approval-required" = "workspace-write", cwd = root) =>
+      assessAuditorTool({ engine: "claude", toolName: "Bash", input: { command, cwd }, projectPath: root, permissionProfile: profile });
+    assert.equal(decide(command).category, "test");
+    assert.equal(decide(command).verdict, "auto");
+    assert.equal(decide("./gradlew :model:test :usecase:test --console=plain --rerun-tasks" + pipeline).verdict, "auto");
+    assert.equal(decide("./gradlew build --console=plain --rerun-tasks").verdict, "auto");
+    assert.equal(assessOpenCodePermission({ action: "shell", resources: ["./gradlew test --rerun-tasks --console=plain", "tail -40", 'echo "EXIT_CODE=${PIPESTATUS[0]}"'] }, root, "workspace-write").verdict, "auto");
+    assert.equal(decide(command, "read-only").verdict, "human");
+    assert.equal(decide(command, "approval-required").verdict, "human");
+    for (const unsafe of [
+      command + "; git push", command.replace(root, "/tmp/elsewhere"),
+      "./gradlew test --init-script /tmp/evil.gradle", "./gradlew publish", "./gradlew bootRun",
+      "./gradlew test -Ppayload=bad", "./gradlew test --project-dir ../other",
+      "./gradlew test | sh", "./gradlew test > /tmp/output"
+    ]) assert.notEqual(decide(unsafe).verdict, "auto", unsafe);
+    assert.notEqual(decide("./gradlew test", "workspace-write", "/tmp").verdict, "auto");
+    rmSync(join(root, "gradlew"));
+    symlinkSync("/bin/sh", join(root, "gradlew"));
+    assert.notEqual(decide("./gradlew test").verdict, "auto");
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });

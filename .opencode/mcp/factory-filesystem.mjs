@@ -365,10 +365,85 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
     };
   }
 
-  return { root, listFiles, readProjectFile, searchText };
+  // Read only conventional Gradle/Maven JUnit report directories explicitly
+  // selected by the caller. Never return arbitrary XML contents or test logs.
+  async function summarizeJUnit({ modules } = {}) {
+    if (!Array.isArray(modules) || modules.length < 1 || modules.length > 40 ||
+        modules.some((m) => typeof m !== "string" || !/^(?:\.|[\w.-]+(?:\/[\w.-]+)*)$/.test(m) ||
+          (m !== "." && m.split("/").some((part) => part === ".." || part === ".")) || isSensitiveRelativePath(m))) {
+      throw new Error("Indica entre 1 y 40 rutas relativas de módulos, sin traversal ni patrones.");
+    }
+    const totals = { tests: 0, failures: 0, errors: 0, skipped: 0 };
+    const reports = [];
+    const issues = [];
+    const seen = new Set();
+    let totalBytes = 0;
+    let truncated = false;
+    for (const module of [...new Set(modules)]) {
+      const base = module === "." ? "" : module + "/";
+      let found = false;
+      const beforeReports = reports.length;
+      for (const suffix of ["build/test-results/test", "target/surefire-reports", "target/failsafe-reports"]) {
+        const rel = base + suffix;
+        let directory;
+        try { directory = await resolveInside(rel); } catch { continue; }
+        if (!directory.info.isDirectory()) continue;
+        found = true;
+        let entries;
+        try { entries = await readDirectoryNoFollow(directory.absolute, directory.relative); }
+        catch { issues.push(rel + ": no se pudo enumerar"); continue; }
+        for (const entry of entries.sort((a,b) => a.name.localeCompare(b.name))) {
+          if (!/^TEST-[\w.$-]+\.xml$/.test(entry.name)) continue;
+          const file = rel + "/" + entry.name;
+          if (seen.has(file)) continue;
+          seen.add(file);
+          if (seen.size > 500 || totalBytes >= 20 * 1024 * 1024) { truncated = true; break; }
+          if (!entry.isFile() || entry.isSymbolicLink() || isSensitiveRelativePath(file)) {
+            issues.push(file + ": archivo no permitido"); continue;
+          }
+          try {
+            const target = await resolveInside(file);
+            const { buffer } = await readFileNoFollow(target.absolute, target.relative,
+              Math.min(1024 * 1024, 20 * 1024 * 1024 - totalBytes));
+            totalBytes += buffer.length;
+            const text = buffer.toString("utf8");
+            // Extract only the four numeric attributes of a standard
+            // testsuite root. Reject declarations/entities beyond XML header.
+            if (/<!DOCTYPE|<!ENTITY/i.test(text)) throw new Error("declaración XML no permitida");
+            const head = /^\uFEFF?\s*(?:<\?xml[^?]*\?>\s*)?<testsuite\s+([^<>]{1,8192})>/.exec(text);
+            if (!head || !/<\/testsuite>\s*$/.test(text)) throw new Error("formato JUnit no reconocido");
+            const attrs = head[1];
+            const counts = {};
+            for (const key of ["tests","failures","errors","skipped"]) {
+              const matches = [...attrs.matchAll(new RegExp("(?:^|\\s)" + key + "\\s*=\\s*([\"'])(\\d{1,8})\\1(?=\\s|$)", "g"))];
+              if (matches.length !== 1) throw new Error("contador ausente o ambiguo: " + key);
+              counts[key] = Number(matches[0][2]);
+            }
+            if (counts.failures + counts.errors + counts.skipped > counts.tests) throw new Error("contadores inconsistentes");
+            for (const key of Object.keys(totals)) totals[key] += counts[key];
+            reports.push({ module, path: file, ...counts });
+          } catch { issues.push(file + ": informe no legible o formato no válido"); }
+        }
+        if (truncated) break;
+      }
+      if (!found || reports.length === beforeReports) issues.push(module + ": no se encontraron informes JUnit legibles");
+      if (truncated) break;
+    }
+    return { totals, reports, issues, truncated, complete: !truncated && issues.length === 0 && reports.length > 0,
+      note: "Contadores declarados en informes existentes; no ejecuta pruebas ni acredita que sean recientes. No suma informes que no pudo leer." };
+  }
+
+  return { root, listFiles, readProjectFile, searchText, summarizeJUnit };
 }
 
 const TOOL_DEFINITIONS = [
+  {
+    name: "summarize_junit",
+    description: "Resume contadores de informes JUnit Gradle/Maven de módulos explícitos del proyecto, sin ejecutar shell ni mostrar logs. Indica módulos relativos, . para raíz.",
+    inputSchema: { type: "object", properties: {
+      modules: { type: "array", minItems: 1, maxItems: 40, items: { type: "string" } }
+    }, required: ["modules"], additionalProperties: false }
+  },
   {
     name: "list_files",
     description: "Lista archivos y directorios dentro del proyecto activo. Nunca sigue enlaces simbólicos ni enumera metadatos o secretos.",
@@ -422,7 +497,8 @@ async function runMcpServer() {
   const tools = {
     list_files: filesystem.listFiles,
     read_file: filesystem.readProjectFile,
-    search_text: filesystem.searchText
+    search_text: filesystem.searchText,
+    summarize_junit: filesystem.summarizeJUnit
   };
 
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
