@@ -14,7 +14,7 @@ function canonicalRoot(root: string): boolean {
 function safeSource(root: string, name: string): boolean {
   if (!/^[A-Za-z0-9_][A-Za-z0-9_.-]*(?:\/[A-Za-z0-9_][A-Za-z0-9_.-]*)*$/.test(name) ||
       name.split("/").some(p=>p===".."||p==="." ) || isSensitiveFilesystemPath(name) ||
-      !/^(?:package\.json|models\.json|README\.md|LICENSE|zen-proxy|[A-Za-z0-9_./-]+\.(?:mjs|cjs|js|ts|java|sh|md))$/.test(name)) return false;
+      !/^(?:package\.json|models\.json|agent-tools\.json|agent-preamble\.txt|README\.md|LICENSE|zen-proxy|[A-Za-z0-9_./-]+\.(?:mjs|cjs|js|ts|java|sh|md))$/.test(name)) return false;
   try { const file=resolve(root,name); const stat=lstatSync(file);
     return stat.isFile() && !stat.isSymbolicLink() && realpathSync(file)===file && stat.size<=32*1024*1024;
   } catch { return false; }
@@ -59,7 +59,7 @@ function curlDefaultsAbsent():boolean{
   return locations.every(file=>{try{lstatSync(file);return false;}catch(e){return (e as NodeJS.ErrnoException).code==="ENOENT";}});
 }
 function publicMetadata(part:string,instructions:string):string[]|null{
-  const m=/^(curl -fsSL --max-time (?:[1-9]|[1-5]\d|60) (?:'([^']+)'|([^\s'"]+))(?: 2>\/dev\/null)?)(?: \| (head -c (?:[1-9]\d{0,3}|10000)))?$/.exec(part);
+  const m=/^(curl -fsSL (?:--max-time|-m) (?:[1-9]|[1-5]\d|60) (?:'([^']+)'|([^\s'"]+))(?: 2>\/dev\/null)?)(?: \| (head -c (?:[1-9]\d{0,3}|10000)))?$/.exec(part);
   if(!m || !curlDefaultsAbsent())return null;
   const url=m[2]??m[3]??"";
   const raw=/^https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/(?:package\.json|models\.json|README\.md)$/.exec(url);
@@ -101,6 +101,14 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
       /^echo (?:'---[A-Za-z0-9 _()/\-]{0,40}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part)){
       resources.push(part);continue;
     }
+    const cli=resolve(homedir(),".opencode/bin/opencode");
+    if(/^[A-Za-z0-9_./-]+$/.test(cli) &&
+      (part===cli+" --version" || part===cli+" --version 2>&1" || part===cli+" --version 2>&1 | head -5")){
+      try {
+        if(realpathSync(cli)!==cli || !lstatSync(cli).isFile())return null;
+        resources.push(...part.split(" | "));continue;
+      }catch{return null;}
+    }
     const service=/^systemctl --user (?:is-active|is-enabled) ([A-Za-z0-9_-]+\.service)$/.exec(plain);
     const metadata=/^systemctl --user show ([A-Za-z0-9_-]+\.service)((?: -p (?:ActiveState|SubState|MainPID|LoadState|UnitFileState|ExecMainStartTimestamp|FragmentPath)){1,7})$/.exec(plain);
     if(service?.[1]===unit||metadata?.[1]===unit){resources.push(part);continue;}
@@ -116,8 +124,38 @@ type Recipe = { category:"inspection"|"test"; resources:string[] };
 /** Classify the exact complete native command, not a set of independent
  * wildcard grants. Only explicit bounded recipes, no arbitrary shell. */
 export function assessDiagnosticCommand(command:string,root:string,cwd:string|undefined,instructions=""):Recipe|null {
-  if(cwd!==root || !canonicalRoot(root) || command.length>2400 ||
-    /[\r\n\x00-\x1f\x60\\]/.test(command))return null;
+  if(!canonicalRoot(root) || command.length>2400 ||
+    /[\r\n\x00-\x1f\x60]/.test(command))return null;
+  const explicitCd=command.startsWith('cd "'+root+'" && ') ? 'cd "'+root+'" && ' :
+    /^[A-Za-z0-9_./-]+$/.test(root) && command.startsWith("cd "+root+" && ") ? "cd "+root+" && " : "";
+  if(explicitCd && /["'$&;|<>\\]/.test(root))return null;
+  if(explicitCd)command=command.slice(explicitCd.length);
+  // The only supported substitution is this fixed public hash recipe.
+  // A relative file read after a failed cd is forbidden: with no native
+  // cwd require && after the loop and every subsequent command.
+  const hashLoop=/^for f in ([A-Za-z0-9_./ -]+); do (printf '%s  %s\\n' "\$\((curl -fsSL -(?:m|\-max-time) (?:[1-9]|[1-5]\d|60) https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/\$f) \| sha256sum \| (cut -d' ' -f1)\)" "remote\/\$f"); done( && |; )echo "---LOCAL---"( && |; )sha256sum ([A-Za-z0-9_./ -]+)$/.exec(command);
+  if(hashLoop){
+    const files=hashLoop[1]!.split(" ");
+    if((cwd!==root && (!explicitCd || hashLoop[6]!==" && " || hashLoop[7]!==" && ")) ||
+      files.length>20 || !files.every(f=>safeSource(root,f)) ||
+      hashLoop[8]!==hashLoop[1] || !repoMentioned(instructions,hashLoop[4]!) || !curlDefaultsAbsent())return null;
+    return {category:"inspection",resources:[hashLoop[2]!,hashLoop[3]!,"sha256sum",hashLoop[5]!,'echo "---LOCAL---"',"sha256sum "+hashLoop[8]]};
+  }
+  const catalogHash=/^(sha256sum models\.json) && (printf '%s  %s\\n' "\$\((curl -fsSL -(?:m|\-max-time) (?:[1-9]|[1-5]\d|60) https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/models\.json) \| sha256sum \| (cut -d' ' -f1)\)" "remote\/models\.json") && (node -e 'const c=require\("\.\/models\.json"\); console\.log\("models:",c\.models\.length,"unique:",new Set\(c\.models\)\.size,"updatedAt:",c\.updatedAt\)')$/.exec(command);
+  if(catalogHash){
+    if((cwd!==root && !explicitCd)||!safeSource(root,"models.json")||!repoMentioned(instructions,catalogHash[4]!)||!curlDefaultsAbsent())return null;
+    try{
+      const cfg=JSON.parse(readFileSync(resolve(root,"models.json"),"utf8"));
+      if(!Array.isArray(cfg.models)||cfg.models.length>500||!cfg.models.every((m:unknown)=>typeof m==="string"&&/^[A-Za-z0-9_.-]{1,120}$/.test(m))||
+        typeof cfg.updatedAt!=="string"||!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{3})?Z$/.test(cfg.updatedAt))return null;
+    }catch{return null;}
+    return {category:"inspection",resources:[catalogHash[1]!,catalogHash[2]!,catalogHash[3]!,"sha256sum",catalogHash[5]!,catalogHash[6]!]};
+  }
+  if((cwd===root || explicitCd) && /^npm test(?: -- --test-reporter=spec)?(?: 2>&1)?; echo "EXIT_CODE=\$\?"$/.test(command) && trustedNodeTest(root)){
+    return {category:"test",resources:command.split("; ")};
+  }
+  if(/\\/.test(command))return null;
+  if(cwd!==root && (!explicitCd || /;/.test(command)))return null;
   const test=/^npm test(?: -- --test-reporter=spec)?(?: 2>&1(?: \| tail -(?:[1-9]\d?|100); echo "(?:EXIT_CODE|TEST_EXIT)=\$\{PIPESTATUS\[0\]\}")?)?$/.exec(command);
   if(test && trustedNodeTest(root)){
     const parts=command.split(/ \| |; /);
@@ -206,6 +244,7 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
 }
 export function matchDiagnosticResources(actual:string[],expected:string[]):boolean{
   // OpenCode 2.x drops the stderr redirection on its fallback netstat segment.
-  const normalize=(s:string)=>s==="netstat -ltnp 2>/dev/null"?"netstat -ltnp":s;
+  const normalize=(s:string)=>s==="netstat -ltnp 2>/dev/null"?"netstat -ltnp":
+    /^(?:npm test(?: -- --test-reporter=spec)?|git ls-remote https:\/\/github\.com\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+ refs\/heads\/(?:main|master)) 2>&1$/.test(s)?s.slice(0,-5):s;
   return actual.length===expected.length && actual.every((s,i)=>normalize(s)===normalize(expected[i]!));
 }

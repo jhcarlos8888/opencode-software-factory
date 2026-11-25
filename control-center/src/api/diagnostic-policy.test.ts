@@ -110,3 +110,46 @@ test("Independent service and loopback metadata reads need no fabricated workdir
     assert.notEqual(decide(chain,[model,"head -c 2000","echo"]).verdict,"auto");
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("Public hash comparison validates the complete finite substitution and cd failure paths",()=>{
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-hashloop-")));
+  try{
+    mkdirSync(join(root,"scripts"));
+    for(const f of ["agent-preamble.txt","agent-tools.json","scripts/sync-models.mjs"])writeFileSync(join(root,f),"fixture");
+    const files="agent-preamble.txt agent-tools.json scripts/sync-models.mjs";
+    const curl="curl -fsSL -m 60 https://raw.githubusercontent.com/example/project/main/$f";
+    const printf="printf '%s  %s\\n' \"$(" +curl+" | sha256sum | cut -d' ' -f1)\" \"remote/$f\"";
+    const command="cd "+root+" && for f in "+files+"; do "+printf+"; done; echo \"---LOCAL---\"; sha256sum "+files;
+    const instructions="Analiza https://github.com/example/project";
+    const result=assessDiagnosticCommand(command,root,root,instructions);
+    const cleanCurl=![".curlrc",".config/curlrc"].some(name=>existsSync(join(homedir(),name))) && !process.env.CURL_HOME && !process.env.XDG_CONFIG_HOME;
+    if(cleanCurl)assert.deepEqual(result?.resources,[printf,curl,"sha256sum","cut -d' ' -f1",'echo "---LOCAL---"',"sha256sum "+files]);
+    assert.equal(assessDiagnosticCommand(command,root,undefined,instructions),null);
+    const conditional=command.replace("; done; echo","; done && echo").replace('---LOCAL---"; sha256sum','---LOCAL---" && sha256sum');
+    if(cleanCurl)assert.ok(assessDiagnosticCommand(conditional,root,undefined,instructions));
+    for(const bad of [command.replace("example/project","else/project"),command.replace("agent-preamble.txt",".env"),command.replace(" | sha256sum"," | sh"),command+"; cat /etc/passwd",command.replace("sha256sum "+files,"sha256sum /etc/passwd")])assert.equal(assessDiagnosticCommand(bad,root,root,instructions),null,bad);
+    assert.equal(assessDiagnosticCommand("cd "+root+" && ls -la; sha256sum agent-tools.json",root,undefined,instructions),null);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
+
+test("Catalog verification and npm exit status validate the full native command",()=>{
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-catalog-")));
+  try{
+    writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test"}}));
+    writeFileSync(join(root,"models.json"),JSON.stringify({models:["a-free"],updatedAt:"2026-11-22T19:38:48.785Z"}));
+    const cmd="cd "+root+' && npm test 2>&1; echo "EXIT_CODE=$?"';
+    const result=assessDiagnosticCommand(cmd,root,undefined);
+    assert.ok(result);assert.ok(matchDiagnosticResources(["npm test",'echo "EXIT_CODE=$?"'],result.resources));
+    assert.equal(assessOpenCodePermission({action:"shell",resources:["npm test",'echo "EXIT_CODE=$?"']},root,"workspace-write",undefined,{command:cmd}).verdict,"auto");
+    assert.equal(assessDiagnosticCommand(cmd+"; cat /etc/passwd",root,undefined),null);
+    const curl="curl -fsSL -m 30 https://raw.githubusercontent.com/example/project/main/models.json";
+    const command="cd "+root+" && sha256sum models.json && printf '%s  %s\\n' \"$(" +curl+" | sha256sum | cut -d' ' -f1)\" \"remote/models.json\" && node -e 'const c=require(\"./models.json\"); console.log(\"models:\",c.models.length,\"unique:\",new Set(c.models).size,\"updatedAt:\",c.updatedAt)'";
+    const instructions="Analiza https://github.com/example/project";
+    const cleanCurl=![".curlrc",".config/curlrc"].some(name=>existsSync(join(homedir(),name))) && !process.env.CURL_HOME && !process.env.XDG_CONFIG_HOME;
+    if(cleanCurl)assert.ok(assessDiagnosticCommand(command,root,undefined,instructions));
+    assert.equal(assessDiagnosticCommand(command.replace("c.models.length","process.env"),root,undefined,instructions),null);
+    assert.equal(assessDiagnosticCommand(command.replace("example/project","else/project"),root,undefined,instructions),null);
+    writeFileSync(join(root,"models.json"),JSON.stringify({models:["a-free"],updatedAt:"private text"}));
+    assert.equal(assessDiagnosticCommand(command,root,undefined,instructions),null);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
