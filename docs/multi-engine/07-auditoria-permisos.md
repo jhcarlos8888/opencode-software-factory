@@ -329,3 +329,12 @@ configuraciones externas. Se añade la consulta exacta command -v jq
 y se refuerza el prompt común para limitar inventarios a las rutas
 autorizadas, no imprimir credenciales, separar diagnóstico y cambio,
 y conservar la raíz de trabajo durante las fases activas.
+
+Se concedió puntualmente 719d5fff tras contrastar la llamada nativa
+y las cuatro raíces canónicas (fábrica, examResolve, aulaResearchStudio,
+autogestionback). La consulta solo devuelve nombres de archivos con
+coincidencias, limita la salida y excluye directorios de dependencias
+y construcción. Una coincidencia no acredita integración activa;
+debe clasificarse antes de modificar. Sin permiso general de grep
+fuera del workspace ni autorización de escritura. Verificación
+integral del cambio anterior: 240/240.
