@@ -151,3 +151,28 @@ destinos, credenciales y comandos adicionales. Verificación 218/218.
 La ronda sigue activa: no se ha reiniciado el servicio de la fábrica.
 Pendientes de mejora: PATH de Bun, lectura MCP paginada de archivos
 mayores a 128 KiB y diagnóstico de servicios sin revelar configuración.
+
+### Continuación — 21:29
+
+El Implementador creó los respaldos de models.json y zen-proxy.json,
+conservó los permisos 0600 del segundo y actualizó models.json. El catálogo
+tiene diez identificadores únicos y SHA-256 idéntico al catálogo remoto
+descargado (evento 21289). La segunda suite npm continúa en ejecución.
+Se incorporó la consulta de versión de OpenCode en su ruta instalada,
+el hash de una lista literal de archivos públicos con sustitución fija
+y la validación exacta del resumen de models.json. También se admite
+npm test seguido de la impresión del código de salida y cd canónico
+condicional. No se autorizó node -e general.
+En el replay de 28 solicitudes (21:29:42) la política emite auto en 13 y
+revisión humana en 15: siete habían sido rechazadas y ocho aprobadas
+puntualmente. Las variantes con lectura de rutas relativas después de
+un cd que puede fallar, volcado de status administrativo, inferencia
+o archivos temporales fijos requieren contexto adicional; no se
+convierten en comodines. La forma equivalente con workdir verificado
+o cadena condicional está contemplada para comparaciones de hashes.
+Se añadieron instrucciones para reutilizar evidencia entre agentes,
+no repetir inferencia tras 429/timeout, usar workdir y encadenamiento
+condicional, y conservar permisos privados al respaldar configuración.
+Commits 782d9c7 y 27fb56a publicados. Verificación 220/220 en el primero,
+typecheck correcto en el segundo. No se ha reiniciado la fábrica durante
+la ronda activa.
