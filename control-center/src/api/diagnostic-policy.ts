@@ -6,6 +6,7 @@ import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
   if (/^(?:command -v (?:zen-proxy|zen-claude|claude-zen)|readlink -f [A-Za-z0-9_./-]+)(?: 2>&1)?$/.test(command)) return true;
+  if (command.startsWith("grep -cE ")) return true;
   if (command === "command -v jq" || command === "command -v jq 2>&1") return true;
   if (command === "command -v bun" || command === resolve(homedir(),".bun/bin/bun")+" --version 2>/dev/null") return true;
   if (command === resolve(homedir(),".opencode/bin/opencode") + " --version 2>&1" || command === resolve(homedir(),".opencode/bin/opencode") + " --version") return true;
@@ -131,6 +132,23 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
     const files=["/etc/systemd/system/zen-proxy.service","/etc/systemd/system/multi-user.target.wants/zen-proxy.service",resolve(root,"zen-proxy.mjs"),resolve(root,"zen-proxy.json")];
     const presence='for p in '+files.join(" ")+'; do if test -e "$p"; then echo "existe: $p"; else echo "ausente: $p"; fi; done';
     if(command===presence)return {category:"inspection",resources:['test -e "$p"','echo "existe: $p"','echo "ausente: $p"']};
+  }
+  // Counts of known integration markers, never raw configuration lines.
+  if(basename(root).replace(/^\./,"")==="zen-proxy"){
+    const home=homedir();
+    const rcPattern="8787|zen-proxy|zen-claude|claude-zen|ZENKEY|ZEN_KEY";
+    const claudePattern="8787|zen-proxy|space-bunny-free|12errh";
+    const probes=[[".bashrc",rcPattern],[".profile",rcPattern],[".claude/settings.json",claudePattern]] as const;
+    for(const [name,pattern] of probes){
+      const file=resolve(home,name);
+      if(!/^[A-Za-z0-9_./-]+$/.test(file) || command!=="grep -cE '"+pattern+"' "+file+" 2>/dev/null")continue;
+      try{
+        const st=lstatSync(file);
+        if(typeof process.getuid!=="function" || st.uid!==process.getuid() ||
+          !st.isFile() || st.isSymbolicLink() || realpathSync(file)!==file || st.size>1024*1024)return null;
+        return {category:"inspection",resources:[command]};
+      }catch{return null;}
+    }
   }
   // Exact uninstaller inventory: names and existence only, no external
   // configuration contents. A symlinked drop-in directory needs review.

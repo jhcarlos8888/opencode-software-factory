@@ -465,3 +465,24 @@ test("jq discovery does not authorize arbitrary commands or filesystem inventory
     for(const command of ["command -v arbitrary-tool","command -v jq; ls -R \"$HOME\"","command -v jq; jq . configuration.json"])assert.equal(assessDiagnosticCommand(command,root,root),null);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("Uninstall marker counts never print configuration values or inspect auth stores",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-marker-count-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  const previous=process.env.HOME;
+  try{
+    process.env.HOME=base;
+    mkdirSync(join(base,".claude"));
+    writeFileSync(join(base,".bashrc"),"fixture");
+    writeFileSync(join(base,".profile"),"fixture");
+    writeFileSync(join(base,".claude/settings.json"),"{}");
+    const pattern="8787|zen-proxy|zen-claude|claude-zen|ZENKEY|ZEN_KEY";
+    const command="grep -cE '"+pattern+"' "+join(base,".bashrc")+" 2>/dev/null";
+    const check=(cmd:string)=>assessOpenCodePermission({permission:"shell",resources:[cmd]},root,"workspace-write",{agentId:"implementer",instructions:"Retirar Zen Proxy"},{command:cmd,workdir:root}).verdict;
+    assert.equal(check(command),"auto");
+    assert.equal(check("grep -cE '8787|zen-proxy|space-bunny-free|12errh' "+join(base,".claude/settings.json")+" 2>/dev/null"),"auto");
+    for(const bad of [command.replace("-cE","-nE"),command.replace(".bashrc",".local/share/opencode/auth.json"),command.replace(pattern,".*"),command+"; env",command.replace(".bashrc",".bashrc/../.profile")])assert.notEqual(check(bad),"auto");
+    rmSync(join(base,".bashrc"));symlinkSync(join(base,".profile"),join(base,".bashrc"));
+    assert.notEqual(check(command),"auto");
+  }finally{if(previous===undefined)delete process.env.HOME;else process.env.HOME=previous;rmSync(base,{recursive:true,force:true});}
+});

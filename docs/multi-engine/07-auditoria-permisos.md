@@ -370,3 +370,15 @@ externos ni lectura de configuración por coincidencias de palabras.
 A las 09:15:05: 17 aprobadas mediante revisión, 2 rechazadas, ninguna
 pendiente, más una aprobación automática registrada como evento.
 Se mantiene el despliegue vigente para no interrumpir la ronda.
+
+### Desinstalación — continuación 09:16
+
+Se rechazó c940c14b porque mezclaba diagnósticos de existencia y
+conteos con la enumeración del almacén de autenticación. Se aportó
+evidencia independiente: cero líneas coincidentes en .bashrc,
+.profile y .claude/settings.json, y ausencia de los directorios
+zen-proxy bajo .local/share, .cache, .config y .local/state.
+Se incorpora una alternativa de conteo grep -cE con patrones
+literales y tres archivos canónicos exactos, propiedad del usuario
+y tamaño máximo de 1 MiB. No permite grep -n, auth.json, volcados de
+configuración ni comandos añadidos.
