@@ -291,3 +291,8 @@ solo los dos conteos pgrep -c -f exactos (no argumentos de procesos),
 sin autorizar glob general ni borrado. Los conteos no prueban por sí
 solos la ausencia de procesos: contrastar PID y estado de systemd.
 Verificación integral: 236/236.
+
+Se aprobó b2071fe0 tras verificar que PID 2788 era MainPID del
+servicio Zen Proxy. Nueva receta permanente para ps -o pid=,comm=
+-C bun/node y consulta de PID específico, limitada al usuario y cwd
+canónico del proyecto. No se exponen args, entorno ni cmdline.

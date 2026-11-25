@@ -410,3 +410,14 @@ test("Uninstall process counts permit only exact numeric probes, not arbitrary p
     assert.notEqual(check(pair,base),"auto");
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("Process inspection does not disclose arguments or accept unrelated PIDs",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-process-meta-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    const command="ps -o pid=,comm= -C bun 2>/dev/null; echo '---'; ps -o pid=,comm= -C node 2>/dev/null";
+    assert.deepEqual(assessDiagnosticCommand(command,root,root)?.resources,command.split("; "));
+    for(const bad of [command.replace("pid=,comm=","pid=,args="),command.replace("-C bun","-C ssh"),command+"; ps -o pid=,comm= -p 1 2>/dev/null",command+"; ps -o pid=,comm= -p "+process.pid+" 2>/dev/null"])assert.equal(assessDiagnosticCommand(bad,root,root),null);
+    assert.equal(assessDiagnosticCommand(command,base,base),null);
+  }finally{rmSync(base,{recursive:true,force:true});}
+});

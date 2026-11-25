@@ -161,6 +161,22 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
         resources.push(part);continue;
       }
     }
+    // PID and executable name only. The PID probe must belong to the
+    // selected project and current user; never expose full arguments.
+    if(basename(root).replace(/^\./,"")==="zen-proxy"){
+      if(/^ps -o pid=,comm= -C (?:bun|node) 2>\/dev\/null$/.test(part)){
+        resources.push(part);continue;
+      }
+      const pid=/^ps -o pid=,comm= -p ([1-9]\d{0,9}) 2>\/dev\/null$/.exec(part);
+      if(pid){
+        try{
+          const proc="/proc/"+pid[1];
+          if(typeof process.getuid!=="function" || lstatSync(proc).uid!==process.getuid() ||
+            realpathSync(proc+"/cwd")!==root)return null;
+          resources.push(part);continue;
+        }catch{return null;}
+      }
+    }
     const bun=resolve(homedir(),".bun/bin/bun");
     if(part==="command -v bun" || part==='command -v bun || echo "bun-no-en-PATH"'){
       resources.push(...part.split(" || "));continue;
