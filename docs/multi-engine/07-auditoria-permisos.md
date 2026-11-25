@@ -353,3 +353,20 @@ Ninguno de los dos archivos selecciona zen-proxy como modelo
 predeterminado o small_model. No se concede jq arbitrario ni
 lectura general de configuraciones externas. Las dos decisiones
 son específicas de esta ejecución y no autorizan cambios.
+
+### Desinstalación — comprobación del Auditor 09:15
+
+Evento 21790 acredita una autoaprobación real del Auditor desplegado:
+npm test del Build, sin intervención y sin comodines. La versión
+ejecutada sigue siendo la compilada el 25 de noviembre a las 03:10 UTC.
+Replay de 19 decisiones históricas con política del código fuente
+actual: 6 auto, 13 revisión, 0 bloqueadas; incluye la solicitud
+b694b5a6, entonces pendiente, aprobada puntualmente tras verificar
+llamada nativa y cinco archivos fuente canónicos. Salida 0 (22016).
+Las referencias halladas en esa consulta corresponden a política
+de diagnóstico y sus pruebas, no a un proveedor activo en models.ts,
+server.ts o execution.ts. No se concede búsqueda general en proyectos
+externos ni lectura de configuración por coincidencias de palabras.
+A las 09:15:05: 17 aprobadas mediante revisión, 2 rechazadas, ninguna
+pendiente, más una aprobación automática registrada como evento.
+Se mantiene el despliegue vigente para no interrumpir la ronda.
