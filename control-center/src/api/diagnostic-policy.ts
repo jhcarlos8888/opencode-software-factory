@@ -200,6 +200,13 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
   if((cwd===root || explicitCd) && /^npm test(?: -- --test-reporter=spec)?(?: 2>&1)?; echo "EXIT_CODE=\$\?"$/.test(command) && trustedNodeTest(root)){
     return {category:"test",resources:command.split("; ")};
   }
+  // Public issue text is untrusted research data, not executable shell.
+  // Match the finite literal loop in full, including both output projections.
+  const issueLoop=/^for n in ((?:[1-9]\d{0,7} ){0,2}[1-9]\d{0,7}); do (echo "=== ISSUE \$n BODY ==="); (curl -fsSL -m 20 "https:\/\/api\.github\.com\/repos\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/issues\/\$n") \| (jq -r '\.title, "---", \(\.body \/\/ "" \| \.\[0:900\]\), "---state:" \+ \.state'); (echo "=== COMMENTS \$n ==="); (curl -fsSL -m 20 "https:\/\/api\.github\.com\/repos\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/issues\/\$n\/comments") \| (jq -r '\.\[\] \| "\[" \+ \.user\.login \+ "\]", \(\.body \| \.\[0:700\]\), "-----"'); done$/.exec(command);
+  if(issueLoop){
+    if(issueLoop[4]!==issueLoop[8] || !repoMentioned(instructions,issueLoop[4]!) || !curlDefaultsAbsent())return null;
+    return {category:"inspection",resources:[issueLoop[2]!,issueLoop[3]!,issueLoop[5]!,issueLoop[6]!,issueLoop[7]!,issueLoop[9]!]};
+  }
   if(/\\/.test(command))return null;
   if(cwd!==root && (!explicitCd || /;/.test(command)))return null;
   const test=/^npm test(?: -- --test-reporter=spec)?(?: 2>&1(?: \| tail -(?:[1-9]\d?|100); echo "(?:EXIT_CODE|TEST_EXIT)=\$\{PIPESTATUS\[0\]\}")?)?$/.exec(command);

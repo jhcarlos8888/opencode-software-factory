@@ -309,3 +309,15 @@ test("Public issue index and sync timing have narrow projections",()=>{
     assert.equal(assessDiagnosticCommand(timing.replace("running:.sync.running","error:.sync.error"),root,root),null);
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("Issue research permits only a finite public repository loop",()=>{
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-issue-loop-")));
+  try{
+    const command=`for n in 31 27 24; do echo "=== ISSUE $n BODY ==="; curl -fsSL -m 20 "https://api.github.com/repos/example/project/issues/$n" | jq -r '.title, "---", (.body // "" | .[0:900]), "---state:" + .state'; echo "=== COMMENTS $n ==="; curl -fsSL -m 20 "https://api.github.com/repos/example/project/issues/$n/comments" | jq -r '.[] | "[" + .user.login + "]", (.body | .[0:700]), "-----"'; done`;
+    const authority="Analiza https://github.com/example/project";
+    const cleanCurl=![".curlrc",".config/curlrc"].some(name=>existsSync(join(homedir(),name)))&&!process.env.CURL_HOME&&!process.env.XDG_CONFIG_HOME;
+    if(cleanCurl)assert.equal(assessDiagnosticCommand(command,root,root,authority)?.resources.length,6);
+    for(const bad of [command.replace("31 27 24","31 27 24 23"),command.replace("31 27 24","31 $(id)"),command.replace("example/project","other/project"),command.replace("/comments","/events"),command.replace("[0:700]","[0:70000]"),command+"; cat /etc/passwd"])assert.equal(assessDiagnosticCommand(bad,root,root,authority),null,bad);
+    assert.equal(assessDiagnosticCommand(command,root,root,"Sin repositorio"),null);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
