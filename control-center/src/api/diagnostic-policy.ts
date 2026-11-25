@@ -133,12 +133,12 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
       resources.push(socket[1]!,socket[2]!);continue;
     }
     // Fixed jq projections: no arbitrary expressions or credential fields.
-    const projected=/^(curl -s --max-time (?:[1-9]|10) http:\/\/127\.0\.0\.1:([0-9]{1,5})\/(health|v1\/models|api\/status)) \| (jq -c '([^']+)')$/.exec(part);
+    const projected=/^(curl (?:-s --max-time|-sS -m) (?:[1-9]|10) http:\/\/127\.0\.0\.1:([0-9]{1,5})\/(health|v1\/models|api\/status)) \| (jq -c '([^']+)')$/.exec(part);
     if(projected && curlDefaultsAbsent() && localProxyPort(root)===Number(projected[2])){
       const filters: Record<string,string[]> = {
         health: ["{ok,upstream,sync:.sync.ok,version}"],
         "v1/models": ["{count:(.data|length),ids:(.data|map(.id))}","{count:(.data|length)}"],
-        "api/status": ["{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)},requestsTotal:.requests.total}","{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}","{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,errorPresent:(.sync.error|length>0),gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}"]
+        "api/status": ["{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)},requestsTotal:.requests.total}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length),gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)},requestsTotal:.requests.total,followsCatalog:.models.followsCatalog,served:(.models.served|length)}","{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}","{sync:{ok:.sync.ok,at:.sync.at,ms:.sync.ms,errorPresent:(.sync.error|length>0),gated:(.sync.gated|length),dead:(.sync.dead|length),flaky:(.sync.flaky|length)}}"]
       };
       if(filters[projected[3]!]?.includes(projected[5]!.replace(/, +/g,","))){
         resources.push(projected[1]!,projected[4]!);continue;

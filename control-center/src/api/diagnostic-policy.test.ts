@@ -259,3 +259,18 @@ test("Toolchain fallback probes are bounded to installed CLI versions",()=>{
     assert.equal(assessDiagnosticCommand(command.replace(bun+" --version",bun+" run build"),root,root),null);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("Claude review combines confined service and model health projections",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-claude-health-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    writeFileSync(join(root,"package.json"),JSON.stringify({name:"zen-proxy"}));
+    writeFileSync(join(root,"zen-proxy.json"),JSON.stringify({host:"127.0.0.1",port:8787,upstream:"https://opencode.ai/inference/openai/v1"}));
+    const command="systemctl --user show zen-proxy.service -p ActiveState -p SubState -p MainPID -p NRestarts 2>&1; echo '---PORT---'; ss -ltnp 2>/dev/null | grep 8787; echo '---HEALTH---'; curl -sS -m 5 http://127.0.0.1:8787/health; echo; echo '---STATUS-COUNTS---'; curl -sS -m 8 http://127.0.0.1:8787/api/status | jq -c '{upstreamOk, sync:{ok:.sync.ok, working:(.sync.working|length), rateLimited:(.sync.rateLimited|length), gated:(.sync.gated|length), dead:(.sync.dead|length), flaky:(.sync.flaky|length)}, requestsTotal:.requests.total, followsCatalog:.models.followsCatalog, served:(.models.served|length)}'";
+    const cleanCurl=![".curlrc",".config/curlrc"].some(name=>existsSync(join(homedir(),name)))&&!process.env.CURL_HOME&&!process.env.XDG_CONFIG_HOME;
+    if(cleanCurl)assert.equal(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command,cwd:root},projectPath:root,permissionProfile:"workspace-write"}).verdict,"auto");
+    assert.equal(assessDiagnosticCommand(command.replace("served:(.models.served|length)","served:.models"),root,root),null);
+    assert.equal(assessDiagnosticCommand(command.replace("-p NRestarts","-p Environment"),root,root),null);
+    assert.equal(assessDiagnosticCommand(command.replace("8787/health","8787/api/status"),root,root),null);
+  }finally{rmSync(base,{recursive:true,force:true});}
+});
