@@ -7,7 +7,7 @@
  */
 import { isAbsolute, relative, resolve } from "node:path";
 import { lstatSync, realpathSync } from "node:fs";
-import { assessAuthorizedGitWorkflow, isGitWorkflowInspection, nativeGitCommandMatches, type GitRoundAuthority } from "./git-workflow-policy.js";
+import { assessAuthorizedGitWorkflow, isGitWorkflowInspection, isContextualGitInspection, nativeGitCommandMatches, type GitRoundAuthority } from "./git-workflow-policy.js";
 
 export type AuditorVerdict = "auto" | "human" | "block";
 export interface AuditorAssessment {
@@ -81,8 +81,8 @@ function isSafeShell(command: string): boolean {
   // The common OpenCode shell renderer uses echo to display a test's native
   // exit status and other fixed separators. Interpolation is allowed ONLY for
   // the exact shell status variables, never arbitrary command expansion.
-  if (/^echo "(?:=== [A-Z][A-Z0-9 _()-]{0,40} ===|check-ok|exit=\$\?)"$/.test(value)) return true;
-  if (/^echo (?:'---[A-Za-z0-9 _()-]{0,40}---'|"---[A-Za-z0-9 _()-]{0,40}---"|'---'|"---"|"(?:CHECK_EXIT|EXIT|EXIT_CODE|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT|CACHED_EXIT|EXIT_DIFF|EXIT_CACHED)=\$\?"|"(?:CHECK_EXIT|EXIT|EXIT_CODE|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT)=\$\{PIPESTATUS\[0\]\}")$/.test(value)) {
+  if (/^echo "(?:=== [A-Z][A-Z0-9 _()-]{0,40} ===|check-ok|exit(?:_ref|_heads)?=\$\?)"$/.test(value)) return true;
+  if (/^echo (?:'---[A-Za-z0-9 _()/\-]{0,40}---'|"---[A-Za-z0-9 _()/\-]{0,40}---"|'---'|"---"|"(?:CHECK_EXIT|EXIT|EXIT_CODE|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT|CACHED_EXIT|EXIT_DIFF|EXIT_CACHED)=\$\?"|"(?:CHECK_EXIT|EXIT|EXIT_CODE|UNIT_EXIT|TEST_EXIT|SMOKE_EXIT)=\$\{PIPESTATUS\[0\]\}")$/.test(value)) {
     return true;
   }
   if (/[\$\\*?]/.test(value)) return false;
@@ -92,7 +92,7 @@ function isSafeShell(command: string): boolean {
   // Keep option names separate from path arguments so flags such as --ext-diff,
   // --no-index and --output cannot be admitted as arbitrary path strings.
   if (/^git status(?:\s+(?:-sb|-s|-b|--short|--porcelain(?:=v[12])?|--branch|-u(?:all|normal|no)?|--untracked-files(?:=(?:all|normal|no))?))*$/.test(value)) return true;
-  if (/^git (?:branch --show-current|rev-parse (?:HEAD|--show-toplevel|--is-inside-work-tree|--abbrev-ref HEAD|origin\/master)|log (?:-1|-2|-3|-5)(?: --oneline)?|log --oneline -[1235]|log origin\/master -1 --format='%H %s')$/.test(value)) return true;
+  if (/^git (?:branch --show-current|rev-parse (?:HEAD|--show-toplevel|--is-inside-work-tree|--abbrev-ref HEAD|origin\/master)|log -(?:[1-9]|1\d|20)(?: --oneline)?|log --oneline -(?:[1-9]|1\d|20)|log origin\/master -1 --format='%H %s')$/.test(value)) return true;
   if (/^git log -[1235] --format='%H %s'$/.test(value)) return true;
   if (/^git show (?:(?:--stat |--name-only --format="" )[0-9a-f]{7,40}|[0-9a-f]{7,40} (?:--stat|--name-only --format="")|--stat --format='%H%n%an%n%s' [0-9a-f]{7,40})$/.test(value)) return true;
   if (value === "git diff" || value.startsWith("git diff ")) {
@@ -113,27 +113,42 @@ function isSafeShell(command: string): boolean {
   return false;
 }
 
-// Claude reports a whole Bash invocation rather than OpenCode's segments.
-// Only permit a literal cd to the selected project followed by a short AND
-// chain of already recognized Git inspections and fixed output separators.
-function isSafeGitInspectionSegment(segment: string): boolean {
+// Claude submits the complete Bash invocation, while OpenCode often
+// submits concrete segments. Use the same inspection classifier for both.
+// Each segment is a closed grammar, never a generic shell allow-list.
+function isSafeGitInspectionSegment(segment: string, root: string, contextual: boolean): boolean {
   if (segment.startsWith("echo ")) return isSafeShell(segment);
-  if (!segment.startsWith("git ")) return false;
-  const bounded = /^(git .+) \| head -(?:n )?(?:[1-9]\d?|100)$/.exec(segment);
-  return bounded ? isSafeShell(bounded[1]!) : isSafeShell(segment);
+  let body = segment;
+  const bounded = /^(git .+) \| head -(?:n )?(?:[1-9]\d?|100)$/.exec(body);
+  if (bounded) body = bounded[1]!;
+  body = body.replace(/ 2>&1$/, "");
+  const timed = /^timeout (?:[1-9]|[1-9]\d|1[01]\d|120) (git ls-remote .+)$/.exec(body);
+  if (timed) body = timed[1]!;
+  if (!body.startsWith("git ") && body !== "type -a git") return false;
+  if (isContextualGitInspection(body) && !contextual) return false;
+  return isSafeShell(body) || isGitWorkflowInspection(body, root);
 }
 
-function isSafeGitInspectionChain(command: string, projectPath: string): boolean {
-  if (!isAbsolute(projectPath) || command.length > 1200 ||
-      /[\r\n\x00-\x1f;<>$\x60\\]/.test(command)) return false;
-  const parts = command.trim().split(" && ");
-  if (parts.length > 12) return false;
+function isSafeGitInspectionChain(command: string, projectPath: string, cwd?: string): boolean {
+  if (!isAbsolute(projectPath) || command.length > 2400 ||
+      /[\r\n\x00-\x1f\x60]/.test(command)) return false;
+  const parts = command.trim().split(/ && |; /);
+  if (parts.length > 20) return false;
+  let explicitRoot = false;
   if (parts[0]?.startsWith("cd ")) {
     if (/["'&|;<>$\x60\\]/.test(projectPath)) return false;
-    if (parts.shift() !== 'cd "' + projectPath + '"') return false;
+    if (parts.shift() !== 'cd "' + projectPath + '"' ||
+        !command.trim().startsWith('cd "' + projectPath + '" && ')) return false;
+    explicitRoot = true;
   }
-  return parts.some((part) => part.startsWith("git ")) &&
-    parts.every(isSafeGitInspectionSegment);
+  // A semicolon after a failed cd could execute in the previous directory.
+  // Therefore it requires independently verified current cwd at the root.
+  const hasSemicolon = command.includes("; ");
+  const rootCwd = cwd === projectPath;
+  if (explicitRoot && hasSemicolon && !rootCwd) return false;
+  const contextual = rootCwd || (explicitRoot && !hasSemicolon);
+  return parts.some(part => /^(?:git |timeout \d+ git )/.test(part)) &&
+    parts.every(part => isSafeGitInspectionSegment(part, projectPath, contextual));
 }
 
 /** Explicitly disabling the engine's sandbox is never an ordinary grant.
@@ -155,7 +170,9 @@ function isSafeGradleVerification(command: string, projectPath: string): boolean
     if (/["'&;$|<>\x60\\]/.test(projectPath) || !body.startsWith(prefix)) return false;
     body = body.slice(prefix.length);
   }
-  const pipeline = / 2>&1 \| tail -(?:[1-9]\d?|100); echo "EXIT_CODE=\$\{PIPESTATUS\[0\]\}"$/;
+  // Tail is bounded; without PIPESTATUS the displayed shell exit is not
+  // evidence of Gradle success. The runtime logs that limitation.
+  const pipeline = / 2>&1 \| tail -(?:n )?(?:[1-9]\d?|100)(?:; echo "(?:EXIT_CODE|exit|TEST_EXIT)=\$\{PIPESTATUS\[0\]\}")?$/;
   body = body.replace(pipeline, "").replace(/ 2>&1$/, "");
   if (!/^\.\/gradlew (?:test|build|check|(?::[A-Za-z0-9_-]+)+:test)(?: (?:(?::[A-Za-z0-9_-]+)+:test|--console=plain|--rerun-tasks|--offline|--no-daemon)){0,12}$/.test(body)) return false;
   try {
@@ -225,6 +242,9 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
     return { verdict: "block", category: "high-risk",
       reason: "Operación de terminación/destrucción o control de servicio: no hay prueba de que el proceso pertenezca al agente. El Auditor la bloqueó." };
   }
+  if (shell !== null && /^git config (?:--global|--system)(?: |$)/.test(shell.trim())) {
+    return { verdict: "block", category: "high-risk", reason: "Configuración Git global o del sistema: puede exponer credenciales. Usa consultas acotadas del proyecto." };
+  }
   if (requestsSandboxBypass(input)) {
     return { verdict: "block", category: "high-risk",
       reason: "La solicitud intenta desactivar el sandbox. Repite la operación sin dangerouslyDisableSandbox; el Auditor no autoriza esta excepción." };
@@ -239,10 +259,13 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
         !isWithinProject(workdir, request.projectPath))) {
       return { verdict: "human", category: "high-risk", reason: "El comando solicita trabajar fuera del proyecto." };
     }
+    if (input.env !== undefined || input.environment !== undefined) return { verdict: "human", category: "high-risk", reason: "El comando solicita alterar el entorno de ejecución." };
     const gradle = (workdir === undefined || resolve(request.projectPath, String(workdir)) === request.projectPath) && isSafeGradleVerification(shell, request.projectPath);
-    if (gradle || isSafeShell(shell) || isSafeGitInspectionChain(shell, request.projectPath) || (shell.trim() !== "git remote -v" && isGitWorkflowInspection(shell.trim(), request.projectPath))) {
+    if (gradle || isSafeShell(shell) || isSafeGitInspectionChain(shell, request.projectPath, typeof workdir === "string" ? resolve(request.projectPath, workdir) : undefined) || (isGitWorkflowInspection(shell.trim(), request.projectPath) && (!isContextualGitInspection(shell.trim()) || (workdir !== undefined && resolve(request.projectPath, String(workdir)) === request.projectPath && input.env === undefined && input.environment === undefined)))) {
       return { verdict: "auto", category: gradle || /npm run|smoke-test/.test(shell) ? "test" : "inspection",
-        reason: "Comando exacto de comprobación autorizado por lista conservadora." };
+        reason: gradle && /\| tail /.test(shell) && !shell.includes("PIPESTATUS[0]")
+          ? "Verificación Gradle con salida acotada; el código de salida del filtro no acredita éxito de Gradle. Contrasta JUnit y BUILD SUCCESSFUL/FAILED."
+          : "Comando exacto de comprobación autorizado por lista conservadora." };
     }
     return { verdict: "human", category: "unknown",
       reason: "Comando shell no incluido en la lista segura; requiere valoración humana." };
@@ -291,14 +314,18 @@ export function assessOpenCodePermission(
     if (workdir !== undefined && (typeof workdir !== "string" || !isWithinProject(workdir, projectPath))) {
       return { verdict: "human", category: "high-risk", reason: "El comando solicita trabajar fuera del proyecto." };
     }
-    const remoteInspection = resources.includes("git remote -v");
+    if (resources.some(resource => /^git config (?:--global|--system)(?: |$)/.test(resource))) {
+      return { verdict: "block", category: "high-risk", reason: "Configuración Git global o del sistema: puede exponer credenciales. Usa consultas acotadas del proyecto." };
+    }
+    const remoteInspection = resources.some(resource => /(?:^| && |; |timeout \d+ )git (?:config|remote|ls-remote|fetch)(?: |$)/.test(resource));
     if (remoteInspection && (!nativeInput || nativeInput.workdir !== projectPath ||
+        (nativeInput.cwd !== undefined && nativeInput.cwd !== projectPath) || nativeInput.env !== undefined || nativeInput.environment !== undefined ||
         typeof nativeInput.command !== "string" || !nativeGitCommandMatches(nativeInput.command, resources))) {
-      return { verdict: "human", category: "unknown", reason: "La consulta de remoto exige verificar el comando nativo y la raíz real del proyecto." };
+      return { verdict: "human", category: "unknown", reason: "La consulta de configuración o remoto exige verificar el comando nativo y la raíz real del proyecto." };
     }
     const gradle = (workdir === undefined || resolve(projectPath, String(workdir)) === projectPath)
       && resources.some((resource) => isSafeGradleVerification(resource, projectPath));
-    if (permissionProfile === "workspace-write" && resources.every((resource) => isSafeShell(resource) || isSafeGitInspectionChain(resource, projectPath) || isGitWorkflowInspection(resource, projectPath) ||
+    if (permissionProfile === "workspace-write" && resources.every((resource) => isSafeShell(resource) || isSafeGitInspectionChain(resource, projectPath, remoteInspection ? projectPath : undefined) || isGitWorkflowInspection(resource, projectPath) ||
         (gradle && isSafeGradleVerification(resource, projectPath)))) {
       return { verdict: "auto", category: gradle || resources.some((r) => /npm run|smoke-test/.test(r)) ? "test" : "inspection",
         reason: "Todos los segmentos concretos del shell coinciden con comandos de lectura/pruebas autorizados." };

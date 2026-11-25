@@ -103,3 +103,17 @@ organización repetido en su ruta; no se habilitan otros usuarios ni
 contraseñas incrustadas. Se añadieron pruebas de negación de autorización,
 rutas, índice, refspecs, destinos, coincidencia nativa y redacción de URLs.
 No se concedieron comodines persistentes.
+
+### Ronda 4 — diagnóstico y verificación de ambos motores
+
+Se reprodujeron 24 decisiones de OpenCode Tester con sus mensajes nativos:
+22 compatibles con autoaprobación y dos consultas sensibles de configuración
+global/sistema excluidas. Las lecturas contextuales comprueban los valores
+efectivos sin mostrarlos en el registro de validación.
+Las seis solicitudes de Bash de Revisor y Árbitro se incorporaron como
+regresiones: cadenas de Git, metadatos de commits, reflog, ahead/behind,
+ls-remote con timeout, fetch --dry-run y dos formas de verificación Gradle.
+Se utiliza el cwd informado por el hook SDK para la evaluación de Bash.
+Los pipelines Gradle sin PIPESTATUS reciben una limitación explícita sobre
+la evidencia de salida. Las reproducciones evalúan permisos; no ejecutan
+los comandos remotos ni vuelven a ejecutar los agentes.

@@ -29,7 +29,7 @@ import { retryOpenCodeRead } from "./opencode-request-retry.js";
 import { buildOpenCodeChildPath } from "./opencode-environment.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
 import { assessAuditorTool, assessOpenCodePermission, isProtectedShellCommand, requestsSandboxBypass } from "./auditor-policy.js";
-import { findNativeGitToolInput } from "./git-workflow-policy.js";
+import { findNativeGitToolInput, isContextualGitInspection } from "./git-workflow-policy.js";
 import { inspectAuditorShellReceipts, appendAuditorOperationalFindings } from "./auditor-operations.js";
 import {
   buildExecutionSummary, formatRoundSummaryMessage, createHandoffDescriptor, createHandoffId, extractCanonicalOpenCodeAssistantText,
@@ -528,7 +528,7 @@ async function pollOpenCodeAgent(
     // first. Fetch once more for the exact Git tool evidence before falling
     // back to human review. Never infer a command from an agent's prose.
     if (!nativeInput && Array.isArray(request.resources) &&
-        request.resources.some(resource => /^git (?:add |commit |push(?: |$)|remote -v$)/.test(resource))) {
+        request.resources.some(resource => typeof resource === "string" && (isContextualGitInspection(resource) || /^git (?:add |commit |push(?: |$))/.test(resource)))) {
       const refreshedMessages = await openCodeRequest<unknown>(runtime, "GET",
         "/api/session/" + encodeURIComponent(sessionId) + "/message", undefined, 3000).catch(() => null);
       nativeInput = findNativeGitToolInput(refreshedMessages, request);
@@ -786,12 +786,12 @@ function makeAgentPrompt(
     "INSTRUCCIÓN ESPECÍFICA DEL ORQUESTADOR:",
     roleOverrides[agent.agentId] ?? "Cumple exclusivamente tu función como especialista.",
     "Responde en español, con evidencia y límites explícitos. No crees subagentes ni delegues.",
-    "VERIFICACIÓN: usa el wrapper ./gradlew test, build o check con --console=plain y --rerun-tasks cuando corresponda, desde la raíz del proyecto, sin exportar variables si el entorno ya está configurado. Para contar resultados JUnit usa el MCP factory_filesystem summarize_junit con la lista de módulos relativos (incluye . si procede); no ejecutes Python, JShell ni pipelines ls/sed para contar informes. Distingue informes existentes de pruebas recién ejecutadas.",
+    "VERIFICACIÓN: usa el wrapper ./gradlew test, build o check con --console=plain y --rerun-tasks cuando corresponda, desde la raíz del proyecto, sin exportar variables si el entorno ya está configurado. Para contar resultados JUnit usa el MCP factory_filesystem summarize_junit con la lista de módulos relativos (incluye . si procede); no ejecutes Python, JShell ni pipelines ls/sed para contar informes. Distingue informes existentes de pruebas recién ejecutadas. Si limitas la salida Gradle con tail, usa inmediatamente echo \"EXIT_CODE=${PIPESTATUS[0]}\" y verifica los informes JUnit; sin ese dato no declares éxito por el código del filtro.",
     "",
     "PROTOCOLO DE ENTREGA:",
     "PRIMERA LÍNEA CANÓNICA: escribe exactamente " + handoffId + " (sin #, prefijos, espacios ni texto previo). Después indica agente, motor, modelo, INBOUND con los IDs exactos recibidos (" + expectedInbound + "), herramientas, hallazgos, discrepancias y recomendaciones.",
     "Después del identificador incluye secciones Markdown ## RESUMEN EJECUTIVO, ## HALLAZGOS CLAVE, ## VERIFICACIONES EJECUTADAS y ## PRÓXIMOS PASOS. En el resumen responde directamente al objetivo de esta ronda: qué se hizo, qué no se hizo, qué cambió realmente y qué queda pendiente. Si solo analizaste, dilo. No confundas pruebas verdes de un contrato anterior con cumplimiento del nuevo requisito.",
-    "Para Git usa git add con rutas individuales, git commit -m con mensaje literal o heredoc EOF citado y git push sin opciones solo si el usuario lo solicita expresamente; no uses git add . ni cambies de destino. No incluyas frases de progreso antes de la primera línea de la respuesta final. No solicites dangerouslyDisableSandbox; usa el entorno permitido. No inventes handoffs. Usa solamente los IDs enumerados aquí. No declares ausentes agentes basándote solo en informes anteriores: los registros de ejecución son la fuente de verdad.",
+    "Para verificar Git usa consultas de metadatos acotadas del proyecto (status, rev-parse, show --stat, ls-remote de origin). No consultes configuraciones --global/--system, credenciales ni reglas URL generales; si el remoto no confirma la rama, informa la discrepancia con la evidencia disponible en vez de repetir consultas equivalentes. Para Git usa git add con rutas individuales, git commit -m con mensaje literal o heredoc EOF citado y git push sin opciones solo si el usuario lo solicita expresamente; no uses git add . ni cambies de destino. No incluyas frases de progreso antes de la primera línea de la respuesta final. No solicites dangerouslyDisableSandbox; usa el entorno permitido. No inventes handoffs. Usa solamente los IDs enumerados aquí. No declares ausentes agentes basándote solo en informes anteriores: los registros de ejecución son la fuente de verdad.",
     "Los metadatos de integridad calculados por el orquestador son autoritativos y prevalecen sobre cualquier frase del informe. Si idAuthor=ORQUESTADOR, no afirmes que el agente original emitió el ID. Si Truncado=SÍ, trata el contenido como incompleto y enumera qué no puedes verificar.",
     "",
     previous ? "HANDOFFS Y RESULTADOS DE FASES PREVIAS:" + nl + previous : "No hay handoffs previos. Trabaja independientemente dentro de esta ola."
@@ -857,6 +857,8 @@ async function runClaudeAgent(
   let sessionId: string | null = null;
   let finalText = "";
   let resultFailure: string | null = null;
+  // Bind the actual SDK hook cwd to this exact Bash request.
+  const bashContexts = new Map<string, { command: string; cwd: string }>();
   addLog(state.runId, agent.agentId.toUpperCase(), "info", `Iniciando Claude Code con modelo ${agent.modelId}.`, agent.id);
 
   const localClaudeConfig = await readClaudeLocalConfig().catch(() => null);
@@ -922,6 +924,13 @@ async function runClaudeAgent(
               }
             });
 
+            if (toolName === "Bash" && typeof toolInput.command === "string") {
+              if (bashContexts.size >= 128) {
+                const oldest = bashContexts.keys().next().value;
+                if (oldest !== undefined) bashContexts.delete(oldest);
+              }
+              bashContexts.set(hookInput.tool_use_id, { command: toolInput.command, cwd: hookInput.cwd });
+            }
             if (toolName === "Bash" && requestsSandboxBypass(toolInput)) {
               addLog(state.runId, "AUDITOR", "warning",
                 "Bloqueo de aislamiento: " + agent.agentId + " solicitó desactivar el sandbox; debe repetir sin esa opción.", agent.id);
@@ -999,8 +1008,14 @@ async function runClaudeAgent(
           if (allowed) return { behavior: "allow", toolUseID: options.toolUseID };
         }
         const isQuestion = toolName === "AskUserQuestion";
+        const bashContext = toolName === "Bash" ? bashContexts.get(options.toolUseID) : undefined;
+        if (toolName === "Bash") bashContexts.delete(options.toolUseID);
+        const auditInput = toolName !== "Bash" ? input :
+          bashContext && bashContext.command === input.command
+            ? { ...input, workdir: bashContext.cwd, cwd: bashContext.cwd }
+            : { ...input, workdir: undefined, cwd: undefined };
         const auditorDecision = !isQuestion ? assessAuditorTool({
-          engine: "claude", toolName, input, projectPath, permissionProfile: agent.permissionProfile
+          engine: "claude", toolName, input: auditInput, projectPath, permissionProfile: agent.permissionProfile
         }) : null;
         if (auditorDecision?.verdict === "auto") {
           addLog(state.runId, "AUDITOR", "success",

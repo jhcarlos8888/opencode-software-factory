@@ -292,3 +292,24 @@ Las inspecciones y operaciones Git siguen sujetas a los perfiles existentes;
 las verificaciones no constituyen un escáner exhaustivo de secretos ni un
 sandbox para hooks, filtros o credenciales Git. Si falta evidencia o la
 configuración no coincide, se solicita autorización humana.
+
+### Inspecciones Git de QA y Claude Code
+
+El Auditor reconoce metadatos acotados del repositorio, referencias remotas,
+estado de seguimiento, reflog de origin, conteo ahead/behind, rutas individuales
+y formatos de resumen de commit. Las lecturas de configuración de ramas,
+push.default y origin verifican los valores efectivos antes de autorizar.
+La consulta de reglas URL solo se admite cuando no hay reglas configuradas.
+Las consultas de configuración global o del sistema no se autoaprueban.
+Las operaciones de red de lectura y fetch --dry-run requieren un origin HTTPS
+validado, sin reglas de reescritura, credenciales incrustadas ni helpers de
+transporte personalizados; dry-run no permite recursión de submódulos.
+OpenCode verifica el comando nativo de estas consultas. Claude vincula el
+directorio de trabajo comunicado por PreToolUse al identificador del uso de
+Bash y valida todos los segmentos de una cadena, incluidos separadores fijos,
+timeout acotado de ls-remote, redirección 2>&1 y head acotado.
+No se amplían perfiles read-only o approval-required ni se conceden comodines.
+Gradle admite tail acotado; sin PIPESTATUS[0] se registra que el exit del
+filtro no prueba el resultado de Gradle. Se deben contrastar salida e informes
+JUnit. No se autorizan scripts arbitrarios, cambios de remoto o publicaciones
+sin la autorización expresa requerida por la política Git.

@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtempSync, realpathSync, writeFileSync, rmSync, symlinkSync, mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { assessOpenCodePermission } from "./auditor-policy.js";
+import { assessOpenCodePermission, assessAuditorTool } from "./auditor-policy.js";
 import { gitRoundAuthorization, findNativeGitToolInput, nativeGitCommandMatches } from "./git-workflow-policy.js";
 
 const authority = { agentId: "implementer", instructions: "Por favor hagamos commit y push de los cambios que se han hecho en el proyecto autogestion" };
@@ -115,4 +115,119 @@ test("Native tool source must identify the matching message and call; no omitted
   assert.equal(findNativeGitToolInput(messages,{source:{type:"tool",messageID:"m1",id:"call2"}}),null);
   assert.equal(nativeGitCommandMatches("git push; git status",["git push","git status"]),true);
   for(const bad of ["git push & git status","git push | git status","git push; other; git status","git push; git status; touch x"]) assert.equal(nativeGitCommandMatches(bad,["git push","git status"]),false);
+});
+
+test("Tester observed Git metadata variants pass only with safe effective configuration and native evidence",()=>{
+  const f=fixture();
+  try {
+    // No network operation is executed by the permission evaluator.
+    const commands=[
+      "git config --get-regexp '^branch\\.'",
+      "git config --get push.default",
+      "git ls-files .DS_Store",
+      "git show --stat --format=fuller HEAD",
+      "git rev-parse HEAD origin/juanHerrera#RefactorCode",
+      "git ls-remote origin 'refs/heads/juanHerrera#RefactorCode'",
+      "git ls-remote --heads origin",
+      "git config --get-regexp '^remote\\.origin\\.'",
+      "git for-each-ref refs/remotes/origin --format='%(refname) %(objectname:short) %(committerdate:iso)'",
+      "git reflog show 'origin/juanHerrera#RefactorCode' --date=iso",
+      "git config --show-origin --get-regexp '^url\\.'",
+      "git ls-remote origin 'refs/heads/*Herrera*'",
+      "git ls-remote --heads origin --verbose",
+      "git ls-remote origin refs/heads/main",
+      "git fetch --dry-run origin 'refs/heads/juanHerrera#RefactorCode'",
+      "git remote get-url --push origin",
+      "git ls-remote origin",
+      "git show --name-status --format='%H%n%P%n%s' HEAD",
+      "git rev-parse --abbrev-ref '@{u}'",
+      "type -a git",
+      "git --exec-path"
+    ];
+    const decide=(command:string, profile:"workspace-write"|"read-only"|"approval-required"="workspace-write",input:Record<string,unknown>|null={command,workdir:f.root}) =>
+      assessOpenCodePermission({action:"shell",resources:[command],save:["git *"]},f.root,profile,undefined,input);
+    for(const command of commands){
+      assert.equal(decide(command).verdict,"auto",command);
+      assert.notEqual(decide(command,"read-only").verdict,"auto",command);
+      assert.notEqual(decide(command,"approval-required").verdict,"auto",command);
+    }
+    for(const command of ["git config --global --get-regexp '^(http|https|credential|url|push)\\.'","git config --system --list",
+      "git config --list","git config --get credential.helper","git config --get http.extraHeader","git config --get-regexp '.*'",
+      "git config --get-regexp '^http\\.'","git config push.default matching",
+      "git ls-files .env","git ls-files ../other","git ls-files --stage --debug",
+      "git ls-remote https://other.invalid/repo","git ls-remote --upload-pack=sh origin",
+      "git ls-remote origin 'refs/heads/*;evil*'","git ls-remote origin refs/heads/*",
+      "git fetch origin","git fetch --dry-run other refs/heads/main","git fetch --dry-run origin 'refs/heads/main:refs/heads/main'",
+      "git fetch --dry-run --prune origin refs/heads/main","git reflog expire --all",
+      "git for-each-ref --shell --format='%(refname)'","type -a git; pwd","git --exec-path=/tmp"]) {
+      assert.notEqual(decide(command).verdict,"auto",command);
+    }
+    for(const command of ["git config --get push.default","git ls-remote origin","git remote get-url --push origin"]) {
+      assert.notEqual(decide(command,"workspace-write",null).verdict,"auto");
+      assert.notEqual(decide(command,"workspace-write",{command,workdir:"/tmp"}).verdict,"auto");
+      assert.notEqual(decide(command,"workspace-write",{command:command+"; pwd",workdir:f.root}).verdict,"auto");
+      assert.notEqual(decide(command,"workspace-write",{command,workdir:f.root,env:{GIT_CONFIG_COUNT:"1"}}).verdict,"auto");
+    }
+    f.git("config","branch.juanHerrera#RefactorCode.description","a potentially sensitive description");
+    assert.notEqual(decide(commands[0]!).verdict,"auto");
+    f.git("config","--unset","branch.juanHerrera#RefactorCode.description");
+    f.git("config","remote.origin.pushurl","https://token:secret@github.com/example/repo.git");
+    assert.notEqual(decide("git remote get-url --push origin").verdict,"auto");
+    assert.notEqual(decide("git config --get-regexp '^remote\\.origin\\.'").verdict,"auto");
+    f.git("config","--unset","remote.origin.pushurl");
+    f.git("config","remote.origin.uploadpack","unsafe-helper");
+    assert.notEqual(decide("git ls-remote origin").verdict,"auto");
+    f.git("config","--unset","remote.origin.uploadpack");
+    f.git("config","url.https://other.invalid/.insteadOf","https://github.com/");
+    assert.notEqual(decide("git config --show-origin --get-regexp '^url\\.'").verdict,"auto");
+    assert.notEqual(decide("git ls-remote origin").verdict,"auto");
+    f.git("config","--unset","url.https://other.invalid/.insteadOf");
+    f.git("config","fetch.recurseSubmodules","true");
+    assert.notEqual(decide("git fetch --dry-run origin refs/heads/main").verdict,"auto");
+    assert.equal(decide("git ls-remote origin").verdict,"auto");
+  }finally{f.close();}
+});
+
+test("Claude reviewer and arbiter exact round-four Git and Gradle recipes are recognized",()=>{
+  const f=fixture();
+  try {
+    writeFileSync(join(f.root,"gradlew"),"#!/bin/sh\n",{mode:0o755});
+    const cd='cd "'+f.root+'" && ';
+    const commands=[
+      cd+'git rev-parse --abbrev-ref HEAD && echo "---STATUS---" && git status --porcelain=v1 -b && echo "---LOG---" && git log --oneline -4 && echo "---SHOW---" && git show --name-status --format=\'%H%n%P%n%an <%ae>%n%s\' HEAD && echo "---STAT---" && git show --stat --format=\'\' HEAD',
+      cd+'echo "---LS-REMOTE-ALL---" && git ls-remote origin 2>&1; echo "exit=$?"; echo "---FETCH-DRY-RUN-BRANCH---" && git fetch --dry-run origin \'refs/heads/juanHerrera#RefactorCode\' 2>&1; echo "exit=$?"; echo "---REMOTE-URL---" && git remote -v',
+      cd+'./gradlew test --rerun-tasks --console=plain 2>&1 | tail -30',
+      cd+'echo "---FOR-EACH-REF---" && git for-each-ref refs/remotes/origin --format=\'%(refname) %(objectname:short) %(committerdate:iso)\' && echo "---REFLOG-TAIL---" && git reflog show \'origin/juanHerrera#RefactorCode\' --date=iso 2>&1 | head -3 && echo "---AHEAD/BEHIND---" && git rev-list --left-right --count \'origin/juanHerrera#RefactorCode...HEAD\' 2>&1',
+      'git rev-parse --abbrev-ref HEAD; git log --oneline -1; git status --porcelain=v1 -b; echo "--- REMOTE REF ---"; timeout 90 git ls-remote origin \'refs/heads/juanHerrera#RefactorCode\'; echo "exit_ref=$?"; echo "--- REMOTE HEADS ---"; timeout 90 git ls-remote --heads origin; echo "exit_heads=$?"',
+      './gradlew test --rerun-tasks --console=plain 2>&1 | tail -12; echo "exit=${PIPESTATUS[0]}"'
+    ];
+    const decide=(command:string,profile:"workspace-write"|"read-only"|"approval-required"="workspace-write",cwd:string|undefined=f.root)=>
+      assessAuditorTool({engine:"claude",toolName:"Bash",input:{command,cwd},projectPath:f.root,permissionProfile:profile});
+    for(const command of commands){
+      assert.equal(decide(command).verdict,"auto",command);
+      assert.notEqual(decide(command,"read-only").verdict,"auto",command);
+      assert.notEqual(decide(command,"approval-required").verdict,"auto",command);
+      assert.notEqual(decide(command,"workspace-write","/tmp").verdict,"auto",command);
+      assert.notEqual(decide(command+"; git push").verdict,"auto",command);
+    }
+    assert.match(decide(commands[2]!).reason,/no acredita éxito/);
+    assert.equal(decide(commands[5]!).category,"test");
+    for(const command of [
+      'git status; git config --global --list',
+      'git status; git remote get-url --push origin; cat /etc/passwd',
+      'git status && timeout 121 git ls-remote origin',
+      'timeout 90 git fetch origin',
+      'git ls-remote origin | head -3 /etc/passwd',
+      'git rev-list --left-right --count \'origin/main...HEAD\' > /tmp/a',
+      'git show --name-status --format=\'%H%n%P%n%s\' HEAD; echo "$(whoami)"',
+      'git show --stat --format=\'\' HEAD; echo "---AHEAD/BEHIND---"; git clean -fd',
+      './gradlew test 2>&1 | tail -101',
+      './gradlew test 2>&1 | tail -30; echo "exit=$HOME"',
+      './gradlew test 2>&1 | tail -30 /etc/passwd'
+    ])assert.notEqual(decide(command).verdict,"auto",command);
+    assert.notEqual(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command:commands[4]},projectPath:f.root,permissionProfile:"workspace-write"}).verdict,"auto");
+    f.git("config","remote.origin.url","https://token:secret@github.com/example/repo.git");
+    assert.notEqual(decide(commands[1]!).verdict,"auto");
+    assert.notEqual(decide(commands[4]!).verdict,"auto");
+  }finally{f.close();}
 });

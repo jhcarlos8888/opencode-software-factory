@@ -71,11 +71,137 @@ function safeRef(value: string): boolean {
   const plain = value.replace(/"/g, "");
   return remoteRef.test(value) && !plain.includes("..") && !plain.includes("//") && !plain.endsWith("/") && !plain.endsWith(".lock");
 }
+// The diagnostics below expose only bounded Git metadata, not arbitrary
+// configuration. Evaluate the same effective configuration internally and
+// inspect the values without ever logging them.
+function configRead(root: string, args: string[]): string | null {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([k]) => !k.startsWith("GIT_")));
+  const result = spawnSync("git", ["--no-pager", "-C", root, "config", ...args], {
+    encoding: "utf8", timeout: 2500, maxBuffer: 1024 * 1024, env,
+    stdio: ["ignore", "pipe", "pipe"]
+  });
+  if (result.error || result.stderr) return null;
+  if (result.status === 1 && result.stdout === "") return "";
+  return result.status === 0 ? result.stdout : null;
+}
+function configEntries(root: string, pattern: string): [string,string][] | null {
+  const raw = configRead(root, ["-z", "--get-regexp", pattern]);
+  if (raw === null) return null;
+  if (!raw) return [];
+  if (!raw.endsWith("\0")) return null;
+  const entries: [string,string][] = [];
+  for (const row of raw.slice(0,-1).split("\0")) {
+    const newline = row.indexOf("\n");
+    if (newline < 1) return null;
+    entries.push([row.slice(0,newline),row.slice(newline+1)]);
+  }
+  return entries;
+}
+function safeBranch(value: string): boolean {
+  return /^[A-Za-z0-9_][A-Za-z0-9_./#-]{0,150}$/.test(value) &&
+    !value.includes("..") && !value.includes("//") && !value.endsWith("/") &&
+    !value.split("/").some(p => p.startsWith(".") || p.endsWith(".lock"));
+}
+function safeHeadRef(value: string): boolean {
+  return value.startsWith("refs/heads/") && safeBranch(value.slice(11));
+}
+function safeBranchConfig(root: string): boolean {
+  const rows = configEntries(root, "^branch\\.");
+  return rows !== null && rows.every(([key,value]) => {
+    const match = /^branch\.(.+)\.(remote|merge|pushremote|rebase)$/.exec(key);
+    if (!match || !safeBranch(match[1]!)) return false;
+    if (match[2] === "merge") return safeHeadRef(value);
+    if (match[2] === "rebase") return /^(?:true|false|merges|interactive)$/.test(value);
+    return /^(?:\.|[A-Za-z0-9_-]{1,80})$/.test(value);
+  });
+}
+function safeOriginConfig(root: string): boolean {
+  const rows = configEntries(root, "^remote\\.origin\\.");
+  return rows !== null && rows.every(([key,value]) => {
+    if (key === "remote.origin.url" || key === "remote.origin.pushurl") return safeRemoteUrl(value);
+    if (key === "remote.origin.fetch") return /^\+?refs\/heads\/\*:refs\/remotes\/origin\/\*$/.test(value) ||
+      /^\+?refs\/heads\/[A-Za-z0-9_./#-]+:refs\/remotes\/origin\/[A-Za-z0-9_./#-]+$/.test(value);
+    if (key === "remote.origin.mirror" || key === "remote.origin.prune" || key === "remote.origin.prunetags") return /^(?:true|false)$/.test(value);
+    if (key === "remote.origin.tagopt") return /^(?:--tags|--no-tags)$/.test(value);
+    return false;
+  });
+}
+function safeOriginNetwork(root: string): boolean {
+  // Only the existing origin, with a single effective HTTPS destination.
+  // SSH/custom helpers, alternate uploadpack and arbitrary refspecs are not
+  // part of this automatic network grant. Git uses existing authentication.
+  const url = git(root, ["remote","get-url","--all","origin"]);
+  if (!url || !url.startsWith("https://") || !safeRemoteUrl(url)) return false;
+  const rows = configEntries(root, "^remote\\.origin\\.");
+  if (rows === null || !safeOriginConfig(root)) return false;
+  // A configured rewrite may redirect requests; require no rewrite rules.
+  const rewrites = configEntries(root, "^url\\.");
+  return rewrites !== null && rewrites.length === 0;
+}
+function safeLsRemote(command: string): boolean {
+  if (/^git ls-remote (?:--heads )?origin(?: --verbose)?$/.test(command)) return true;
+  const match = /^git ls-remote origin (?:'([^']+)'|([A-Za-z0-9_./#-]+))$/.exec(command);
+  if (!match) return false;
+  const ref = match[1] ?? match[2] ?? "";
+  if (safeHeadRef(ref)) return true;
+  // Quoted ref filtering is passed to Git, never expanded by the shell.
+  return !!match[1] && /^refs\/heads\/\*[A-Za-z0-9_-]{1,80}\*$/.test(ref);
+}
+function safeDryFetch(command: string): boolean {
+  const match = /^git fetch --dry-run origin (?:'([^']+)'|([A-Za-z0-9_./#-]+))$/.exec(command);
+  return !!match && safeHeadRef(match[1] ?? match[2] ?? "");
+}
+/** Context-sensitive reads must be bound to the actual native command and
+ * root; callers cannot infer safety from a provider's proposed save glob. */
+export function isContextualGitInspection(command: string): boolean {
+  return /^(?:git (?:config(?: |$)|remote(?: |$)|ls-remote(?: |$)|fetch(?: |$)))/.test(command);
+}
 export function isGitWorkflowInspection(command: string, root: string): boolean {
-  if (command === "git remote -v") return safeGitRemoteInspection(root);
-  if (command === "git show --stat --format=fuller HEAD") return true;
+  if (command === "git show --stat --format=fuller HEAD" ||
+      command === "git show --name-status --format='%H%n%P%n%s' HEAD" ||
+      command === "git show --name-status --format='%H%n%P%n%an <%ae>%n%s' HEAD" ||
+      command === "git show --stat --format='' HEAD" ||
+      command === "git rev-parse --abbrev-ref '@{u}'" ||
+      command === "git rev-parse --abbrev-ref --symbolic-full-name '@{u}'" ||
+      command === "type -a git" || command === "git --exec-path" ||
+      command === "git for-each-ref refs/remotes/origin --format='%(refname) %(objectname:short) %(committerdate:iso)'") return true;
+  const count = /^git rev-list --left-right --count '(origin\/[^']+)\.\.\.HEAD'$/.exec(command);
+  if (count && safeRef(count[1]!)) return true;
+  const tracked = /^git ls-files (?:-- )?([A-Za-z0-9_./-]+)$/.exec(command);
+  if (tracked && safePath(tracked[1]!)) return true;
+  const reflog = /^git reflog show '([^']+)' --date=iso$/.exec(command);
+  if (reflog && safeRef(reflog[1]!)) return true;
   const ref = /^(?:git log --oneline -[1235] |git rev-parse (?:HEAD )?)(origin\/.+?)(?: 2>\/dev\/null)?$/.exec(command);
-  return !!ref && safeRef(ref[1]!);
+  if (ref && safeRef(ref[1]!)) return true;
+  if (!isContextualGitInspection(command) || !repositoryRoot(root)) return false;
+  if (command === "git remote -v") return safeGitRemoteInspection(root);
+  if (command === "git remote get-url --push origin" || command === "git remote get-url origin") {
+    const url = git(root, ["remote","get-url",...(command.includes("--push")?["--push"]:[]),"origin"]);
+    return !!url && safeRemoteUrl(url);
+  }
+  if (command === "git config --get push.default") {
+    const result = configRead(root, ["--get","push.default"]);
+    return result !== null && /^(?:|nothing|current|upstream|simple|matching)\n?$/.test(result);
+  }
+  if (command === "git config --get-regexp '^branch\\.'") return safeBranchConfig(root);
+  if (command === "git config --get-regexp '^remote\\.origin\\.'") return safeOriginConfig(root);
+  if (command === "git config --show-origin --get-regexp '^url\\.'") {
+    const rows = configEntries(root, "^url\\.");
+    // Empty output is harmless. Nonempty rewrites may embed tokens in keys
+    // or values, and disclose external config paths. Never auto-return them.
+    return rows !== null && rows.length === 0;
+  }
+  if (safeLsRemote(command)) return safeOriginNetwork(root);
+  if (safeDryFetch(command)) {
+    if (!safeOriginNetwork(root)) return false;
+    // A dry run must not contact additional submodule remotes.
+    for (const key of ["fetch.recurseSubmodules", "submodule.recurse"]) {
+      const value = configRead(root, ["--get-all",key]);
+      if (value === null || !/^(?:|false\n?|no\n?)$/.test(value)) return false;
+    }
+    return true;
+  }
+  return false;
 }
 
 function stagePaths(command: string): string[] | null {
