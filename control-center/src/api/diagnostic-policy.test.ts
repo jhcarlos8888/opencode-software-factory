@@ -486,3 +486,19 @@ test("Uninstall marker counts never print configuration values or inspect auth s
     assert.notEqual(check(command),"auto");
   }finally{if(previous===undefined)delete process.env.HOME;else process.env.HOME=previous;rmSync(base,{recursive:true,force:true});}
 });
+
+test("Post-uninstall counts do not grant general service or process enumeration",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-post-uninstall-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    writeFileSync(join(root,"package.json"),JSON.stringify({name:"zen-proxy"}));
+    writeFileSync(join(root,"zen-proxy.json"),JSON.stringify({host:"127.0.0.1",port:8787,upstream:"https://opencode.ai/inference/openai/v1"}));
+    const cmds=["systemctl --user list-unit-files 2>/dev/null | grep -c zen-proxy","ps -C bun -o pid= 2>/dev/null | wc -l","ss -ltnp 2>/dev/null | grep -c ':8787'"];
+    for(const cmd of cmds){
+      assert.deepEqual(assessDiagnosticCommand(cmd,root,root)?.resources,cmd.split(" | "));
+      assert.equal(assessOpenCodePermission({permission:"shell",resources:cmd.split(" | ")},root,"workspace-write",{agentId:"tester",instructions:"Verificar desinstalación"},{command:cmd,workdir:root}).verdict,"auto");
+    }
+    for(const bad of [cmds[0]!.replace("grep -c zen-proxy","cat"),cmds[1]!.replace("pid=","args="),cmds[2]!.replace("8787","22"),cmds[0]+"; systemctl --user stop zen-proxy.service"])assert.equal(assessDiagnosticCommand(bad,root,root),null);
+    assert.equal(assessDiagnosticCommand(cmds[0]!,base,base),null);
+  }finally{rmSync(base,{recursive:true,force:true});}
+});

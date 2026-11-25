@@ -405,3 +405,23 @@ A las 09:22: 20 aprobadas, 4 rechazadas, 1 pendiente y una
 autoaprobación registrada aparte. La fábrica sigue saludable.
 opencode.json del repositorio tiene cambios del Implementador;
 no se incluyen en commits de documentación de la auditoría.
+
+### Desinstalación — verificación 09:38
+
+La unidad y el drop-in ya no existen, tampoco el enlace de inicio
+automático ni los tres lanzadores. Las decisiones a1435a37, 5e5f3af0,
+38c121f3 y d3606b36 fueron atendidas desde la interfaz, no por este
+auditor externo. Se concedió puntualmente 5fe1ef0e (validación final,
+sin escrituras); evento 22135, salida 0: not-found/inactive, cero
+coincidencias de puerto, tres comandos no encontrados y JSON válidos
+con LM Studio conservado. Se verificó independientemente OpenCode
+v2.1.4 con salida 0; Claude Code 2.1.327 en el resultado del agente.
+La consulta de metadatos de las tablas de configuración detectó
+cero referencias a Zen Proxy en favoritos, asignaciones y preferencia
+de proveedor Claude. Se rechazó 1075ba22 por escritura temporal fija
+innecesaria, proporcionando dichas evidencias. Nueva regla de
+conteos exactos de unidades, procesos Bun y sockets del puerto
+configurado, sin conceder stop/disable/borrado ni consultas generales.
+La raíz ~/.zen-proxy y el respaldo privado permanecen pendientes de
+limpieza al cierre. Se conserva el cambio de opencode.json del
+Implementador sin incorporarlo al commit de auditoría.
