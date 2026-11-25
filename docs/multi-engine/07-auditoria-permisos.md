@@ -300,3 +300,17 @@ canónico del proyecto. No se exponen args, entorno ni cmdline.
 Se autorizó e7fba951: bucle de existencia de dos unidades de sistema
 y dos archivos del proyecto, sin leer su contenido. Receta exacta
 incorporada; no permite otros servicios ni modificación de /etc.
+
+### Desinstalación — continuación 09:02
+
+Ingeniería inversa completó su handoff y el Implementador recibió
+los tres informes anteriores. Se concedieron puntualmente 00c33588
+(inventario de servicio, lanzadores, drop-in y directorios) y cd78c7bf
+(nombres de nivel superior de Documents, OpenCode y Claude, metadatos
+de archivos de inicio de shell), tras verificar rutas y directorios
+canónicos. No se convierten esos scripts multilínea ni las
+enumeraciones generales del home en permisos permanentes. Se
+incorporan alternativas acotadas: ls -ld/ls -d de rutas absolutas
+exactas del inventario, y el orden alternativo de opciones de ps
+para columnas PID y comm de Bun/Node. Sin lecturas de configuración,
+argumentos completos de procesos, modificación ni eliminación.

@@ -167,10 +167,28 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
         resources.push(part);continue;
       }
     }
+    // Metadata of fixed uninstall targets. Require -d so directories are
+    // not traversed; only absolute literal paths and no glob expansion.
+    if(basename(root).replace(/^\./,"")==="zen-proxy"){
+      const metadata=/^ls -(?:ld|d) ([A-Za-z0-9_./ -]+)(?: 2>&1)?$/.exec(part);
+      if(metadata){
+        const allowed=new Set([
+          ...["zen-proxy","zen-claude","claude-zen"].map(n=>resolve(home,".local/bin",n)),
+          resolve(home,".config/systemd/user/zen-proxy.service"),
+          dropin,resolve(home,".config/systemd/user/default.target.wants/zen-proxy.service"),
+          "/etc/systemd/system/zen-proxy.service",
+          ...directories
+        ]);
+        const paths=metadata[1]!.split(" ");
+        if(paths.length<=10 && paths.every(path=>allowed.has(path))){
+          resources.push(part);continue;
+        }
+      }
+    }
     // PID and executable name only. The PID probe must belong to the
     // selected project and current user; never expose full arguments.
     if(basename(root).replace(/^\./,"")==="zen-proxy"){
-      if(/^ps -o pid=,comm= -C (?:bun|node) 2>\/dev\/null$/.test(part)){
+      if(/^(?:ps -o pid=,comm= -C (?:bun|node)|ps -C (?:bun|node) -o pid=,comm=) 2>\/dev\/null$/.test(part)){
         resources.push(part);continue;
       }
       const pid=/^ps -o pid=,comm= -p ([1-9]\d{0,9}) 2>\/dev\/null$/.exec(part);

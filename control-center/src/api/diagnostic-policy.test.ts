@@ -432,3 +432,25 @@ test("System unit inventory checks only presence of exact uninstall targets",()=
     for(const bad of [cmd.replace("zen-proxy.service","ssh.service"),cmd.replace('echo "existe: $p"','cat "$p"'),cmd+"; cat /etc/passwd"])assert.notEqual(check(bad),"auto");
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("Uninstaller metadata accepts fixed target names and process column aliases only",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-uninstall-meta-alias-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    const home=homedir();
+    const cmd="ls -ld "+join(home,".local/bin/zen-proxy")+" "+join(home,".config/systemd/user/zen-proxy.service")+" /etc/systemd/system/zen-proxy.service 2>&1";
+    const check=(command:string)=>assessAuditorTool({engine:"claude",toolName:"Bash",input:{command,cwd:root},projectPath:root,permissionProfile:"workspace-write"}).verdict;
+    if(/^[A-Za-z0-9_./-]+$/.test(home)){
+      assert.equal(check(cmd),"auto");
+      assert.notEqual(check(cmd.replace("ls -ld","ls -lR")),"auto");
+      assert.notEqual(check(cmd.replace("/etc/systemd/system/zen-proxy.service","/etc/shadow")),"auto");
+      assert.notEqual(check(cmd+"; cat /etc/passwd"),"auto");
+    }
+    for(const tool of ["bun","node"]){
+      const probe="ps -C "+tool+" -o pid=,comm= 2>/dev/null";
+      assert.equal(check(probe),"auto");
+      assert.notEqual(check(probe.replace("comm=","args=")),"auto");
+      assert.notEqual(check(probe.replace("-C "+tool,"-C ssh")),"auto");
+    }
+  }finally{rmSync(base,{recursive:true,force:true});}
+});
