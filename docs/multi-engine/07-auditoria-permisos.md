@@ -266,3 +266,19 @@ de los wrappers exactos y enumerar scripts npm sin ejecutarlos,
 autoriza npm run con un script arbitrario ni lectura de secretos.
 Pruebas negativas cubren rutas externas, symlinks, scripts
 desconocidos y comandos anexados.
+
+### Desinstalación — continuación 08:43
+
+Build completado; Ingeniería inversa inició inventario. Se aprobaron
+tres solicitudes verificadas: bc7bd315 (command -v y readlink de los
+tres lanzadores), 2fea92d2 (estado systemd y puerto 8787) y b30a4253
+(salud, PID, nombres del drop-in y existencia de tres directorios
+externos). Los tres lanzadores resuelven a archivos de ~/.zen-proxy.
+Se añaden recetas de inspección exactas: nombres zen-proxy, zen-claude,
+claude-zen; readlink limitado a ~/.local/bin y esos nombres; filtro
+awk fijo para el puerto local configurado; inventario de nombres del
+drop-in canónico y presencia de ~/.config/opencode, ~/.claude y
+~/Documents. No habilita lecturas de contenido externo, awk arbitrario,
+ejecución de wrappers ni eliminación de servicios o archivos.
+Pruebas positivas y negativas para destinos ajenos, expansión de
+comandos, listado recursivo y comandos anexados.

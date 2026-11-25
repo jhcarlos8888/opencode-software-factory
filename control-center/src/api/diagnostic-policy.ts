@@ -5,6 +5,7 @@ import { spawnSync } from "node:child_process";
 import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
+  if (/^(?:command -v (?:zen-proxy|zen-claude|claude-zen)|readlink -f [A-Za-z0-9_./-]+)(?: 2>&1)?$/.test(command)) return true;
   if (command === "command -v bun" || command === resolve(homedir(),".bun/bin/bun")+" --version 2>/dev/null") return true;
   if (command === resolve(homedir(),".opencode/bin/opencode") + " --version 2>&1" || command === resolve(homedir(),".opencode/bin/opencode") + " --version") return true;
   return /(?:^|; | && )(?:(?:node|npm|bun|git) (?:--version|-v)|ls (?:-l(?:a)?(?: |$)|-d node_modules|\.github\/workflows)|for f in |ss -ltnp|curl (?:-fsSL --max-time |-sS -m |-sS --max-time |-fsS --max-time |-s --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
@@ -115,6 +116,21 @@ function installedTool(path:string):boolean{
 }
 export function assessIndependentDiagnostic(command:string,root:string):Recipe|null{
   if(!canonicalRoot(root)||command.length>1800||/[\r\n\x00-\x1f\x60\\]/.test(command))return null;
+  // Exact uninstaller inventory: names and existence only, no external
+  // configuration contents. A symlinked drop-in directory needs review.
+  const home=homedir();
+  const dropin=resolve(home,".config/systemd/user/zen-proxy.service.d");
+  const directories=[resolve(home,".config/opencode"),resolve(home,".claude"),resolve(home,"Documents")];
+  const tail="echo '--- dropin'; test -d "+dropin+" && ls -1 "+dropin+" || echo 'sin drop-in dir'; echo '--- rutas externas (solo existencia)'; for p in "+directories.join(" ")+'; do test -e "$p" && echo "presente: $p" || echo "ausente: $p"; done';
+  if(basename(root).replace(/^\./,"")==="zen-proxy" && /^[A-Za-z0-9_./-]+$/.test(home) &&
+    command.endsWith("; "+tail)){
+    const prefix=command.slice(0,-tail.length-2);
+    const prior=assessIndependentDiagnostic(prefix,root);
+    if(!prior)return null;
+    try{if(!canonicalRoot(dropin)){lstatSync(dropin);return null;}}
+    catch(e){if((e as NodeJS.ErrnoException).code!=="ENOENT")return null;}
+    return {category:"inspection",resources:[...prior.resources,"echo '--- dropin'","test -d "+dropin,"ls -1 "+dropin,"echo 'sin drop-in dir'","echo '--- rutas externas (solo existencia)'",'test -e "$p"','echo "presente: $p"','echo "ausente: $p"']};
+  }
   const unit=basename(root).replace(/^\./,"")+".service";
   const resources:string[]=[];
   const parts=command.split(/; | && /);
@@ -123,9 +139,18 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
     const plain=part.replace(/ 2>&1$/,"");
     if(/^(?:(?:node|npm|bun) (?:--version|-v)|git --version)$/.test(plain) ||
       plain==="date -u +%Y-%m-%dT%H:%M:%SZ" ||
-      part==="echo" ||
+      part==="echo" || part==="echo '---'" || part==='echo "---"' ||
       /^echo (?:'---[A-Za-z0-9 _()/\-]{0,40}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part)){
       resources.push(part);continue;
+    }
+    // Inspect the three known Zen Proxy launcher names; never execute them.
+    if(basename(root).replace(/^\./,"")==="zen-proxy"){
+      const wrappers=["zen-proxy","zen-claude","claude-zen"];
+      const bin=resolve(homedir(),".local/bin");
+      if(wrappers.some(name=>part==="command -v "+name) ||
+        (/^[A-Za-z0-9_./-]+$/.test(bin) && wrappers.some(name=>plain==="readlink -f "+resolve(bin,name)))){
+        resources.push(part);continue;
+      }
     }
     const bun=resolve(homedir(),".bun/bin/bun");
     if(part==="command -v bun" || part==='command -v bun || echo "bun-no-en-PATH"'){
@@ -148,6 +173,10 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
     const socket=/^(ss -ltnp 2>\/dev\/null) \| (grep ([0-9]{1,5}))$/.exec(part);
     if(socket && Number(socket[3])>0 && Number(socket[3])<=65535 && localProxyPort(root)===Number(socket[3])){
       resources.push(socket[1]!,socket[2]!);continue;
+    }
+    const socketHeader=/^(ss -ltnp 2>\/dev\/null) \| (awk 'NR==1 \|\| \/:([0-9]{1,5})\/')$/.exec(part);
+    if(socketHeader && localProxyPort(root)===Number(socketHeader[3])){
+      resources.push(socketHeader[1]!,socketHeader[2]!);continue;
     }
     // Fixed jq projections: no arbitrary expressions or credential fields.
     const projected=/^(curl (?:-s --max-time|-sS -m) (?:[1-9]|10) http:\/\/127\.0\.0\.1:([0-9]{1,5})\/(health|v1\/models|api\/status)) \| (jq -c '([^']+)')$/.exec(part);

@@ -358,3 +358,42 @@ test("Uninstall build metadata only lists safe script definitions and exact wrap
     assert.equal(assessDiagnosticCommand(cmd,root,root),null);
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("Uninstall launcher inventory and port headers use exact read-only probes",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-uninstall-probes-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    writeFileSync(join(root,"package.json"),JSON.stringify({name:"zen-proxy"}));
+    writeFileSync(join(root,"zen-proxy.json"),JSON.stringify({host:"127.0.0.1",port:8787,upstream:"https://opencode.ai/inference/openai/v1"}));
+    const bin=join(homedir(),".local/bin");
+    const wrappers=["zen-proxy","zen-claude","claude-zen"];
+    const commands=[...wrappers.map(n=>"command -v "+n),...wrappers.map(n=>"readlink -f "+join(bin,n)+" 2>&1")];
+    const command=commands.join("; ");
+    if(/^[A-Za-z0-9_./-]+$/.test(bin))assert.deepEqual(assessDiagnosticCommand(command,root,root)?.resources,commands);
+    const socket="systemctl --user show zen-proxy.service -p LoadState -p ActiveState -p SubState -p UnitFileState -p FragmentPath 2>&1; echo '---'; ss -ltnp 2>/dev/null | awk 'NR==1 || /:8787/'";
+    assert.deepEqual(assessDiagnosticCommand(socket,root,root)?.resources,[socket.split("; ")[0],"echo '---'","ss -ltnp 2>/dev/null","awk 'NR==1 || /:8787/'"]);
+    for(const bad of [command.replace("command -v zen-proxy","command -v ssh"),command.replace(join(bin,"zen-proxy"),"/etc/shadow"),command+"; zen-proxy",socket.replace(":8787",":22"),socket.replace("NR==1","system(\"id\")")])assert.equal(assessDiagnosticCommand(bad,root,root),null,bad);
+    assert.equal(assessDiagnosticCommand(command,base,base),null);
+  }finally{rmSync(base,{recursive:true,force:true});}
+});
+
+test("Uninstall external inventory reports only fixed names and directory presence",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-uninstall-presence-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    writeFileSync(join(root,"package.json"),JSON.stringify({name:"zen-proxy"}));
+    writeFileSync(join(root,"zen-proxy.json"),JSON.stringify({host:"127.0.0.1",port:8787,upstream:"https://opencode.ai/inference/openai/v1"}));
+    const home=homedir(),dir=join(home,".config/systemd/user/zen-proxy.service.d");
+    const cmd="curl -sS -m 5 http://127.0.0.1:8787/health; echo; systemctl --user show zen-proxy.service -p MainPID 2>&1; echo '--- dropin'; test -d "+dir+" && ls -1 "+dir+" || echo 'sin drop-in dir'; echo '--- rutas externas (solo existencia)'; for p in "+join(home,".config/opencode")+" "+join(home,".claude")+" "+join(home,"Documents")+'; do test -e "$p" && echo "presente: $p" || echo "ausente: $p"; done';
+    const expected=["curl -sS -m 5 http://127.0.0.1:8787/health","echo","systemctl --user show zen-proxy.service -p MainPID 2>&1","echo '--- dropin'","test -d "+dir,"ls -1 "+dir,"echo 'sin drop-in dir'","echo '--- rutas externas (solo existencia)'",'test -e "$p"','echo "presente: $p"','echo "ausente: $p"'];
+    const cleanCurl=![".curlrc",".config/curlrc"].some(name=>existsSync(join(home,name)))&&!process.env.CURL_HOME&&!process.env.XDG_CONFIG_HOME;
+    let canonical=true;
+    try{canonical=realpathSync(dir)===dir;}catch{}
+    if(cleanCurl&&canonical&&/^[A-Za-z0-9_./-]+$/.test(home))assert.deepEqual(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command:cmd,cwd:root},projectPath:root,permissionProfile:"workspace-write"}).verdict,"auto");
+    if(cleanCurl&&canonical&&/^[A-Za-z0-9_./-]+$/.test(home)){
+      assert.ok(matchDiagnosticResources(expected,expected));
+      assert.equal(assessOpenCodePermission({permission:"shell",resources:expected},root,"workspace-write",{agentId:"reverse",instructions:"Desinstalar Zen Proxy"},{command:cmd,workdir:root}).verdict,"auto");
+    }
+    for(const bad of [cmd.replace(join(home,"Documents"),"/etc"),cmd.replace('echo "presente: $p"','cat "$p"'),cmd.replace("ls -1 ","ls -R "),cmd+"; cat /etc/passwd"])assert.notEqual(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command:bad,cwd:root},projectPath:root,permissionProfile:"workspace-write"}).verdict,"auto");
+  }finally{rmSync(base,{recursive:true,force:true});}
+});
