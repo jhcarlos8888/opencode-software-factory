@@ -486,3 +486,18 @@ un contrato de capacidades de lectura con raíces explícitas por
 ronda, proyecciones estructuradas y aprobación separada de
 escritura; las operaciones destructivas conservan revisión.
 Verificación integral: 245/245; no se reinicia la fábrica.
+
+### Desinstalación — QA 09:54
+
+Se documentan las consultas de comprobación HTTP 1face7f3, los
+metadatos 83f01a7f y las posteriores verificaciones de QA atendidas
+desde la interfaz. Se añade una receta de bucle de hasta cuatro
+endpoints locales de la fábrica, solo códigos HTTP, sin argumentos
+arbitrarios ni archivos de salida ni configuración curl.
+Evento 22349: un conteo genérico de procesos puede incluir la
+propia consulta; los patrones de ejecutable mjs y ruta exacta
+dieron cero. Evento 22359: ninguna fila de proceso persistente.
+Evento 22352: coincidencias en dependencias node_modules de
+examResolve no acreditan una integración activa; no deben
+eliminarse. La fábrica responde ok y el servicio Zen Proxy sigue
+not-found con MainPID=0 y puerto 8787 sin escucha.

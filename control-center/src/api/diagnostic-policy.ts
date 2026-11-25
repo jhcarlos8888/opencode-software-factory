@@ -132,6 +132,15 @@ function installedTool(path:string):boolean{
 }
 export function assessIndependentDiagnostic(command:string,root:string):Recipe|null{
   if(!canonicalRoot(root)||command.length>1800||/[\r\n\x00-\x1f\x60]/.test(command))return null;
+  // A finite list of local factory endpoints, status codes only.
+  // Reject arbitrary URLs, curl arguments, substitutions and config files.
+  const healthLoop=/^for u in ([A-Za-z0-9:/._ -]+); do (printf '%s -> ' "\$u"); (curl -s -m 5 -o \/dev\/null -w '%\{http_code\}\\n' "\$u"); done$/.exec(command);
+  if(healthLoop){
+    const urls=healthLoop[1]!.split(" ");
+    const allowed=new Set(["http://127.0.0.1:4141/api/health","http://127.0.0.1:4141/health","http://127.0.0.1:4141/api/status","http://127.0.0.1:4173/api/health"]);
+    if(urls.length>4 || !urls.every(url=>allowed.has(url)) || !curlDefaultsAbsent())return null;
+    return {category:"inspection",resources:[healthLoop[2]!,healthLoop[3]!]};
+  }
   // Version probes composed with exit markers: validate both installed
   // executables and the entire command before returning any resources.
   const opencode=resolve(homedir(),".opencode/bin/opencode");

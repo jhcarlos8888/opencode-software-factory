@@ -558,3 +558,25 @@ test("Both engine version probes preserve exit markers without general shell gra
     assert.equal(assessIndependentDiagnostic(command,root),null);
   }finally{if(old===undefined)delete process.env.HOME;else process.env.HOME=old;rmSync(base,{recursive:true,force:true});}
 });
+
+test("Local factory health loop is bounded to literal endpoints and HTTP codes",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-health-loop-")));
+  const previous=process.env.HOME;
+  const curlHome=process.env.CURL_HOME,xdg=process.env.XDG_CONFIG_HOME;
+  try{
+    process.env.HOME=base;delete process.env.CURL_HOME;delete process.env.XDG_CONFIG_HOME;
+    const prefix="for u in http://127.0.0.1:4141/api/health http://127.0.0.1:4173/api/health";
+    const resources=["printf '%s -> ' \"$u\"","curl -s -m 5 -o /dev/null -w '%{http_code}\\n' \"$u\""];
+    const cmd=prefix+"; do "+resources.join("; ")+"; done";
+    assert.deepEqual(assessIndependentDiagnostic(cmd,base)?.resources,resources);
+    assert.equal(assessOpenCodePermission({permission:"shell",resources},base,"workspace-write",{agentId:"tester",instructions:"Verificar fábrica"},{command:cmd,workdir:base}).verdict,"auto");
+    for(const bad of [cmd.replace("127.0.0.1:4173","example.com"),cmd.replace("/api/health","/api/config"),cmd.replace("-o /dev/null","-o result.txt"),cmd+"; env",cmd.replace("http://127.0.0.1:4141/api/health","$(env)")])assert.equal(assessIndependentDiagnostic(bad,base),null);
+    writeFileSync(join(base,".curlrc"),"fixture");
+    assert.equal(assessIndependentDiagnostic(cmd,base),null);
+  }finally{
+    if(previous===undefined)delete process.env.HOME;else process.env.HOME=previous;
+    if(curlHome===undefined)delete process.env.CURL_HOME;else process.env.CURL_HOME=curlHome;
+    if(xdg===undefined)delete process.env.XDG_CONFIG_HOME;else process.env.XDG_CONFIG_HOME=xdg;
+    rmSync(base,{recursive:true,force:true});
+  }
+});
