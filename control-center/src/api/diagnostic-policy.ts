@@ -5,7 +5,8 @@ import { spawnSync } from "node:child_process";
 import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
-  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-la(?: |$)|-d node_modules|\.github\/workflows)|for f in |curl (?:-fsSL --max-time |-sS -m |-fsS --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
+  if (command === resolve(homedir(),".opencode/bin/opencode") + " --version 2>&1" || command === resolve(homedir(),".opencode/bin/opencode") + " --version") return true;
+  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-l(?:a)?(?: |$)|-d node_modules|\.github\/workflows)|for f in |curl (?:-fsSL --max-time |-sS -m |-fsS --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
 }
 function canonicalRoot(root: string): boolean {
   try { return isAbsolute(root) && realpathSync(root) === root && lstatSync(root).isDirectory(); }
@@ -190,7 +191,7 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
     if(/^(?:node|npm|bun|git) --version$/.test(plain)){
       resources.push(part);continue;
     }
-    if(part==="echo" || /^echo (?:'---[A-Za-z0-9 _()/@.\-]{0,60}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part) || part==="echo '---'" || part==='echo "---"'){
+    if(part==='echo "GIT_EXIT=${PIPESTATUS[0]}"' || part==="echo" || /^echo (?:'---[A-Za-z0-9 _()/@.\-]{0,60}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part) || part==="echo '---'" || part==='echo "---"'){
       resources.push(part);continue;
     }
     if(part==="ls -la" || part==="ls -la ." ||
@@ -201,7 +202,7 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
     if(/^git status(?: --porcelain(?:=v1)?)?(?: 2>&1)?$/.test(part)){
       resources.push(part);continue;
     }
-    const status=/^(git status(?: --porcelain(?:=v1)?)?(?: 2>&1)?) \| (head -(?:[1-9]\d?|100))$/.exec(part);
+    const status=/^(git status(?: --porcelain(?:=v1)?| --short)?(?: 2>&1)?) \| (head -(?:[1-9]\d?|100))$/.exec(part);
     if(status){resources.push(status[1]!,status[2]!);continue;}
     const units=/^(systemctl --user list-units --type=service --all 2>&1) \| (grep -i [A-Za-z0-9_-]{1,32}) \| (head(?: -(?:[1-9]\d?|100))?)$/.exec(part);
     if(units){resources.push(units[1]!,units[2]!,units[3]!);continue;}
@@ -229,6 +230,23 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
       }
       resources.push(part);continue;
     }
+    // File metadata only; no content reads, wildcards or symlink targets.
+    const listing=/^ls -l ([A-Za-z0-9_./ -]+)$/.exec(plain);
+    if(listing){
+      const files=listing[1]!.split(" ");
+      const safe=files.length<=20&&files.every(name=>{
+        if(safeSource(root,name))return true;
+        // These exact catalog/config paths are valid for a metadata-only
+        // check, not for reading or hashing configuration contents.
+        if(basename(root).replace(/^\./,"")!=="zen-proxy"||
+          !/^(?:models|zen-proxy)\.json(?:\.bak\.pre-catalog-refresh)?$/.test(name))return false;
+        try{const file=resolve(root,name);return realpathSync(file)===file&&lstatSync(file).isFile();}catch{return false;}
+      });
+      if(!safe)return null;
+      resources.push(part);continue;
+    }
+    const localRead=assessIndependentDiagnostic(part,root);
+    if(localRead){resources.push(...localRead.resources);continue;}
     if(plain.startsWith("sha256sum ")){
       const files=plain.slice(10).split(" ");
       if(files.length>0&&files.length<=20&&files.every(f=>safeSource(root,f))){
@@ -245,6 +263,6 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
 export function matchDiagnosticResources(actual:string[],expected:string[]):boolean{
   // OpenCode 2.x drops the stderr redirection on its fallback netstat segment.
   const normalize=(s:string)=>s==="netstat -ltnp 2>/dev/null"?"netstat -ltnp":
-    /^(?:npm test(?: -- --test-reporter=spec)?|git ls-remote https:\/\/github\.com\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+ refs\/heads\/(?:main|master)) 2>&1$/.test(s)?s.slice(0,-5):s;
+    /^(?:npm test(?: -- --test-reporter=spec)?|git status --short|git ls-remote https:\/\/github\.com\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+ refs\/heads\/(?:main|master)) 2>&1$/.test(s)?s.slice(0,-5):s;
   return actual.length===expected.length && actual.every((s,i)=>normalize(s)===normalize(expected[i]!));
 }

@@ -244,3 +244,26 @@ test("search_text accepts a regular project file without expanding the search or
     assert.equal(limited.truncated, true);
   } finally { await rm(f.base, { recursive: true, force: true }); }
 });
+
+test("read_file paginates larger source files without relaxing response or path limits", async () => {
+  const f = await fixture();
+  try {
+    const lines = Array.from({ length: 1800 }, (_, i) => "line-" + i + " " + "x".repeat(500));
+    await writeFile(join(f.project, "large.mjs"), lines.join("\n"));
+    const fs = await createProjectFilesystem(f.project);
+    const page = await fs.readProjectFile({path:"large.mjs", start_line:1000, line_count:400});
+    assert.match(page.content, /line-999 /);
+    assert.ok(page.returned_lines > 0 && page.returned_lines < 400);
+    assert.ok(Buffer.byteLength(page.content, "utf8") <= 128 * 1024);
+    assert.equal(page.next_start_line, 1000 + page.returned_lines);
+    const next = await fs.readProjectFile({path:"large.mjs", start_line:page.next_start_line, line_count:1});
+    assert.match(next.content, new RegExp("line-" + (page.next_start_line - 1) + " "));
+    await writeFile(join(f.project, "huge.mjs"), "x".repeat(1024 * 1024 + 1));
+    await assert.rejects(() => fs.readProjectFile({path:"huge.mjs"}), /1 MiB/);
+    await writeFile(join(f.project, "longline.mjs"), "x".repeat(129 * 1024));
+    await assert.rejects(() => fs.readProjectFile({path:"longline.mjs"}), /sola línea/);
+    await writeFile(join(f.project, "binary.mjs"), Buffer.from([0,1,2]));
+    await assert.rejects(() => fs.readProjectFile({path:"binary.mjs"}), /binario/);
+    await assert.rejects(() => fs.readProjectFile({path:".env",start_line:2}), /sensibles/);
+  } finally { await rm(f.base, {recursive:true,force:true}); }
+});

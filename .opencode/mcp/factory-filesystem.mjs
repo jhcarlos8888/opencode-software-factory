@@ -19,6 +19,7 @@ import { pathToFileURL } from "node:url";
 const MAX_INPUT_LINE = 1024 * 1024;
 const MAX_PATH_LENGTH = 4096;
 const MAX_READ_BYTES = 128 * 1024;
+const MAX_PAGED_FILE_BYTES = 1024 * 1024;
 const MAX_SEARCH_FILE_BYTES = 1024 * 1024;
 const MAX_SEARCH_TOTAL_BYTES = 20 * 1024 * 1024;
 const MAX_SEARCH_FILES = 1500;
@@ -247,24 +248,37 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
   async function readProjectFile({ path, start_line = 1, line_count = 160 } = {}) {
     const target = await resolveInside(path);
     if (!target.info.isFile()) throw new Error("La ruta solicitada no es un archivo regular.");
-    if (target.info.size > MAX_READ_BYTES) {
-      throw new Error("El archivo supera el límite de lectura segura de 128 KiB. Usa búsqueda textual acotada.");
+    if (target.info.size > MAX_PAGED_FILE_BYTES) {
+      throw new Error("El archivo supera el límite de lectura paginada de 1 MiB. Divide el archivo o usa búsqueda textual acotada.");
     }
 
-    const { buffer: raw } = await readFileNoFollow(target.absolute, target.relative, MAX_READ_BYTES);
+    const { buffer: raw } = await readFileNoFollow(target.absolute, target.relative, MAX_PAGED_FILE_BYTES);
     if (raw.includes(0)) throw new Error("El archivo parece binario y no se mostrará como texto.");
     const text = raw.toString("utf8");
     const lines = text.split(/\r?\n/);
     const from = Math.max(1, Number.isInteger(start_line) ? start_line : 1);
     const count = Math.max(1, Math.min(Number.isInteger(line_count) ? line_count : 160, 400));
-    const selected = lines.slice(from - 1, from - 1 + count);
+    const selected = [];
+    let bytes = 0;
+    for (let i = from - 1; i < Math.min(lines.length, from - 1 + count); i++) {
+      const numbered = String(i + 1).padStart(5, " ") + " | " + lines[i];
+      const length = Buffer.byteLength(numbered, "utf8") + (selected.length ? 1 : 0);
+      if (bytes + length > MAX_READ_BYTES) {
+        if (selected.length === 0) throw new Error("Una sola línea supera el límite de respuesta de 128 KiB; usa búsqueda textual acotada.");
+        break;
+      }
+      selected.push(numbered);
+      bytes += length;
+    }
+    const truncated = from - 1 + selected.length < lines.length;
     return {
       path: target.relative,
       start_line: from,
       total_lines: lines.length,
       returned_lines: selected.length,
-      truncated: from - 1 + selected.length < lines.length,
-      content: selected.map((line, index) => String(from + index).padStart(5, " ") + " | " + line).join("\n")
+      truncated,
+      next_start_line: truncated ? from + selected.length : null,
+      content: selected.join("\n")
     };
   }
 
@@ -450,7 +464,7 @@ const TOOL_DEFINITIONS = [
   },
   {
     name: "read_file",
-    description: "Lee un archivo de texto pequeño dentro del proyecto, con números de línea. Bloquea secretos, traversal y symlinks.",
+    description: "Lee páginas de hasta 400 líneas de un archivo de texto de hasta 1 MiB; respuesta limitada a 128 KiB. Usa next_start_line para continuar. Bloquea secretos, traversal y symlinks.",
     inputSchema: {
       type: "object",
       properties: {

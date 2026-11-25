@@ -26,7 +26,7 @@ import { classifyClaudeSdkLog } from "./claude-log-classifier.js";
 import { classifyOpenCodeServerLog } from "./opencode-log-classifier.js";
 import { validateOpenCodeTurnResult } from "./opencode-turn-result.js";
 import { retryOpenCodeRead } from "./opencode-request-retry.js";
-import { buildOpenCodeChildPath } from "./opencode-environment.js";
+import { buildOpenCodeChildPath, appendInstalledBunPath } from "./opencode-environment.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
 import { assessAuditorTool, assessOpenCodePermission, isProtectedShellCommand, requestsSandboxBypass } from "./auditor-policy.js";
 import { isDiagnosticCandidate } from "./diagnostic-policy.js";
@@ -143,7 +143,7 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
   // The user systemd service may not source NVM's shell initialization.
   // Prepend the Node runtime directory so OpenCode can spawn npx-backed MCPs.
   const runtimeBin = dirname(process.execPath);
-  const childPath = buildOpenCodeChildPath(runtimeBin, opencodeBinary, process.env.PATH);
+  const childPath = appendInstalledBunPath(buildOpenCodeChildPath(runtimeBin, opencodeBinary, process.env.PATH));
   const child = spawn(opencodeBinary, ["serve", "--hostname", "127.0.0.1", "--port", String(port), "--print-logs"], {
     // OpenCode discovers opencode.json and .opencode from its process cwd.
     // Start in the factory, not the user's project; the project is attached
@@ -875,7 +875,7 @@ async function runClaudeAgent(
     prompt,
     options: {
       cwd: projectPath,
-      env: { ...process.env, ...(localClaudeConfig?.env ?? {}) },
+      env: { ...process.env, ...(localClaudeConfig?.env ?? {}), PATH: appendInstalledBunPath(localClaudeConfig?.env?.PATH ?? process.env.PATH) },
       model: agent.modelId,
       // Read-only is enforced by disallowedTools and the PreToolUse path guard.
       // Claude's plan mode can request an ExitPlanMode/write-plan operation,

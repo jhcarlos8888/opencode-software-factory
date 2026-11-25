@@ -176,3 +176,26 @@ condicional, y conservar permisos privados al respaldar configuración.
 Commits 782d9c7 y 27fb56a publicados. Verificación 220/220 en el primero,
 typecheck correcto en el segundo. No se ha reiniciado la fábrica durante
 la ronda activa.
+
+### Continuación — 21:33
+
+El Implementador confirmó catálogo actualizado, respaldo privado de
+configuración y reinicio puntual de zen-proxy.service. Se verificó que
+la configuración conserva exactamente los bytes originales y el proceso
+pertenece al usuario y al proyecto antes de conceder el reinicio una vez.
+El PID cambió de 6936 a 210719 y el servicio volvió activo. El estado
+posterior todavía muestra 0 modelos disponibles, 10 limitados. No se
+habilita systemctl restart de forma general ni volcados administrativos.
+Se autorizó una comprobación puntual de metadatos de archivos, no su
+contenido; la política admite ls -l acotado en raíz comprobada o cd
+condicional. Las cadenas que pueden seguir tras un cd fallido permanecen
+en revisión si no hay cwd confirmado.
+Se corrigió la lectura paginada MCP: archivo hasta 1 MiB, respuesta hasta
+128 KiB y 400 líneas, next_start_line, conserva guardas de rutas y
+rechazo de binarios. Prueba directa de zen-proxy.mjs: 30 de 4283 líneas
+desde 3500, siguiente 3530. Ambos motores incorporan el directorio de
+Bun instalado al final de PATH si el ejecutable es regular, canónico
+y ejecutable. El entorno no sustituye prioridades existentes.
+El Implementador entregó su informe y el Tester recibió tres handoffs
+(eventos 21326–21334). Verificación integral de la fábrica: 223/223.
+Sin reinicio de la fábrica mientras la ronda esté activa.

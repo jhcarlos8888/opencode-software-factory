@@ -153,3 +153,21 @@ test("Catalog verification and npm exit status validate the full native command"
     assert.equal(assessDiagnosticCommand(command,root,undefined,instructions),null);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("Bounded project file metadata never follows symlinks or reads configuration content",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-metadata-list-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    for(const f of ["models.json","models.json.bak.pre-catalog-refresh","zen-proxy.json","zen-proxy.json.bak.pre-catalog-refresh"])writeFileSync(join(root,f),"fixture");
+    const cmd="ls -l models.json models.json.bak.pre-catalog-refresh zen-proxy.json zen-proxy.json.bak.pre-catalog-refresh";
+    assert.ok(assessDiagnosticCommand(cmd,root,root));
+    assert.equal(assessDiagnosticCommand(cmd,root,undefined),null);
+    assert.equal(assessDiagnosticCommand("cd "+root+" && "+cmd,root,undefined)?.resources[0],cmd);
+    assert.equal(assessDiagnosticCommand("ls -l .env",root,root),null);
+    assert.equal(assessDiagnosticCommand("sha256sum zen-proxy.json",root,root),null);
+    assert.equal(assessDiagnosticCommand("ls -l /etc/passwd",root,root),null);
+    assert.equal(assessDiagnosticCommand("cat zen-proxy.json",root,root),null);
+    rmSync(join(root,"zen-proxy.json"));symlinkSync("/etc/passwd",join(root,"zen-proxy.json"));
+    assert.equal(assessDiagnosticCommand(cmd,root,root),null);
+  }finally{rmSync(base,{recursive:true,force:true});}
+});
