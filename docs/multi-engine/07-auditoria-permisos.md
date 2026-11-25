@@ -338,3 +338,18 @@ y construcción. Una coincidencia no acredita integración activa;
 debe clasificarse antes de modificar. Sin permiso general de grep
 fuera del workspace ni autorización de escritura. Verificación
 integral del cambio anterior: 240/240.
+
+### Desinstalación — continuación 09:10
+
+Se concedieron puntualmente ba73d675 y 86f490fd tras verificar las
+llamadas nativas completas, los dos archivos JSON canónicos de
+OpenCode, su propiedad, tamaño y validez estructural. La primera
+consulta devuelve únicamente rutas de claves coincidentes; en ambos
+archivos la coincidencia fue providers.zen-proxy.settings.baseURL.
+La segunda consulta enumera claves, tipos y modelos; se comprobó
+que models es un objeto y no un valor arbitrario, y que las claves
+y los identificadores proyectados tienen formato ordinario.
+Ninguno de los dos archivos selecciona zen-proxy como modelo
+predeterminado o small_model. No se concede jq arbitrario ni
+lectura general de configuraciones externas. Las dos decisiones
+son específicas de esta ejecución y no autorizan cambios.
