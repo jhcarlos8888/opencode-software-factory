@@ -120,12 +120,12 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
     // Fixed jq projections: no arbitrary expressions or credential fields.
     const projected=/^(curl -s --max-time (?:[1-9]|10) http:\/\/127\.0\.0\.1:([0-9]{1,5})\/(health|v1\/models|api\/status)) \| (jq -c '([^']+)')$/.exec(part);
     if(projected && curlDefaultsAbsent() && localProxyPort(root)===Number(projected[2])){
-      const filters: Record<string,string> = {
-        health: "{ok,upstream,sync:.sync.ok,version}",
-        "v1/models": "{count:(.data|length), ids:(.data|map(.id))}",
-        "api/status": "{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}"
+      const filters: Record<string,string[]> = {
+        health: ["{ok,upstream,sync:.sync.ok,version}"],
+        "v1/models": ["{count:(.data|length),ids:(.data|map(.id))}"],
+        "api/status": ["{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)},requestsTotal:.requests.total}"]
       };
-      if(projected[5]===filters[projected[3]!]){
+      if(filters[projected[3]!]?.includes(projected[5]!.replace(/, +/g,","))){
         resources.push(projected[1]!,projected[4]!);continue;
       }
     }

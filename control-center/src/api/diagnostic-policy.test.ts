@@ -191,6 +191,8 @@ test("QA service aliases, listening port and projected health use only bounded m
     if(cleanCurl){
       assert.deepEqual(assessDiagnosticCommand(models,root,root)?.resources,models.split(" | "));
       assert.deepEqual(assessDiagnosticCommand(counts,root,root)?.resources,counts.split(" | "));
+      const observed="curl -s --max-time 8 http://127.0.0.1:8787/api/status | jq -c '{upstreamOk, sync:{ok:.sync.ok, working:(.sync.working|length), rateLimited:(.sync.rateLimited|length)}, requestsTotal:.requests.total}'";
+      assert.deepEqual(assessDiagnosticCommand(observed,root,root)?.resources,observed.split(" | "));
     }
     assert.equal(assessDiagnosticCommand(counts.replace("upstreamOk","auth"),root,root),null);
     assert.equal(assessDiagnosticCommand(counts.replace("requests:.requests.total","requests:.requests"),root,root),null);
