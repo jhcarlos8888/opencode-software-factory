@@ -454,3 +454,14 @@ test("Uninstaller metadata accepts fixed target names and process column aliases
     }
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("jq discovery does not authorize arbitrary commands or filesystem inventory",()=>{
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-jq-discovery-")));
+  try{
+    for(const command of ["command -v jq","command -v jq 2>&1"]){
+      assert.deepEqual(assessDiagnosticCommand(command,root,root)?.resources,[command]);
+      assert.equal(assessOpenCodePermission({permission:"shell",resources:[command]},root,"workspace-write",{agentId:"implementer",instructions:"Verificar herramientas"},{command,workdir:root}).verdict,"auto");
+    }
+    for(const command of ["command -v arbitrary-tool","command -v jq; ls -R \"$HOME\"","command -v jq; jq . configuration.json"])assert.equal(assessDiagnosticCommand(command,root,root),null);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});

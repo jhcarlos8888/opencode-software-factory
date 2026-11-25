@@ -314,3 +314,18 @@ incorporan alternativas acotadas: ls -ld/ls -d de rutas absolutas
 exactas del inventario, y el orden alternativo de opciones de ps
 para columnas PID y comm de Bun/Node. Sin lecturas de configuración,
 argumentos completos de procesos, modificación ni eliminación.
+
+### Desinstalación — continuación 09:07
+
+Se rechazaron 6adde2ef (búsqueda que imprimía líneas completas de
+configuración de shell) y da41e4d7 (enumeración de carpetas ajenas al
+desarrollo). Se aprobaron de forma puntual 7526a63c (localización de
+directorios por nombres de los proyectos requeridos, profundidad
+limitada y sin leer archivos) y 498a3a26 (inventario de dos raíces de
+repositorios verificadas). La aprobación previa 3bdc8305 fue resuelta
+desde la interfaz, no por el auditor externo. No se añade un permiso
+general para find, ls del home, grep recursivo ni lectura de
+configuraciones externas. Se añade la consulta exacta command -v jq
+y se refuerza el prompt común para limitar inventarios a las rutas
+autorizadas, no imprimir credenciales, separar diagnóstico y cambio,
+y conservar la raíz de trabajo durante las fases activas.

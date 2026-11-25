@@ -6,6 +6,7 @@ import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
   if (/^(?:command -v (?:zen-proxy|zen-claude|claude-zen)|readlink -f [A-Za-z0-9_./-]+)(?: 2>&1)?$/.test(command)) return true;
+  if (command === "command -v jq" || command === "command -v jq 2>&1") return true;
   if (command === "command -v bun" || command === resolve(homedir(),".bun/bin/bun")+" --version 2>/dev/null") return true;
   if (command === resolve(homedir(),".opencode/bin/opencode") + " --version 2>&1" || command === resolve(homedir(),".opencode/bin/opencode") + " --version") return true;
   return /(?:^|; | && )(?:(?:node|npm|bun|git) (?:--version|-v)|ls (?:-l(?:a)?(?: |$)|-d node_modules|\.github\/workflows)|for f in |ss -ltnp|curl (?:-fsSL --max-time |-sS -m |-sS --max-time |-fsS --max-time |-s --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
@@ -200,6 +201,9 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
           resources.push(part);continue;
         }catch{return null;}
       }
+    }
+    if(part==="command -v jq" || part==="command -v jq 2>&1"){
+      resources.push(part);continue;
     }
     const bun=resolve(homedir(),".bun/bin/bun");
     if(part==="command -v bun" || part==='command -v bun || echo "bun-no-en-PATH"'){
