@@ -321,3 +321,19 @@ test("Issue research permits only a finite public repository loop",()=>{
     assert.equal(assessDiagnosticCommand(command,root,root,"Sin repositorio"),null);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("Build inventory supports version aliases and finite presence checks without reading secrets",()=>{
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-build-inventory-")));
+  try{
+    const prefix='echo "--- git ---"; git rev-parse --is-inside-work-tree 2>&1; git rev-parse --abbrev-ref HEAD 2>&1; git status --porcelain=v1 2>&1 | head -40; echo "--- toolchain ---"; node -v 2>&1; npm -v 2>&1; command -v bun >/dev/null 2>&1 && bun -v 2>&1 || echo "bun: NO ENCONTRADO"';
+    const tail='echo "--- artefactos build ---"; for f in gradlew build.gradle pom.xml package-lock.json bun.lock node_modules .nvmrc .node-version Dockerfile Makefile; do if [ -e "$f" ]; then echo "PRESENTE: $f"; else echo "AUSENTE: $f"; fi; done';
+    const command=prefix+"; "+tail;
+    assert.ok(assessDiagnosticCommand(command,root,root));
+    assert.equal(assessDiagnosticCommand(command,root,undefined),null);
+    assert.equal(assessDiagnosticCommand(command.replace("Makefile;","../Makefile;"),root,root),null);
+    assert.equal(assessDiagnosticCommand(command.replace("Makefile;"," .env;"),root,root),null);
+    assert.equal(assessDiagnosticCommand(command.replace('echo "PRESENTE: $f"','cat "$f"'),root,root),null);
+    assert.equal(assessDiagnosticCommand(command.replace("node -v","node -e 'process.env'"),root,root),null);
+    assert.equal(assessDiagnosticCommand(command.replace('echo "--- toolchain ---"','git remote -v; echo "--- toolchain ---"'),root,root),null);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});

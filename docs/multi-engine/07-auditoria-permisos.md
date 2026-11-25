@@ -232,3 +232,23 @@ continuar si falla, respaldo de configuración y conteo de logs con
 parámetro incorrecto (limit en vez de n). Se ofrecen recetas seguras
 equivalentes, no comodines. El servicio de la fábrica sigue en la
 versión anterior hasta terminar la ronda.
+
+### Desinstalación de Zen Proxy — ronda 4e259c4c, 25 de noviembre, 08:27
+
+La ronda arrancó con Architect (Claude) y Build (OpenCode) simultáneos.
+Architect terminó con handoff canónico (21783). Build solicitó una
+cadena de inventario (28d79a10) con estado Git, versiones, presencia
+de manifiestos y git remote -v. Se verificó el comando nativo, cwd
+canónico y ausencia de repositorio Git local antes de aprobar una vez.
+No se concede git remote -v de forma general: las URL pueden contener
+credenciales. La variante sin ese segmento admite git rev-parse,
+node/npm/bun -v, fallback fijo de Bun y un bucle finito de manifiestos
+y artefactos que solo informa presencia, sin leer contenidos.
+La suite npm test posterior fue aprobada por el Auditor desplegado
+sin intervención humana (21790). Se comprueba así una autoaprobación
+real de las reglas de la ronda anterior.
+Precaución: la raíz de la ejecución es ~/.zen-proxy; eliminarla mientras
+existan agentes activos puede romper sus sesiones y el MCP. Reservar la
+eliminación definitiva de esa raíz para el cierre; las eliminaciones,
+servicios y cambios de configuración ajenos a la raíz requieren revisión
+específica. No ampliar permisos genéricos de borrado.

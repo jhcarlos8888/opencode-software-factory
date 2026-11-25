@@ -7,7 +7,7 @@ import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 export function isDiagnosticCandidate(command: string): boolean {
   if (command === "command -v bun" || command === resolve(homedir(),".bun/bin/bun")+" --version 2>/dev/null") return true;
   if (command === resolve(homedir(),".opencode/bin/opencode") + " --version 2>&1" || command === resolve(homedir(),".opencode/bin/opencode") + " --version") return true;
-  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-l(?:a)?(?: |$)|-d node_modules|\.github\/workflows)|for f in |ss -ltnp|curl (?:-fsSL --max-time |-sS -m |-sS --max-time |-fsS --max-time |-s --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
+  return /(?:^|; | && )(?:(?:node|npm|bun|git) (?:--version|-v)|ls (?:-l(?:a)?(?: |$)|-d node_modules|\.github\/workflows)|for f in |ss -ltnp|curl (?:-fsSL --max-time |-sS -m |-sS --max-time |-fsS --max-time |-s --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
 }
 function canonicalRoot(root: string): boolean {
   try { return isAbsolute(root) && realpathSync(root) === root && lstatSync(root).isDirectory(); }
@@ -109,7 +109,7 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
   if(parts.length>12)return null;
   for(const part of parts){
     const plain=part.replace(/ 2>&1$/,"");
-    if(/^(?:node|npm|bun|git) --version$/.test(plain) ||
+    if(/^(?:(?:node|npm|bun) (?:--version|-v)|git --version)$/.test(plain) ||
       plain==="date -u +%Y-%m-%dT%H:%M:%SZ" ||
       part==="echo" ||
       /^echo (?:'---[A-Za-z0-9 _()/\-]{0,40}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part)){
@@ -219,6 +219,17 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
   }
   let remainder=command;
   const resources:string[]=[];
+  const buildInventory=/^(?:(.*); )?echo "--- artefactos build ---"; for f in ([A-Za-z0-9_. -]+); do if \[ -e "\$f" \]; then echo "PRESENTE: \$f"; else echo "AUSENTE: \$f"; fi; done$/.exec(command);
+  if(buildInventory){
+    const names=buildInventory[2]!.split(" ");
+    const allowed=new Set(["gradlew","build.gradle","build.gradle.kts","settings.gradle","settings.gradle.kts","pom.xml","package.json","package-lock.json","npm-shrinkwrap.json","yarn.lock","pnpm-lock.yaml","bun.lock","bun.lockb","node_modules",".nvmrc",".node-version","Dockerfile","docker-compose.yml","Makefile","Cargo.toml","go.mod","pyproject.toml","requirements.txt"]);
+    if(names.length>24||!names.every(f=>allowed.has(f))||cwd!==root)return null;
+    const prefix=buildInventory[1];
+    const prior=prefix?assessDiagnosticCommand(prefix,root,cwd,instructions):null;
+    if(prefix&&(!prior||prior.category!=="inspection"))return null;
+    return {category:"inspection",resources:[...(prior?.resources??[]),'echo "--- artefactos build ---"','echo "PRESENTE: $f"','echo "AUSENTE: $f"']};
+  }
+
   // The finite manifest-presence loop reports names only. No shell expansion
   // other than the fixed variable over a bounded literal list.
   const presence=/^echo '--- build files present\? ---'; for f in ([A-Za-z0-9_. -]+); do \[ -e "\$f" \] && echo "FOUND \$f" \|\| echo "MISSING \$f"; done(?:; |$)/.exec(remainder);
@@ -236,11 +247,11 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
     resources.push(loop[2]!,loop[3]!,"sha256sum");
     remainder=remainder.slice(loop[0].length);
   }
-  const parts=remainder?remainder.split(/; | && /):[];
+  const parts=remainder?remainder.split(/; | && (?!bun -v 2>&1 \|\| echo "bun: NO ENCONTRADO"(?:; |$))/):[];
   if(parts.length>12)return null;
   for(const part of parts){
     const plain=part.replace(/ 2>&1$/,"");
-    if(/^(?:node|npm|bun|git) --version$/.test(plain)){
+    if(/^(?:(?:node|npm|bun) (?:--version|-v)|git --version)$/.test(plain)){
       resources.push(part);continue;
     }
     if(part==='echo "GIT_EXIT=${PIPESTATUS[0]}"' || part==="echo" || /^echo (?:'---[A-Za-z0-9 _()/@.\-]{0,60}---'|"---[A-Za-z0-9 _()/\-]{0,40}---")$/.test(part) || part==="echo '---'" || part==='echo "---"'){
@@ -250,6 +261,12 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
       (root.startsWith(homedir()+"/") && /^~\/[A-Za-z0-9_.\/-]+$/.test(part.slice(7)) &&
        part.startsWith("ls -la ") && part.slice(7).replace(/^~/,homedir())===root)){
       resources.push(part);continue;
+    }
+    if(/^git rev-parse (?:--is-inside-work-tree|--abbrev-ref HEAD)(?: 2>&1)?$/.test(part)){
+      resources.push(part);continue;
+    }
+    if(part==='command -v bun >/dev/null 2>&1 && bun -v 2>&1 || echo "bun: NO ENCONTRADO"'){
+      resources.push("command -v bun >/dev/null 2>&1","bun -v",'echo "bun: NO ENCONTRADO"');continue;
     }
     if(/^git status(?: --porcelain(?:=v1)?)?(?: 2>&1)?$/.test(part)){
       resources.push(part);continue;
