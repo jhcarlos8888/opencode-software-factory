@@ -172,3 +172,30 @@ test("Bounded project file metadata never follows symlinks or reads configuratio
     assert.equal(assessDiagnosticCommand(cmd,root,root),null);
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("QA service aliases, listening port and projected health use only bounded metadata",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-health-qa-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    writeFileSync(join(root,"package.json"),JSON.stringify({name:"zen-proxy"}));
+    writeFileSync(join(root,"zen-proxy.json"),JSON.stringify({host:"127.0.0.1",port:8787,upstream:"https://opencode.ai/inference/openai/v1"}));
+    const service="systemctl --user show zen-proxy -p ActiveState -p SubState -p MainPID -p ExecMainStartTimestamp -p NRestarts";
+    const socket="ss -ltnp 2>/dev/null | grep 8787";
+    const health="curl -s --max-time 5 http://127.0.0.1:8787/health | jq -c '{ok,upstream,sync:.sync.ok,version}'";
+    assert.deepEqual(assessDiagnosticCommand(service,root,root)?.resources,[service]);
+    assert.deepEqual(assessDiagnosticCommand(socket,root,root)?.resources,socket.split(" | "));
+    const cleanCurl=![".curlrc",".config/curlrc"].some(name=>existsSync(join(homedir(),name)))&&!process.env.CURL_HOME&&!process.env.XDG_CONFIG_HOME;
+    if(cleanCurl)assert.deepEqual(assessDiagnosticCommand(health,root,root)?.resources,health.split(" | "));
+    const models="curl -s --max-time 8 http://127.0.0.1:8787/v1/models | jq -c '{count:(.data|length), ids:(.data|map(.id))}'";
+    const counts="curl -s --max-time 8 http://127.0.0.1:8787/api/status | jq -c '{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}'";
+    if(cleanCurl){
+      assert.deepEqual(assessDiagnosticCommand(models,root,root)?.resources,models.split(" | "));
+      assert.deepEqual(assessDiagnosticCommand(counts,root,root)?.resources,counts.split(" | "));
+    }
+    assert.equal(assessDiagnosticCommand(counts.replace("upstreamOk","auth"),root,root),null);
+    assert.equal(assessDiagnosticCommand(counts.replace("requests:.requests.total","requests:.requests"),root,root),null);
+    assert.equal(assessDiagnosticCommand(models.replace("map(.id)","map(.)"),root,root),null);
+
+    for(const bad of [service+" -p Environment",service.replace("zen-proxy","other-service"),socket.replace("8787","22"),socket+"; cat /etc/passwd",health.replace("/health","/api/status"),health.replace("{ok,upstream,sync:.sync.ok,version}","."),health+"; echo $(whoami)"])assert.equal(assessDiagnosticCommand(bad,root,root),null,bad);
+  }finally{rmSync(base,{recursive:true,force:true});}
+});

@@ -6,7 +6,7 @@ import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
   if (command === resolve(homedir(),".opencode/bin/opencode") + " --version 2>&1" || command === resolve(homedir(),".opencode/bin/opencode") + " --version") return true;
-  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-l(?:a)?(?: |$)|-d node_modules|\.github\/workflows)|for f in |curl (?:-fsSL --max-time |-sS -m |-fsS --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
+  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-l(?:a)?(?: |$)|-d node_modules|\.github\/workflows)|for f in |ss -ltnp|curl (?:-fsSL --max-time |-sS -m |-fsS --max-time |-s --max-time )|date -u |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
 }
 function canonicalRoot(root: string): boolean {
   try { return isAbsolute(root) && realpathSync(root) === root && lstatSync(root).isDirectory(); }
@@ -110,9 +110,25 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
         resources.push(...part.split(" | "));continue;
       }catch{return null;}
     }
-    const service=/^systemctl --user (?:is-active|is-enabled) ([A-Za-z0-9_-]+\.service)$/.exec(plain);
-    const metadata=/^systemctl --user show ([A-Za-z0-9_-]+\.service)((?: -p (?:ActiveState|SubState|MainPID|LoadState|UnitFileState|ExecMainStartTimestamp|FragmentPath)){1,7})$/.exec(plain);
-    if(service?.[1]===unit||metadata?.[1]===unit){resources.push(part);continue;}
+    const service=/^systemctl --user (?:is-active|is-enabled) ([A-Za-z0-9_-]+(?:\.service)?)$/.exec(plain);
+    const metadata=/^systemctl --user show ([A-Za-z0-9_-]+(?:\.service)?)((?: -p (?:ActiveState|SubState|MainPID|LoadState|UnitFileState|ExecMainStartTimestamp|FragmentPath|NRestarts)){1,8})$/.exec(plain);
+    if([service?.[1],metadata?.[1]].some(name=>name===unit||name+".service"===unit)){resources.push(part);continue;}
+    const socket=/^(ss -ltnp 2>\/dev\/null) \| (grep ([0-9]{1,5}))$/.exec(part);
+    if(socket && Number(socket[3])>0 && Number(socket[3])<=65535 && localProxyPort(root)===Number(socket[3])){
+      resources.push(socket[1]!,socket[2]!);continue;
+    }
+    // Fixed jq projections: no arbitrary expressions or credential fields.
+    const projected=/^(curl -s --max-time (?:[1-9]|10) http:\/\/127\.0\.0\.1:([0-9]{1,5})\/(health|v1\/models|api\/status)) \| (jq -c '([^']+)')$/.exec(part);
+    if(projected && curlDefaultsAbsent() && localProxyPort(root)===Number(projected[2])){
+      const filters: Record<string,string> = {
+        health: "{ok,upstream,sync:.sync.ok,version}",
+        "v1/models": "{count:(.data|length), ids:(.data|map(.id))}",
+        "api/status": "{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}"
+      };
+      if(projected[5]===filters[projected[3]!]){
+        resources.push(projected[1]!,projected[4]!);continue;
+      }
+    }
     const curl=/^(curl (?:-sS -m|-fsS --max-time) (?:[1-9]|10) http:\/\/127\.0\.0\.1:([0-9]{1,5})\/(?:health|v1\/models)(?: 2>&1)?)(?: \| (head -c (?:[1-9]\d{0,3}|10000)))?$/.exec(part);
     if(curl && curlDefaultsAbsent() && localProxyPort(root)===Number(curl[2])){
       resources.push(curl[1]!);if(curl[3])resources.push(curl[3]);continue;
@@ -211,9 +227,9 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
       resources.push("ss -ltnp 2>/dev/null","netstat -ltnp",sockets[1]!);continue;
     }
     const unit=basename(root).replace(/^\./,"")+".service";
-    const service=/^systemctl --user (?:is-active|is-enabled) ([A-Za-z0-9_-]+\.service)$/.exec(plain);
-    const metadata=/^systemctl --user show ([A-Za-z0-9_-]+\.service)((?: -p (?:ActiveState|SubState|MainPID|LoadState|UnitFileState|ExecMainStartTimestamp|FragmentPath)){1,7})$/.exec(plain);
-    if(service?.[1]===unit || metadata?.[1]===unit){resources.push(part);continue;}
+    const service=/^systemctl --user (?:is-active|is-enabled) ([A-Za-z0-9_-]+(?:\.service)?)$/.exec(plain);
+    const metadata=/^systemctl --user show ([A-Za-z0-9_-]+(?:\.service)?)((?: -p (?:ActiveState|SubState|MainPID|LoadState|UnitFileState|ExecMainStartTimestamp|FragmentPath|NRestarts)){1,8})$/.exec(plain);
+    if([service?.[1],metadata?.[1]].some(name=>name===unit||name+".service"===unit)){resources.push(part);continue;}
     if(plain==="~/.bun/bin/bun --version"){
       try{const bun=resolve(homedir(),".bun/bin/bun");
         if(realpathSync(bun)===bun && lstatSync(bun).isFile()){resources.push(part);continue;}
