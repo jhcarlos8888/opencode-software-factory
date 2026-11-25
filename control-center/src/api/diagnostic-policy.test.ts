@@ -73,3 +73,15 @@ test("npm dry pack requires local manifest without lifecycle scripts",()=>{
     assert.equal(assessDiagnosticCommand(command,root,root),null);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("Build manifest discovery permits a finite literal list, not arbitrary file probes",()=>{
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-manifests-")));
+  try{
+    const command='echo \'--- build files present? ---\'; for f in gradlew build.gradle pom.xml package-lock.json bun.lockb; do [ -e "$f" ] && echo "FOUND $f" || echo "MISSING $f"; done; echo \'--- CI ---\'; ls .github/workflows; echo \'--- install dir deps ---\'; ls -d node_modules 2>&1';
+    assert.ok(assessDiagnosticCommand(command,root,root));
+    assert.equal(assessDiagnosticCommand(command.replace("gradlew",".env"),root,root),null);
+    assert.equal(assessDiagnosticCommand(command.replace('echo "FOUND $f"','cat "$f"'),root,root),null);
+    symlinkSync("/tmp",join(root,".github"));
+    assert.equal(assessDiagnosticCommand(command,root,root),null);
+  }finally{rmSync(root,{recursive:true,force:true});}
+});

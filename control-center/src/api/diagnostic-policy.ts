@@ -5,7 +5,7 @@ import { spawnSync } from "node:child_process";
 import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
 export function isDiagnosticCandidate(command: string): boolean {
-  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls -la(?: |$)|curl -fsSL --max-time |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
+  return /(?:^|; | && )(?:(?:node|npm|bun|git) --version|ls (?:-la(?: |$)|-d node_modules|\.github\/workflows)|for f in |curl -fsSL --max-time |systemctl --user (?:list-units|show|is-active|is-enabled)|~\/\.bun\/bin\/bun --version|sha256sum |npm (?:test|pack --dry-run)(?: |$)|git ls-remote https:\/\/github\.com\/)/.test(command);
 }
 function canonicalRoot(root: string): boolean {
   try { return isAbsolute(root) && realpathSync(root) === root && lstatSync(root).isDirectory(); }
@@ -86,6 +86,16 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
   }
   let remainder=command;
   const resources:string[]=[];
+  // The finite manifest-presence loop reports names only. No shell expansion
+  // other than the fixed variable over a bounded literal list.
+  const presence=/^echo '--- build files present\? ---'; for f in ([A-Za-z0-9_. -]+); do \[ -e "\$f" \] && echo "FOUND \$f" \|\| echo "MISSING \$f"; done(?:; |$)/.exec(remainder);
+  if(presence){
+    const allowed=new Set(["gradlew","build.gradle","build.gradle.kts","settings.gradle","settings.gradle.kts","pom.xml","package.json","package-lock.json","npm-shrinkwrap.json","yarn.lock","pnpm-lock.yaml","bun.lockb","bun.lock","Cargo.toml","go.mod","pyproject.toml","requirements.txt"]);
+    const files=presence[1]!.split(" ");
+    if(files.length>24||!files.every(f=>allowed.has(f)))return null;
+    resources.push("echo '--- build files present? ---'",'echo "FOUND $f"','echo "MISSING $f"');
+    remainder=remainder.slice(presence[0].length);
+  }
   const loop=/^for f in ([A-Za-z0-9_. -]+); do (printf '%s  ' "\$f"); (curl -fsSL --max-time (?:[1-9]|[1-5]\d|60) "https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/\$f") \| sha256sum; done(?:; |$)/.exec(remainder);
   if(loop){
     const files=loop[1]!.split(" ");
@@ -127,6 +137,17 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
       try{const bun=resolve(homedir(),".bun/bin/bun");
         if(realpathSync(bun)===bun && lstatSync(bun).isFile()){resources.push(part);continue;}
       }catch{}
+    }
+    if(plain==="ls .github/workflows" || plain==="ls -d node_modules"){
+      const name=plain==="ls .github/workflows"?".github/workflows":"node_modules";
+      const file=resolve(root,name);
+      try{if(realpathSync(file)!==file || !lstatSync(file).isDirectory())return null;}
+      catch(e){
+        if((e as NodeJS.ErrnoException).code!=="ENOENT")return null;
+        // An absent target can still be behind a symlinked parent.
+        if(name.includes("/")){try{const parent=resolve(root,".github");if(realpathSync(parent)!==parent)return null;}catch(err){if((err as NodeJS.ErrnoException).code!=="ENOENT")return null;}}
+      }
+      resources.push(part);continue;
     }
     if(plain.startsWith("sha256sum ")){
       const files=plain.slice(10).split(" ");
