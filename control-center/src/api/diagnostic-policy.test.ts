@@ -337,3 +337,24 @@ test("Build inventory supports version aliases and finite presence checks withou
     assert.equal(assessDiagnosticCommand(command.replace('echo "--- toolchain ---"','git remote -v; echo "--- toolchain ---"'),root,root),null);
   }finally{rmSync(root,{recursive:true,force:true});}
 });
+
+test("Uninstall build metadata only lists safe script definitions and exact wrapper paths",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-uninstall-metadata-")));
+  const root=join(base,".zen-proxy");mkdirSync(root);
+  try{
+    mkdirSync(join(root,"bin"));
+    for(const f of ["zen-proxy","zen-proxy.mjs","bin/claude-zen"])writeFileSync(join(root,f),"fixture");
+    const pkg=join(root,"package.json");
+    writeFileSync(pkg,JSON.stringify({scripts:{start:"bun zen-proxy.mjs",test:"node --test"}}));
+    const cmd='head -3 zen-proxy.mjs; echo "--- permisos ---"; ls -l zen-proxy zen-proxy.mjs bin/claude-zen 2>&1; echo "--- scripts npm ---"; npm run 2>&1 | head -20';
+    const recipe=assessDiagnosticCommand(cmd,root,root);
+    assert.ok(recipe);
+    assert.deepEqual(recipe.resources,["head -3 zen-proxy.mjs",'echo "--- permisos ---"',"ls -l zen-proxy zen-proxy.mjs bin/claude-zen 2>&1",'echo "--- scripts npm ---"',"npm run 2>&1","head -20"]);
+    for(const bad of [cmd.replace("head -3 zen-proxy.mjs","head -3 .env"),cmd.replace("head -3","head -300"),cmd.replace("npm run 2>&1","npm run start 2>&1"),cmd.replace("bin/claude-zen","../bin/claude-zen"),cmd+"; cat /etc/passwd"])assert.equal(assessDiagnosticCommand(bad,root,root),null);
+    writeFileSync(pkg,JSON.stringify({scripts:{start:"arbitrary script value"}}));
+    assert.equal(assessDiagnosticCommand(cmd,root,root),null);
+    writeFileSync(pkg,JSON.stringify({scripts:{test:"node --test"}}));
+    rmSync(join(root,"bin/claude-zen"));symlinkSync("/etc/passwd",join(root,"bin/claude-zen"));
+    assert.equal(assessDiagnosticCommand(cmd,root,root),null);
+  }finally{rmSync(base,{recursive:true,force:true});}
+});

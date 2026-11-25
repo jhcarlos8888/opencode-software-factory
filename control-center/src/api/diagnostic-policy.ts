@@ -21,6 +21,18 @@ function safeSource(root: string, name: string): boolean {
     return stat.isFile() && !stat.isSymbolicLink() && realpathSync(file)===file && stat.size<=32*1024*1024;
   } catch { return false; }
 }
+function safeScriptIndex(root:string):boolean{
+  try {
+    const file=resolve(root,"package.json");
+    if(!safeSource(root,"package.json")||lstatSync(file).size>256*1024)return false;
+    const pkg=JSON.parse(readFileSync(file,"utf8"));
+    const scripts=pkg.scripts;
+    return !pkg.workspaces && scripts && typeof scripts==="object" && !Array.isArray(scripts) &&
+      Object.entries(scripts).every(([key,value])=>
+        (key==="test" && value==="node --test") ||
+        (key==="start" && (value==="node zen-proxy.mjs" || value==="bun zen-proxy.mjs")));
+  }catch{return false;}
+}
 function trustedNodeTest(root: string): boolean {
   try {
     const file=resolve(root,"package.json");
@@ -299,12 +311,24 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
       }
       resources.push(part);continue;
     }
+    // A tiny source prefix, never arbitrary configuration files.
+    const prefix=/^head -([1-9]|10) (zen-proxy\.mjs)$/.exec(plain);
+    if(prefix && safeSource(root,prefix[2]!)){resources.push(part);continue;}
+    // npm run without a script lists script definitions; avoid exposing
+    // arbitrary script values (which may contain credentials).
+    const scriptIndex=/^(npm run 2>&1) \| (head -(?:[1-9]|1[0-9]|20))$/.exec(part);
+    if(scriptIndex && safeScriptIndex(root)){
+      resources.push(scriptIndex[1]!,scriptIndex[2]!);continue;
+    }
     // File metadata only; no content reads, wildcards or symlink targets.
     const listing=/^ls -l ([A-Za-z0-9_./ -]+)$/.exec(plain);
     if(listing){
       const files=listing[1]!.split(" ");
       const safe=files.length<=20&&files.every(name=>{
         if(safeSource(root,name))return true;
+        if(basename(root).replace(/^\./,"")==="zen-proxy" && name==="bin/claude-zen"){
+          try{const file=resolve(root,name);return realpathSync(file)===file&&lstatSync(file).isFile();}catch{return false;}
+        }
         // These exact catalog/config paths are valid for a metadata-only
         // check, not for reading or hashing configuration contents.
         if(basename(root).replace(/^\./,"")!=="zen-proxy"||

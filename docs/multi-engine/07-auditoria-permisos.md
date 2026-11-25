@@ -252,3 +252,17 @@ existan agentes activos puede romper sus sesiones y el MCP. Reservar la
 eliminación definitiva de esa raíz para el cierre; las eliminaciones,
 servicios y cambios de configuración ajenos a la raíz requieren revisión
 específica. No ampliar permisos genéricos de borrado.
+
+### Desinstalación — continuación 08:32
+
+Build obtuvo salida 0 y un resumen de 381 pruebas, 379 aprobadas,
+2 omitidas y ninguna fallida (21793). El resumen coincide con el
+de la ronda anterior; no se considera prueba de desinstalación.
+Se autorizó puntualmente la consulta bf2729cd tras comprobar los
+archivos canónicos y el manifiesto. Se incorpora una receta que
+permite leer hasta diez líneas de zen-proxy.mjs, listar metadatos
+de los wrappers exactos y enumerar scripts npm sin ejecutarlos,
+únicamente con definiciones conocidas y sin workspaces. No se
+autoriza npm run con un script arbitrario ni lectura de secretos.
+Pruebas negativas cubren rutas externas, symlinks, scripts
+desconocidos y comandos anexados.
