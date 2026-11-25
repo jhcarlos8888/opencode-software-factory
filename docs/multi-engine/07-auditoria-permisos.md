@@ -425,3 +425,20 @@ configurado, sin conceder stop/disable/borrado ni consultas generales.
 La raíz ~/.zen-proxy y el respaldo privado permanecen pendientes de
 limpieza al cierre. Se conserva el cambio de opencode.json del
 Implementador sin incorporarlo al commit de auditoría.
+
+### Desinstalación — continuación 09:40
+
+Se concedieron 32f55422 (inventario de respaldos, exclusivamente
+nombres; el respaldo histórico de OpenCode contiene referencias,
+sin que ello acredite una integración activa), 213841b7 (scripts de
+package.json verificados), ebaa92a9 (67 líneas de verify-factory.sh)
+y e851aab3 (metadatos de lanzadores y versión Claude). Se verificó
+la llamada nativa, archivos canónicos y alcance de cada consulta.
+No se concede sed o jq arbitrario ni lectura general de otros
+repositorios. La nueva receta admite consultas absolutas exactas
+del lanzador Claude, cuyo destino debe ser un ejecutable propio
+en .local/share/claude/versions con nombre de versión; y metadatos
+del ejecutable OpenCode canónico. No autoriza otros argumentos,
+escrituras ni enlaces a binarios ajenos. La variante multilínea
+observada sigue requiriendo revisión; no se amplían permisos de
+shell por equivalencia textual.

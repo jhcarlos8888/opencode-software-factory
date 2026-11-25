@@ -7,6 +7,7 @@ import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 export function isDiagnosticCandidate(command: string): boolean {
   if (/^(?:command -v (?:zen-proxy|zen-claude|claude-zen)|readlink -f [A-Za-z0-9_./-]+)(?: 2>&1)?$/.test(command)) return true;
   if (command==="ps -C bun -o pid= 2>/dev/null | wc -l") return true;
+  if (["readlink -f "+resolve(homedir(),".local/bin/claude"),"ls -ld "+resolve(homedir(),".local/bin/claude"),"ls -ld "+resolve(homedir(),".opencode/bin/opencode"),resolve(homedir(),".local/bin/claude")+" --version"].some(probe=>command===probe||command===probe+" 2>&1")) return true;
   if (command.startsWith("grep -cE ")) return true;
   if (command === "command -v jq" || command === "command -v jq 2>&1") return true;
   if (command === "command -v bun" || command === resolve(homedir(),".bun/bin/bun")+" --version 2>/dev/null") return true;
@@ -109,6 +110,17 @@ function localProxyPort(root:string):number|null{
       cfg.defaultZenKey||cfg.proxyKey||cfg.upstream!=="https://opencode.ai/inference/openai/v1")return null;
     return cfg.port;
   }catch{return null;}
+}
+function installedClaudeLauncher(path:string):boolean{
+  try{
+    if(typeof process.getuid!=="function" || !/^[A-Za-z0-9_./-]+$/.test(path) ||
+       path!==resolve(homedir(),".local/bin/claude") || lstatSync(path).uid!==process.getuid())return false;
+    const target=realpathSync(path);
+    const versions=resolve(homedir(),".local/share/claude/versions");
+    if(realpathSync(versions)!==versions || !target.startsWith(versions+"/") ||
+       !/^\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?$/.test(target.slice(versions.length+1)))return false;
+    return lstatSync(target).uid===process.getuid() && installedTool(target);
+  }catch{return false;}
 }
 function installedTool(path:string):boolean{
   try{
@@ -233,12 +245,18 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
     }
     const cli=resolve(homedir(),".opencode/bin/opencode");
     if(/^[A-Za-z0-9_./-]+$/.test(cli) &&
-      (part===cli+" --version" || part===cli+" --version 2>&1" || part===cli+" --version 2>&1 | head -5")){
+      (part===cli+" --version" || part===cli+" --version 2>&1" || (part===cli+" --version 2>&1 | head -5" || part===cli+" --version 2>&1 | head -1"))){
       try {
         if(!installedTool(cli))return null;
         resources.push(...part.split(" | "));continue;
       }catch{return null;}
     }
+    const claudeLauncher=resolve(homedir(),".local/bin/claude");
+    if(installedClaudeLauncher(claudeLauncher) &&
+      ["readlink -f "+claudeLauncher,"ls -ld "+claudeLauncher,claudeLauncher+" --version"].includes(plain)){
+      resources.push(part);continue;
+    }
+    if(installedTool(cli) && plain==="ls -ld "+cli){resources.push(part);continue;}
     const service=/^systemctl --user (?:is-active|is-enabled) ([A-Za-z0-9_-]+(?:\.service)?)$/.exec(plain);
     const metadata=/^systemctl --user show ([A-Za-z0-9_-]+(?:\.service)?)((?: -p (?:ActiveState|SubState|MainPID|LoadState|UnitFileState|ExecMainStartTimestamp|FragmentPath|NRestarts)){1,8})$/.exec(plain);
     if([service?.[1],metadata?.[1]].some(name=>name===unit||name+".service"===unit)){resources.push(part);continue;}

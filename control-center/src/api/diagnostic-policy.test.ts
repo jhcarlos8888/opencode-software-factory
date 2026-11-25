@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, realpathSync, writeFileSync, rmSync, symlinkSync, mkdirSync, existsSync } from "node:fs";
+import { mkdtempSync, realpathSync, writeFileSync, rmSync, symlinkSync, mkdirSync, existsSync, chmodSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir, homedir } from "node:os";
 import { assessDiagnosticCommand, matchDiagnosticResources } from "./diagnostic-policy.js";
@@ -501,4 +501,23 @@ test("Post-uninstall counts do not grant general service or process enumeration"
     for(const bad of [cmds[0]!.replace("grep -c zen-proxy","cat"),cmds[1]!.replace("pid=","args="),cmds[2]!.replace("8787","22"),cmds[0]+"; systemctl --user stop zen-proxy.service"])assert.equal(assessDiagnosticCommand(bad,root,root),null);
     assert.equal(assessDiagnosticCommand(cmds[0]!,base,base),null);
   }finally{rmSync(base,{recursive:true,force:true});}
+});
+
+test("Installed Claude launcher metadata and version are confined to the versioned executable",()=>{
+  const base=realpathSync(mkdtempSync(join(tmpdir(),"factory-claude-launcher-")));
+  const old=process.env.HOME;
+  try{
+    process.env.HOME=base;
+    const root=join(base,"project"),bin=join(base,".local/bin"),versions=join(base,".local/share/claude/versions");
+    mkdirSync(root);mkdirSync(bin,{recursive:true});mkdirSync(versions,{recursive:true});
+    const launcher=join(bin,"claude"),target=join(versions,"2.1.327");
+    writeFileSync(target,"fixture");chmodSync(target,0o700);symlinkSync(target,launcher);
+    for(const cmd of ["readlink -f "+launcher,"ls -ld "+launcher+" 2>&1",launcher+" --version"]){
+      assert.deepEqual(assessDiagnosticCommand(cmd,root,root)?.resources,[cmd]);
+      assert.equal(assessOpenCodePermission({permission:"shell",resources:[cmd]},root,"workspace-write",{agentId:"tester",instructions:"Verificar CLI"},{command:cmd,workdir:root}).verdict,"auto");
+    }
+    for(const bad of [launcher+" --help",launcher+" --version; env","readlink -f "+join(bin,"other")])assert.equal(assessDiagnosticCommand(bad,root,root),null);
+    rmSync(launcher);symlinkSync("/bin/sh",launcher);
+    assert.equal(assessDiagnosticCommand(launcher+" --version",root,root),null);
+  }finally{if(old===undefined)delete process.env.HOME;else process.env.HOME=old;rmSync(base,{recursive:true,force:true});}
 });
