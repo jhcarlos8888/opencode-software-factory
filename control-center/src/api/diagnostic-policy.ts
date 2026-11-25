@@ -122,7 +122,7 @@ export function assessIndependentDiagnostic(command:string,root:string):Recipe|n
     if(projected && curlDefaultsAbsent() && localProxyPort(root)===Number(projected[2])){
       const filters: Record<string,string[]> = {
         health: ["{ok,upstream,sync:.sync.ok,version}"],
-        "v1/models": ["{count:(.data|length),ids:(.data|map(.id))}"],
+        "v1/models": ["{count:(.data|length),ids:(.data|map(.id))}","{count:(.data|length)}"],
         "api/status": ["{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}","{upstreamOk,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)},requestsTotal:.requests.total}"]
       };
       if(filters[projected[3]!]?.includes(projected[5]!.replace(/, +/g,","))){

@@ -190,6 +190,8 @@ test("QA service aliases, listening port and projected health use only bounded m
     const counts="curl -s --max-time 8 http://127.0.0.1:8787/api/status | jq -c '{upstreamOk,requests:.requests.total,sync:{ok:.sync.ok,working:(.sync.working|length),rateLimited:(.sync.rateLimited|length)}}'";
     if(cleanCurl){
       assert.deepEqual(assessDiagnosticCommand(models,root,root)?.resources,models.split(" | "));
+      const countOnly=models.replace(", ids:(.data|map(.id))","");
+      assert.deepEqual(assessDiagnosticCommand(countOnly,root,root)?.resources,countOnly.split(" | "));
       assert.deepEqual(assessDiagnosticCommand(counts,root,root)?.resources,counts.split(" | "));
       const observed="curl -s --max-time 8 http://127.0.0.1:8787/api/status | jq -c '{upstreamOk, sync:{ok:.sync.ok, working:(.sync.working|length), rateLimited:(.sync.rateLimited|length)}, requestsTotal:.requests.total}'";
       assert.deepEqual(assessDiagnosticCommand(observed,root,root)?.resources,observed.split(" | "));
