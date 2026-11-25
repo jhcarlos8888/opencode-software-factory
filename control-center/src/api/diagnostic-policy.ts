@@ -170,13 +170,17 @@ export function assessDiagnosticCommand(command:string,root:string,cwd:string|un
   // The only supported substitution is this fixed public hash recipe.
   // A relative file read after a failed cd is forbidden: with no native
   // cwd require && after the loop and every subsequent command.
-  const hashLoop=/^for f in ([A-Za-z0-9_./ -]+); do (printf '%s  %s\\n' "\$\((curl -fsSL -(?:m|\-max-time) (?:[1-9]|[1-5]\d|60) https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/\$f) \| sha256sum \| (cut -d' ' -f1)\)" "remote\/\$f"); done( && |; )echo "---LOCAL---"( && |; )sha256sum ([A-Za-z0-9_./ -]+)$/.exec(command);
+  const hashLoop=/^for f in ([A-Za-z0-9_./ -]+); do (printf '%s  %s\\n' "\$\((curl -fsSL -(?:m|\-max-time) (?:[1-9]|[1-5]\d|60) https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/\$f) \| sha256sum \| (cut -d' ' -f1)\)" "remote\/\$f"); done( && |; )(echo (?:"---LOCAL---"|'---LOCAL---'))( && |; )sha256sum ([A-Za-z0-9_./ -]+)(?:( && |; )(echo (?:"---REMOTE-HEAD---"|'---REMOTE-HEAD---'))( && |; )(git ls-remote https:\/\/github\.com\/[A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+ refs\/heads\/(?:main|master)))?$/.exec(command);
   if(hashLoop){
     const files=hashLoop[1]!.split(" ");
-    if((cwd!==root && (!explicitCd || hashLoop[6]!==" && " || hashLoop[7]!==" && ")) ||
+    const hasHead=hashLoop[13]!==undefined;
+    if((cwd!==root && (!explicitCd || hashLoop[6]!==" && " || hashLoop[8]!==" && " ||
+      (hasHead && (hashLoop[10]!==" && " || hashLoop[12]!==" && ")))) ||
       files.length>20 || !files.every(f=>safeSource(root,f)) ||
-      hashLoop[8]!==hashLoop[1] || !repoMentioned(instructions,hashLoop[4]!) || !curlDefaultsAbsent())return null;
-    return {category:"inspection",resources:[hashLoop[2]!,hashLoop[3]!,"sha256sum",hashLoop[5]!,'echo "---LOCAL---"',"sha256sum "+hashLoop[8]]};
+      hashLoop[9]!==hashLoop[1] || !repoMentioned(instructions,hashLoop[4]!) || !curlDefaultsAbsent() ||
+      (hasHead && (!requestedPublicRepo(hashLoop[13]!,instructions,root) ||
+        !hashLoop[13]!.startsWith("git ls-remote https://github.com/"+hashLoop[4]+" "))))return null;
+    return {category:"inspection",resources:[hashLoop[2]!,hashLoop[3]!,"sha256sum",hashLoop[5]!,hashLoop[7]!,"sha256sum "+hashLoop[9],...(hasHead?[hashLoop[11]!,hashLoop[13]!]:[])]};
   }
   const catalogHash=/^(sha256sum models\.json) && (printf '%s  %s\\n' "\$\((curl -fsSL -(?:m|\-max-time) (?:[1-9]|[1-5]\d|60) https:\/\/raw\.githubusercontent\.com\/([A-Za-z0-9_-]+\/[A-Za-z0-9_.-]+)\/(?:main|master)\/models\.json) \| sha256sum \| (cut -d' ' -f1)\)" "remote\/models\.json") && (node -e 'const c=require\("\.\/models\.json"\); console\.log\("models:",c\.models\.length,"unique:",new Set\(c\.models\)\.size,"updatedAt:",c\.updatedAt\)')$/.exec(command);
   if(catalogHash){

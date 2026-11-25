@@ -1024,7 +1024,8 @@ async function runClaudeAgent(
             ? { ...input, workdir: bashContext.cwd, cwd: bashContext.cwd }
             : { ...input, workdir: undefined, cwd: undefined };
         const auditorDecision = !isQuestion ? assessAuditorTool({
-          engine: "claude", toolName, input: auditInput, projectPath, permissionProfile: agent.permissionProfile
+          engine: "claude", toolName, input: auditInput, projectPath, permissionProfile: agent.permissionProfile,
+          roundInstructions: getExecutionSnapshot(state.runId)?.run.instructions ?? ""
         }) : null;
         if (auditorDecision?.verdict === "auto") {
           addLog(state.runId, "AUDITOR", "success",

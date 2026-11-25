@@ -22,6 +22,7 @@ export interface AuditorToolRequest {
   toolName: string;
   input: unknown;
   projectPath: string;
+  roundInstructions?: string;
   permissionProfile: "read-only" | "workspace-write" | "approval-required";
 }
 
@@ -261,7 +262,7 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
       return { verdict: "human", category: "high-risk", reason: "El comando solicita trabajar fuera del proyecto." };
     }
     if (input.env !== undefined || input.environment !== undefined) return { verdict: "human", category: "high-risk", reason: "El comando solicita alterar el entorno de ejecución." };
-    const diagnostic = assessDiagnosticCommand(shell, request.projectPath, typeof workdir === "string" ? workdir : undefined) ?? assessIndependentDiagnostic(shell, request.projectPath);
+    const diagnostic = assessDiagnosticCommand(shell, request.projectPath, typeof workdir === "string" ? workdir : undefined, request.roundInstructions) ?? assessIndependentDiagnostic(shell, request.projectPath);
     if (diagnostic) return { verdict: "auto", category: diagnostic.category,
       reason: "Diagnóstico acotado del proyecto con directorio y comando verificados." };
     const gradle = (workdir === undefined || resolve(request.projectPath, String(workdir)) === request.projectPath) && isSafeGradleVerification(shell, request.projectPath);

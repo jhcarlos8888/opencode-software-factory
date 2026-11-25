@@ -274,3 +274,18 @@ test("Claude review combines confined service and model health projections",()=>
     assert.equal(assessDiagnosticCommand(command.replace("8787/health","8787/api/status"),root,root),null);
   }finally{rmSync(base,{recursive:true,force:true});}
 });
+
+test("Claude public source comparison requires trusted round authority and exact project cwd",()=>{
+  const root=realpathSync(mkdtempSync(join(tmpdir(),"factory-claude-hashes-")));
+  try{
+    for(const f of ["zen-proxy.mjs","package.json","install.sh","models.json"])writeFileSync(join(root,f),"fixture");
+    const files="zen-proxy.mjs package.json install.sh models.json";
+    const command="for f in "+files+"; do printf '%s  %s\\n' \"$(curl -fsSL -m 60 https://raw.githubusercontent.com/example/project/main/$f | sha256sum | cut -d' ' -f1)\" \"remote/$f\"; done; echo '---LOCAL---'; sha256sum "+files+"; echo '---REMOTE-HEAD---'; git ls-remote https://github.com/example/project refs/heads/main";
+    const request={engine:"claude" as const,toolName:"Bash",input:{command,cwd:root},projectPath:root,permissionProfile:"workspace-write" as const,roundInstructions:"Analiza https://github.com/example/project"};
+    const result=assessDiagnosticCommand(command,root,root,request.roundInstructions);
+    if(result)assert.equal(assessAuditorTool(request).verdict,"auto");
+    assert.notEqual(assessAuditorTool({...request,roundInstructions:"Sin repo"}).verdict,"auto");
+    assert.notEqual(assessAuditorTool({...request,input:{command}}).verdict,"auto");
+    assert.notEqual(assessAuditorTool({...request,input:{command:command+"; git push",cwd:root}}).verdict,"auto");
+  }finally{rmSync(root,{recursive:true,force:true});}
+});
