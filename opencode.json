@@ -121,43 +121,6 @@
     }
   ],
   "providers": {
-    "zen-proxy": {
-      "name": "Zen Proxy Local",
-      "package": "aisdk:@ai-sdk/openai-compatible",
-      "settings": {
-        "baseURL": "http://127.0.0.1:8787/v1"
-      },
-      "body": {
-        "temperature": 0.2,
-        "top_p": 0.9
-      },
-      "models": {
-        "big-pickle": {
-          "name": "Big Pickle"
-        },
-        "beam-free": {
-          "name": "Beam Free"
-        },
-        "flint-40b-free": {
-          "name": "Flint 40B Free"
-        },
-        "mimo-v2.6-flash-free": {
-          "name": "MiMo V2.6 Flash Free"
-        },
-        "nemotron-3.5-super-vl-free": {
-          "name": "Nemotron 3.5 Super VL Free"
-        },
-        "nemotron-3.5-lightning-free": {
-          "name": "Nemotron 3.5 Lightning Free"
-        },
-        "deepseek-v4.1-flash-free": {
-          "name": "DeepSeek V4.1 Flash Free"
-        },
-        "glm-5.3-flash-free": {
-          "name": "GLM 5.3 Flash Free"
-        }
-      }
-    },
     "lmstudio": {
       "name": "LM Studio Local",
       "package": "aisdk:@ai-sdk/openai-compatible",

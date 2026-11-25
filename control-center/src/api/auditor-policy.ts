@@ -7,6 +7,7 @@
  */
 import { isAbsolute, relative, resolve } from "node:path";
 import { lstatSync, realpathSync } from "node:fs";
+import { assessCapabilityCommand, assessScopedTestCommand, nativeSegmentResources } from "./auditor-capabilities.js";
 import { assessDiagnosticCommand, assessIndependentDiagnostic, matchDiagnosticResources } from "./diagnostic-policy.js";
 import { assessAuthorizedGitWorkflow, isGitWorkflowInspection, isContextualGitInspection, nativeGitCommandMatches, type GitRoundAuthority } from "./git-workflow-policy.js";
 
@@ -23,6 +24,7 @@ export interface AuditorToolRequest {
   input: unknown;
   projectPath: string;
   roundInstructions?: string;
+  capabilityScope?: string;
   permissionProfile: "read-only" | "workspace-write" | "approval-required";
 }
 
@@ -262,7 +264,7 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
       return { verdict: "human", category: "high-risk", reason: "El comando solicita trabajar fuera del proyecto." };
     }
     if (input.env !== undefined || input.environment !== undefined) return { verdict: "human", category: "high-risk", reason: "El comando solicita alterar el entorno de ejecución." };
-    const diagnostic = assessDiagnosticCommand(shell, request.projectPath, typeof workdir === "string" ? workdir : undefined, request.roundInstructions) ?? assessIndependentDiagnostic(shell, request.projectPath);
+    const diagnostic = assessScopedTestCommand(shell, request.projectPath, typeof workdir === "string" ? workdir : undefined, request.capabilityScope ?? request.roundInstructions) ?? assessCapabilityCommand(shell, request.projectPath, typeof workdir === "string" ? workdir : undefined, request.capabilityScope ?? request.roundInstructions) ?? assessDiagnosticCommand(shell, request.projectPath, typeof workdir === "string" ? workdir : undefined, request.roundInstructions) ?? assessIndependentDiagnostic(shell, request.projectPath);
     if (diagnostic) return { verdict: "auto", category: diagnostic.category,
       reason: "Diagnóstico acotado del proyecto con directorio y comando verificados." };
     const gradle = (workdir === undefined || resolve(request.projectPath, String(workdir)) === request.projectPath) && isSafeGradleVerification(shell, request.projectPath);
@@ -301,6 +303,9 @@ export function assessOpenCodePermission(
       nativeInput.env === undefined && nativeInput.environment === undefined &&
       !isProtectedShellCommand(nativeInput.command)) {
     const diagnostic = assessDiagnosticCommand(nativeInput.command, projectPath, nativeInput.workdir === projectPath ? projectPath : undefined, authority?.instructions) ?? assessIndependentDiagnostic(nativeInput.command, projectPath);
+    const capability = assessScopedTestCommand(nativeInput.command, projectPath, nativeInput.workdir === projectPath ? projectPath : undefined, authority?.capabilityScope ?? authority?.instructions) ?? assessCapabilityCommand(nativeInput.command, projectPath, nativeInput.workdir === projectPath ? projectPath : undefined, authority?.capabilityScope ?? authority?.instructions);
+    if (capability && matchDiagnosticResources(request.resources, capability.resources))
+      return { verdict: "auto", category: capability.category, reason: "Capacidades de lectura verificadas: alcance de ronda, comando nativo completo y recursos sin comodines." };
     if (diagnostic && matchDiagnosticResources(request.resources, diagnostic.resources))
       return { verdict: "auto", category: diagnostic.category, reason: "Diagnóstico concreto verificado contra la llamada nativa; no se conceden comodines." };
   }
@@ -311,6 +316,18 @@ export function assessOpenCodePermission(
         (value) => !isProtectedShellCommand(value) && isSafeShell(value) && /^(?:git |echo )/.test(value))) {
       return { verdict: "auto", category: "workspace", reason: "Operación Git concreta autorizada expresamente en esta ronda por el usuario; archivos, comando nativo y destino comprobados." };
     }
+  }
+  if (tool === "shell" && authority?.requireNativeShellEvidence) {
+    if (!nativeInput || typeof nativeInput.command !== "string") return { verdict: "human", category: "unknown", reason: "Falta la llamada nativa completa del motor; no se autoriza por patrones." };
+    if (isProtectedShellCommand(nativeInput.command)) return { verdict: "block", category: "high-risk", reason: "La llamada nativa contiene una operación destructiva o de control crítico." };
+    const actual = Array.isArray(request.resources) && request.resources.every((x): x is string => typeof x === "string") ? request.resources : [];
+    const expected = nativeSegmentResources(nativeInput.command);
+    if (!expected || !matchDiagnosticResources(actual, expected) ||
+        nativeInput.workdir !== projectPath || (nativeInput.cwd !== undefined && nativeInput.cwd !== projectPath) ||
+        nativeInput.env !== undefined || nativeInput.environment !== undefined) {
+      return { verdict: "human", category: "unknown", reason: "La operación nativa no coincide íntegramente con sus recursos o directorio autorizado." };
+    }
+    if (typeof input.command === "string" && input.command !== nativeInput.command) return { verdict: "human", category: "unknown", reason: "El comando de metadatos no coincide con el nativo." };
   }
   if (tool === "shell" && typeof input.command !== "string") {
     // OpenCode 2.1 supplies a *segmented* resources list for shell permissions,

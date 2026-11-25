@@ -594,6 +594,8 @@ export type ExecutionDecisionStatus = "pending" | "responding" | "approved" | "r
 
 export interface ExecutionConfigurationSnapshot {
   capturedAt: string;
+  auditorScope?: string;
+  auditorCapabilities?: { roots: string[]; metadata: string[]; configs: string[]; testRoots: string[]; markers: string[] };
   claudeProvider: ClaudeProviderId;
   favorites: FavoriteModel[];
   assignments: AgentAssignment[];

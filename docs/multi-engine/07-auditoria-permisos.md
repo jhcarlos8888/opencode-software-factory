@@ -501,3 +501,65 @@ Evento 22352: coincidencias en dependencias node_modules de
 examResolve no acreditan una integración activa; no deben
 eliminarse. La fábrica responde ok y el servicio Zen Proxy sigue
 not-found con MainPID=0 y puerto 8787 sin escucha.
+
+## Auditor por capacidades y alcance de ronda (2026-11-25)
+
+La aprobación automática deja de depender exclusivamente de recetas
+de diagnóstico individuales. Se añade un clasificador determinista
+de operaciones de lectura y pruebas acotadas, con análisis del comando
+nativo completo, composición de segmentos, variables de ruta literales,
+bucles finitos, rutas canónicas, proyecciones JSON y límites de búsqueda.
+OpenCode y Claude comparten la política. Los permisos externos se
+declaran separadamente de las instrucciones y se congelan en el
+registro de la ronda. Los informes y handoffs no amplían dicho alcance.
+
+El proyecto seleccionado tiene alcance implícito. En el campo
+**Alcance adicional del Auditor**, se puede declarar una vez por ronda:
+
+    AUDITOR_READ_ROOT: /ruta/proyecto
+    AUDITOR_TEST_ROOT: /ruta/proyecto
+    AUDITOR_CONFIG_FILE: /ruta/configuracion.json
+    AUDITOR_METADATA_PATH: /ruta/archivo
+    AUDITOR_MARKERS: proveedor,puerto
+
+La lectura no concede permiso para ejecutar pruebas en otra raíz;
+ejecutar scripts implica confiar en el código de ese proyecto.
+Los archivos de autenticación y las rutas de credenciales no se
+habilitan por esta vía. Se rechazan sustituciones, redirecciones
+arbitrarias y operaciones destructivas. Las escrituras externas y
+las operaciones de servicio críticas permanecen bajo revisión.
+Los casos no reconocidos fallan de forma conservadora; no se usa
+un LLM como autoridad de seguridad ni se conceden comodines.
+
+Se exige evidencia nativa completa para nuevas decisiones shell de
+OpenCode, además de la coincidencia de los recursos. La interfaz
+separa las escaladas históricas de las alertas de riesgo y las
+autoaprobaciones reales.
+
+### Evidencia y límites
+
+La ronda de desinstalación terminó con 7/7 agentes, 67 decisiones
+escaladas (61 aprobadas, 6 rechazadas) y 2 autoaprobaciones.
+Reproducción sin ejecutar comandos, sobre un árbol de prueba que
+representa la instalación eliminada, rutas externas actuales y un
+alcance adicional simulado: de las 67 decisiones, la política
+anterior (4463d56) clasificó 7 automáticas, 59 humanas y 1 bloqueada;
+la nueva sin alcance externo, 8 automáticas, 55 humanas y 4 bloqueadas;
+con alcance adicional, 17 automáticas, 46 humanas y 4 bloqueadas.
+Los 66 registros de OpenCode tenían evidencia nativa recuperable;
+para Claude se simuló el cwd de la única decisión. La comparación
+no reconstruye el estado histórico de disco ni demuestra ejecución
+real de los motores. Ninguna de las seis solicitudes históricamente
+rechazadas pasa a autoaprobación. La cobertura todavía es parcial.
+
+La limpieza final se verificó fuera de la ronda: instalación y respaldo
+exclusivo eliminados, variantes y reciente de Zen Proxy retirados del
+estado de OpenCode, proveedor retirado de un respaldo mixto conservando
+el resto. No se modifica el historial ni se oculta la alerta de
+detención del servicio registrada en la ronda. La autorización y
+verificación externa de aquella detención no constituyen un recibo
+de propiedad persistido en el ledger original.
+
+Siguiente etapa: ampliar herramientas tipadas para diagnóstico y
+mutaciones de alcance específico, medir cobertura en nuevas rondas
+reales y reducir escaladas restantes sin reducir las barreras.

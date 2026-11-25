@@ -3,7 +3,7 @@ import { lstatSync, realpathSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { isSensitiveFilesystemPath } from "./filesystem-guards.js";
 
-export interface GitRoundAuthority { instructions: string; agentId: string }
+export interface GitRoundAuthority { instructions: string; agentId: string; requireNativeShellEvidence?: boolean; capabilityScope?: string }
 type Dict = Record<string, unknown>;
 const obj = (v: unknown): Dict => v && typeof v === "object" && !Array.isArray(v) ? v as Dict : {};
 

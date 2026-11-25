@@ -21,6 +21,7 @@ import { analyzeProject } from "./projects.js";
 import { cancelExecution, getExecution, getLatestExecution, recoverExecutionState, respondExecutionDecision, startExecution } from "./execution.js";
 import { compareRuntimeBuilds, parseRuntimeBuildInfo } from "./runtime-build.js";
 import { CONTROL_CENTER_SECURITY_HEADERS, inspectRequestSecurity } from "./request-security.js";
+import { validateCapabilityScopeInput } from "./auditor-capabilities.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
 import { formatInstructionFilePrompt, validateInstructionFile } from "./instruction-files.js";
 
@@ -696,7 +697,7 @@ app.get<{ Params: { runId: string } }>("/api/executions/:runId", async (request,
   return { execution };
 });
 
-app.post<{ Body: { path?: unknown; instructions?: unknown; instructionFile?: unknown; preflightDepth?: unknown; taskDepth?: unknown } }>("/api/executions", async (request, reply) => {
+app.post<{ Body: { path?: unknown; instructions?: unknown; instructionFile?: unknown; preflightDepth?: unknown; taskDepth?: unknown; auditorScope?: unknown } }>("/api/executions", async (request, reply) => {
   let instructionFile;
   try {
     instructionFile = validateInstructionFile(request.body?.instructionFile);
@@ -715,6 +716,9 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; instructionFile?: unk
   if (!instructions && !instructionFile) {
     return reply.code(400).send({ error: "Escribe una instrucción o adjunta un archivo TXT." });
   }
+  let auditorScope: string;
+  try { auditorScope = validateCapabilityScopeInput(projectPath, request.body?.auditorScope).declarations; }
+  catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
   const effectiveInstructions = instructions || `Mi petición está definida en el archivo TXT adjunto. Léelo íntegramente y sigue su contenido para esta ronda: ${instructionFile?.name}.`;
   const preflightDepth = request.body?.preflightDepth;
   if (!["quick", "focused", "deep"].includes(String(preflightDepth))) {
@@ -772,7 +776,7 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; instructionFile?: unk
     const savedFile = instructionFile ? saveWorkInstructionFile(threadId, 1, instructionFile) : null;
     addWorkMessage(threadId, null, 1, "user", effectiveInstructions, "initial-instruction");
     const result = await startExecution(projectPath, effectiveInstructions, factoryRoot, taskDepth as "quick" | "focused" | "deep" | undefined, {
-      threadId, roundNumber: 1,
+      threadId, roundNumber: 1, auditorScope,
       instructionFileContext: savedFile ? formatInstructionFilePrompt([savedFile]) : "",
       instructionFilePlanningText: savedFile?.content ?? "",
       instructionFileMetadata: savedFile
@@ -795,7 +799,7 @@ app.post<{ Body: { path?: unknown; instructions?: unknown; instructionFile?: unk
 
 app.post<{
   Params: { threadId: string };
-  Body: { instructions?: unknown; instructionFile?: unknown; reuseInstructionFileId?: unknown; taskDepth?: unknown };
+  Body: { instructions?: unknown; instructionFile?: unknown; reuseInstructionFileId?: unknown; taskDepth?: unknown; auditorScope?: unknown };
 }>("/api/work-threads/:threadId/continue", async (request, reply) => {
   const workflow = getWorkThreadSnapshot(request.params.threadId);
   if (!workflow) return reply.code(404).send({ error: "Proceso de trabajo no encontrado." });
@@ -826,6 +830,9 @@ app.post<{
   if (!instructions && !instructionFile && !reusedFile) {
     return reply.code(400).send({ error: "Escribe una instrucción o selecciona un archivo TXT." });
   }
+  let auditorScope: string;
+  try { auditorScope = validateCapabilityScopeInput(workflow.thread.projectPath, request.body?.auditorScope).declarations; }
+  catch (error) { return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) }); }
   const effectiveInstructions = instructions ||
     `Mi petición está definida en el archivo TXT seleccionado. Léelo íntegramente y sigue su contenido para esta ronda: ${instructionFile?.name ?? reusedFile?.name}.`;
   const latestRound = workflow.rounds.at(-1);
@@ -863,7 +870,7 @@ app.post<{
       factoryRoot,
       taskDepth as "quick" | "focused" | "deep" | undefined,
       {
-        threadId: request.params.threadId, roundNumber, continuityContext,
+        threadId: request.params.threadId, roundNumber, continuityContext, auditorScope,
         instructionFileContext: savedFile ? formatInstructionFilePrompt([savedFile]) : "",
         instructionFilePlanningText: savedFile?.content ?? "",
         instructionFileMetadata: savedFile

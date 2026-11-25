@@ -173,6 +173,8 @@ interface ExecutionSummary {
 }
 interface ExecutionConfigurationSnapshot {
   capturedAt: string;
+  auditorScope?: string;
+  auditorCapabilities?: { roots: string[]; metadata: string[]; configs: string[]; testRoots: string[]; markers: string[] };
   claudeProvider: ClaudeProviderId;
   favorites: FavoriteModel[];
   assignments: Assignment[];
@@ -318,6 +320,7 @@ export default function App() {
   const [handoffOutputLoading, setHandoffOutputLoading] = useState<Record<string, boolean>>({});
   const [handoffOutputErrors, setHandoffOutputErrors] = useState<Record<string, string>>({});
   const [continuationText, setContinuationText] = useState("");
+  const [auditorScopeText, setAuditorScopeText] = useState("");
   const [selectedInstructionFile, setSelectedInstructionFile] = useState<SelectedInstructionFile | null>(null);
   const [reuseInstructionFileId, setReuseInstructionFileId] = useState("");
   const [instructionFileBusy, setInstructionFileBusy] = useState(false);
@@ -352,6 +355,7 @@ export default function App() {
   useEffect(() => {
     setSelectedInstructionFile(null);
     setReuseInstructionFileId("");
+    setAuditorScopeText("");
   }, [projectPath, workThread?.thread.id]);
 
   useEffect(() => {
@@ -671,7 +675,7 @@ export default function App() {
         }>("/api/work-threads/" + workThread.thread.id + "/continue", {
           method: "POST",
           body: JSON.stringify({
-            instructions,
+            instructions, auditorScope: auditorScopeText.trim(),
             ...(selectedInstructionFile
               ? { instructionFile: { name: selectedInstructionFile.name, content: selectedInstructionFile.content } }
               : {}),
@@ -681,6 +685,7 @@ export default function App() {
         setExecution(result.execution);
         setWorkThread(result.workflow);
         setContinuationText("");
+        setAuditorScopeText("");
         setSelectedInstructionFile(null);
         setReuseInstructionFileId("");
         setNotice("Ronda " + (result.execution?.run.roundNumber ?? "nueva") + " iniciada. Se conservan el historial, los resultados y la evidencia anteriores.");
@@ -717,7 +722,7 @@ export default function App() {
         method: "POST",
         body: JSON.stringify({
           path: projectPath,
-          instructions,
+          instructions, auditorScope: auditorScopeText.trim(),
           ...(selectedInstructionFile
             ? { instructionFile: { name: selectedInstructionFile.name, content: selectedInstructionFile.content } }
             : {}),
@@ -727,6 +732,7 @@ export default function App() {
       setExecution(result.execution);
       setWorkThread(result.workflow);
       setContinuationText("");
+      setAuditorScopeText("");
       setSelectedInstructionFile(null);
       setReuseInstructionFileId("");
       setPreflightConsumed(true);
@@ -879,7 +885,19 @@ export default function App() {
 
   const auditorEvents = execution?.events.filter((event) => event.area === "AUDITOR") ?? [];
   const auditorAutoCount = auditorEvents.filter((event) => event.message.startsWith("Permiso aprobado automáticamente")).length;
-  const auditorEscalationCount = auditorEvents.filter((event) => /revisión humana|alto riesgo|incidente operativo/i.test(event.message)).length;
+  const auditorEscalationCount = execution?.decisionHistory.filter(d => d.kind === "permission").length ?? 0;
+  const auditorRiskCount = auditorEvents.filter(event => event.kind === "warning").length;
+  const auditorScopeEditor = (
+    <details className="work-config-instructions">
+      <summary>Alcance adicional del Auditor (opcional · solo esta ronda)</summary>
+      <p>El proyecto seleccionado ya está autorizado para lecturas seguras. Para trabajar entre proyectos, declara las rutas concretas una vez. Lectura y ejecución de pruebas son permisos diferentes; esto no concede escritura externa ni borrado.</p>
+      <textarea aria-label="Alcance adicional del Auditor" value={auditorScopeText}
+        onChange={event => setAuditorScopeText(event.target.value)} rows={4} maxLength={8000}
+        disabled={activeExecution || executionStarting || continuationBusy}
+        placeholder={"AUDITOR_READ_ROOT: /ruta/otro-proyecto\nAUDITOR_TEST_ROOT: /ruta/otro-proyecto/control-center\nAUDITOR_CONFIG_FILE: /ruta/config.json\nAUDITOR_METADATA_PATH: /ruta/archivo\nAUDITOR_MARKERS: marcador1,marcador2"} />
+      <small>Una declaración por línea. Solo rutas canónicas y configuraciones concretas. El servidor valida el alcance antes de iniciar; los agentes no pueden ampliarlo.</small>
+    </details>
+  );
   const decisionMonitoringPanel = (
 <section className="section-block decision-section" id="decisions">
             <div className="section-title-row">
@@ -897,10 +915,11 @@ export default function App() {
                 <strong>◈ AGENTE AUDITOR · SEGURIDAD OPERATIVA</strong>
                 <span>{execution ? "ACTIVO EN LA RONDA" : "LISTO"}</span>
               </div>
-              <p>Política verificable y conservadora: aprueba lecturas, pruebas y diagnósticos permitidos, con registro de cada decisión. No usa un modelo generativo para conceder permisos.</p>
+              <p>Motor de capacidades: valida el comando nativo, el alcance autorizado y cada operación. La lectura y las pruebas seguras no requieren clics repetitivos; las acciones sensibles conservan revisión humana.</p>
               <div className="auditor-status-details">
-                <span><strong>{auditorAutoCount}</strong> autoaprobaciones visibles</span>
-                <span><strong>{auditorEscalationCount}</strong> alertas/escalamientos visibles</span>
+                <span><strong>{auditorAutoCount}</strong> autoaprobaciones reales</span>
+                <span><strong>{auditorEscalationCount}</strong> permisos escalados (histórico)</span>
+                <span><strong>{auditorRiskCount}</strong> alertas de seguridad</span>
                 <span><strong>AUTOREPARACIÓN DESACTIVADA</strong></span>
               </div>
             </div>
@@ -1546,6 +1565,7 @@ export default function App() {
                     maxLength={MAX_WORK_INSTRUCTION_CHARS}
                     disabled={executionStarting || continuationBusy}
                   />
+                  {auditorScopeEditor}
                   <InstructionTxtPicker
                     id="initial-instruction-txt"
                     disabled={executionStarting || continuationBusy}
@@ -1743,6 +1763,7 @@ export default function App() {
                         maxLength={MAX_WORK_INSTRUCTION_CHARS}
                         disabled={activeExecution || continuationBusy}
                       />
+                      {auditorScopeEditor}
                       <InstructionTxtPicker
                         id="continuation-instruction-txt"
                         disabled={activeExecution || continuationBusy}
