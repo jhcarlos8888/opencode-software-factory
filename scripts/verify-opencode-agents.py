@@ -32,6 +32,24 @@ EXPECTED_MODES = {
 }
 
 
+DEFAULT_TEAM_MODEL = "opencode-go/kimi-k3.1-pro"
+EXPECTED_AGENT_MODELS = {
+    "build": "opencode-go/kimi-k3.1-pro",
+    "architect": "opencode-go/deepseek-v4.1-flash",
+    "cloud-arbiter": "opencode-go/kimi-k3.1-pro",
+    "implementer": "opencode-go/glm-5.3-flash",
+    "reverse": "opencode-go/deepseek-v4.1-flash",
+    "reviewer": "opencode-go/deepseek-v4.1-flash",
+    "tester": "opencode-go/glm-5.3-flash",
+}
+
+
+def expected_agent_model(default_model: str, agent_id: str) -> str:
+    # The canonical Go team is heterogeneous; installed legacy/custom-provider
+    # projects retain the previous uniform-model contract.
+    return EXPECTED_AGENT_MODELS[agent_id] if default_model == DEFAULT_TEAM_MODEL else default_model
+
+
 def request_json(base_url: str, auth: str, path: str, timeout: float = 3.0):
     request = urllib.request.Request(
         base_url + path,
@@ -161,6 +179,89 @@ def required_agent_permission_rules(agent_id: str) -> set[tuple[str, str, str]]:
     return set()
 
 
+FACTORY_FILESYSTEM_LAUNCHER = ".opencode/mcp/factory-filesystem.mjs"
+FACTORY_FILESYSTEM_ENV_KEY = "FACTORY_FILESYSTEM_MCP_ENTRYPOINT"
+# Marcas mínimas del bootstrap estático seguro (código fijo, sin shell y sin
+# entrada de prompt): resuelve el entrypoint inyectado o el relativo de fábrica.
+BOOTSTRAP_REQUIRED_MARKS = (
+    'require("node:path")',
+    'require("node:url")',
+    "pathToFileURL",
+    FACTORY_FILESYSTEM_ENV_KEY,
+    FACTORY_FILESYSTEM_LAUNCHER,
+    "import(",
+)
+# Ninguna de estas marcas debe aparecer: nada de shell, evaluación dinámica o
+# descargas. (No se prohíben operadores lógicos: el código corre en node -e,
+# no en un shell.)
+BOOTSTRAP_FORBIDDEN_MARKS = (
+    "`",
+    "child_process",
+    "eval(",
+    "Function(",
+    'require("fs")',
+    "curl",
+    "wget",
+)
+
+
+def filesystem_mcp_contract_error(filesystem_server: object) -> str | None:
+    """Contrato canónico del servidor MCP de la fábrica (bootstrap seguro).
+
+    El comando debe ser el bootstrap estático `[node, "-e", <código>]` que:
+    1) importa la ruta ABSOLUTA de `FACTORY_FILESYSTEM_MCP_ENTRYPOINT` cuando
+       Control Center la inyecta (mecanismo baseline para proyectos externos)
+       y, si no existe, resuelve `.opencode/mcp/factory-filesystem.mjs` contra
+       el cwd (fallback directo desde la fábrica);
+    2) falla de forma visible si esa ruta no existe (sin fallback silencioso).
+
+    Se conservan los guards: tipo `local`, `enabled=true`, `codemode=true` y
+    la variable de entorno `FACTORY_FILESYSTEM_MCP_ENTRYPOINT`.
+    Devuelve el mensaje de error o `None` si el contrato se cumple.
+    """
+    if not isinstance(filesystem_server, dict):
+        return "falta mcp.servers.factory_filesystem."
+    if filesystem_server.get("type") != "local":
+        return "factory_filesystem debe ser un servidor MCP local."
+    command = filesystem_server.get("command")
+    if (
+        not isinstance(command, list)
+        or len(command) != 3
+        or command[0] != "node"
+        or command[1] != "-e"
+        or not isinstance(command[2], str)
+        or not command[2]
+    ):
+        return (
+            "el comando factory_filesystem debe ser el bootstrap estático "
+            "[node, -e, <código>]; un launcher directo o env-only no está permitido."
+        )
+    bootstrap = command[2]
+    missing = [mark for mark in BOOTSTRAP_REQUIRED_MARKS if mark not in bootstrap]
+    if missing:
+        return "el bootstrap del MCP no contiene: " + ", ".join(missing)
+    forbidden = [mark for mark in BOOTSTRAP_FORBIDDEN_MARKS if mark in bootstrap]
+    if forbidden:
+        return "el bootstrap del MCP contiene código prohibido: " + ", ".join(forbidden)
+    expected_environment = {
+        FACTORY_FILESYSTEM_ENV_KEY: "{env:" + FACTORY_FILESYSTEM_ENV_KEY + "}"
+    }
+    configured_environment = filesystem_server.get("environment")
+    if not isinstance(configured_environment, dict) or any(
+        configured_environment.get(key) != value
+        for key, value in expected_environment.items()
+    ):
+        return (
+            "factory_filesystem debe conservar environment."
+            f"{FACTORY_FILESYSTEM_ENV_KEY} como guard del launcher."
+        )
+    if filesystem_server.get("codemode") is not True:
+        return "factory_filesystem debe declarar codemode=true (codemode=false no está permitido)."
+    if filesystem_server.get("enabled") is not True:
+        return "factory_filesystem debe declarar enabled=true."
+    return None
+
+
 def verify(project: Path, binary: str | None) -> int:
     project = project.resolve(strict=True)
     config_path = project / "opencode.json"
@@ -217,28 +318,9 @@ def verify(project: Path, binary: str | None) -> int:
 
     servers = (config.get("mcp") or {}).get("servers") or {}
     filesystem_server = servers.get("factory_filesystem")
-    if not isinstance(filesystem_server, dict):
-        print("ERROR: falta mcp.servers.factory_filesystem.")
-        return 1
-    if filesystem_server.get("type") != "local":
-        print("ERROR: factory_filesystem debe ser un servidor MCP local.")
-        return 1
-    expected_mcp_command = ["node", "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}"]
-    expected_mcp_environment = {
-        "FACTORY_FILESYSTEM_MCP_ENTRYPOINT": "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}"
-    }
-    if filesystem_server.get("command") != expected_mcp_command:
-        print("ERROR: el comando factory_filesystem no coincide con el servidor seguro versionado.")
-        return 1
-    configured_environment = filesystem_server.get("environment")
-    if not isinstance(configured_environment, dict) or any(
-        configured_environment.get(key) != value
-        for key, value in expected_mcp_environment.items()
-    ):
-        print("ERROR: factory_filesystem debe resolver su entrypoint mediante environment.FACTORY_FILESYSTEM_MCP_ENTRYPOINT.")
-        return 1
-    if filesystem_server.get("codemode") is not False or filesystem_server.get("enabled") is not True:
-        print("ERROR: factory_filesystem debe estar enabled y codemode=false.")
+    contract_error = filesystem_mcp_contract_error(filesystem_server)
+    if contract_error:
+        print("ERROR: " + contract_error)
         return 1
 
     if not filesystem_script.is_file() or filesystem_script.is_symlink():
@@ -288,10 +370,11 @@ def verify(project: Path, binary: str | None) -> int:
                 f"se esperaba {expected_mode!r}."
             )
             return 1
-        if frontmatter.get("model") != model:
+        agent_model = expected_agent_model(model, agent_id)
+        if frontmatter.get("model") != agent_model:
             print(
                 f"ERROR: {agent_id} declara model={frontmatter.get('model')!r}; "
-                f"se esperaba {model!r}."
+                f"se esperaba {agent_model!r}."
             )
             return 1
         actual_agent_rules = parse_permission_rules(lines[1:closing])
@@ -452,7 +535,7 @@ def verify(project: Path, binary: str | None) -> int:
                     if not last_missing and not last_wrong:
                         print(f"PASS: OpenCode {info.get('version', 'V2')} registró los 7 agentes desde {agent_dir}.")
                         for agent_id, mode in EXPECTED_MODES.items():
-                            print(f"  PASS: {agent_id} · mode={mode} · model={model}")
+                            print(f"  PASS: {agent_id} · mode={mode} · model configurado={expected_agent_model(model, agent_id)}")
                         print("PASS: permisos de solo lectura, delegación del coordinador y límites del Tester/Implementer verificados.")
                         print("PASS: verificación sin llamadas a modelos ni arranque de MCP externos.")
                         return 0

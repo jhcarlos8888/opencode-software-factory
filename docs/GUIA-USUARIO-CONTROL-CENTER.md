@@ -105,7 +105,18 @@ La API está enlazada a loopback. Rechaza orígenes de navegador externos y soli
 
 La línea base de seguridad y la excepción temporal de la dependencia picomatch están documentadas en docs/SECURITY-BASELINE.md.
 
-## 7. Diagnóstico
+## 7. Security Operations (auditoría de ciberseguridad)
+
+La sección `SECURITY OPERATIONS / Auditoría de ciberseguridad` (entrada en la navegación) gestiona la modalidad `security-audit`:
+
+- **Intención:** clasifica la petición sin crear archivos ni corridas; `guidance` es el modo por defecto.
+- **Iniciar:** exige proyecto seleccionado, preconsulta aceptada, equipo guardado y favoritos al día (las mismas validaciones que una ejecución normal). Controles de perfil (`quick`/`standard`/`deep`), alcance (`project`/`directory`/`component`/`domain`/`git-diff`), dominios oficiales, presupuesto, concurrencia y tiempo.
+- **Seguir:** seis fases, presupuesto con reservas, invocaciones reales con motor, modelo, sesión y verificación cruzada, cobertura, hallazgos por severidad, bloqueos y validadores oficiales. Reanudar, cancelar, validar y descargar los siete artefactos.
+- **Remediar:** marca hallazgos `confirmed` y crea, tras confirmación humana, una ejecución tradicional independiente; `verified_fixed` solo llega con evidencia de revalidación.
+
+Guía completa, arquitectura y límites en `docs/security-operations/`. El comando `/auditoria-seguridad` ofrece guidance desde OpenCode sin salir de solo lectura.
+
+## 8. Diagnóstico
 
 Salud del servicio y fingerprint:
 
@@ -135,7 +146,7 @@ ss -ltnp | grep 4141
 
 Si la interfaz indica que el runtime está desfasado, ejecuta npm run deploy desde control-center. Si la API no responde, revisa primero el estado de systemd y los logs; no inicies una segunda instancia a ciegas.
 
-## 8. Límites conocidos y trabajo pendiente
+## 9. Límites conocidos y trabajo pendiente
 
 - La fábrica serializa las ejecuciones activas; no ejecuta varios trabajos escritores concurrentes.
 - No crea todavía Git worktrees aislados por agente. Los agentes autorizados trabajan sobre la ruta de proyecto seleccionada. Antes de una tarea real, revisa el estado Git y conserva los cambios locales.
@@ -144,5 +155,6 @@ Si la interfaz indica que el runtime está desfasado, ejecuta npm run deploy des
 - En esa ronda, el script de prueba Java necesitó un JDK presente en PATH. Que exista un JDK dentro de un IDE no significa que el terminal o el servicio lo encuentre automáticamente.
 - El Control Center es una herramienta local de un solo usuario. No es una plataforma multiusuario ni un servicio remoto.
 - La dependencia de desarrollo picomatch mantiene una excepción temporal de seguridad hasta que el upstream publique una versión corregida. Mantén Vite solo en loopback.
+- La modalidad security-audit está implementada y probada con orquestador e invoker de pruebas, pero todavía no se ha ejecutado una auditoría end-to-end con motores de pago reales. La única política de ejecución implementada es `source-only`: un intento de arranque con `sandboxed-source-and-local-only` (incluso con una autorización sandbox aparentemente válida) se rechaza con `sandbox_not_implemented`. El sandbox de Bubblewrap no tiene llamador productivo y la promoción de artefactos queda bloqueada por las limitaciones de disco y dirfd descritas en docs/security-operations/ARCHITECTURE.md.
 
 La verificación automatizada de la fábrica no sustituye una prueba funcional con proveedores reales. Los resultados no ejecutados o no verificables deben reportarse como pendientes, no como aprobados.

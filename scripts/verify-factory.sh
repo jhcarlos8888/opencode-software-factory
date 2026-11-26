@@ -25,7 +25,7 @@ echo "OpenCode: $OPENCODE_BIN"
 echo "== 1. Validar configuración JSON =="
 jq -e '
   .default_agent == "build"
-  and .model == "opencode-go/mimo-v2.6-flash"
+  and .model == "opencode-go/kimi-k3.1-pro"
   and (has("provider") | not)
   and .compaction.auto == true
   and .compaction.keep.tokens == 15000
@@ -39,10 +39,16 @@ agent_total=0
 agent_models=0
 for agent_file in .opencode/agents/*.md; do
     agent_total=$((agent_total + 1))
-    if grep -qx 'model: opencode-go/mimo-v2.6-flash' "$agent_file"; then
+    case "$(basename "$agent_file" .md)" in
+        build|cloud-arbiter) expected_model="opencode-go/kimi-k3.1-pro" ;;
+        implementer|tester) expected_model="opencode-go/glm-5.3-flash" ;;
+        architect|reverse|reviewer) expected_model="opencode-go/deepseek-v4.1-flash" ;;
+        *) echo "ERROR: agente inesperado: $agent_file"; exit 1 ;;
+    esac
+    if grep -qx "model: $expected_model" "$agent_file"; then
         agent_models=$((agent_models + 1))
     else
-        echo "ERROR: falta 'model: opencode-go/mimo-v2.6-flash' en $agent_file"
+        echo "ERROR: falta 'model: $expected_model' en $agent_file"
     fi
 done
 if [ "$agent_total" -ne 7 ]; then
@@ -50,10 +56,10 @@ if [ "$agent_total" -ne 7 ]; then
     exit 1
 fi
 if [ "$agent_models" -ne "$agent_total" ]; then
-    echo "ERROR: solo $agent_models de $agent_total agentes fijan opencode-go/mimo-v2.6-flash"
+    echo "ERROR: solo $agent_models de $agent_total agentes coinciden con su modelo esperado"
     exit 1
 fi
-echo "PASS: los 7 agentes fijan opencode-go/mimo-v2.6-flash"
+echo "PASS: los 7 agentes fijan su modelo esperado por rol (Kimi, GLM y DeepSeek)"
 
 echo
 echo "== 1c. Validar newline final =="
@@ -158,6 +164,7 @@ required_skills = {
     "project-discovery", "systematic-debugging",
     "test-and-repair", "metric-collector",
     "dependency-audit", "security-scan",
+    "security-audit",
     "spring-boot-architecture", "java-build-quality",
 }
 skills_dir = root / ".opencode" / "skills"
@@ -268,6 +275,53 @@ print("PASS: instantánea de agentes disponible")
 PYTHON
 
 echo
+echo "== 2b. Verificar procedencia e integridad de security-audit =="
+# La skill upstream debe estar íntegra: validadores, esquema, LICENSE y el
+# manifiesto de procedencia; sin eso el contrato de auditoría no es ejecutable.
+skill_dir=".opencode/skills/security-audit"
+for required_file in \
+    "$skill_dir/SKILL.md" \
+    "$skill_dir/report-schema.json" \
+    "$skill_dir/validate-findings.cjs" \
+    "$skill_dir/validate-coverage-ledger.cjs" \
+    "$skill_dir/LICENSE" \
+    "docs/security-operations/UPSTREAM.md" \
+    "docs/security-operations/provenance.json" \
+    "docs/security-operations/provenance.sha256"; do
+    if [ ! -s "$required_file" ]; then
+        echo "ERROR: falta o está vacío $required_file"
+        exit 1
+    fi
+done
+echo "PASS: security-audit con SKILL.md, validadores, esquema, LICENSE y registro de procedencia"
+
+if ! sha256sum -c docs/security-operations/provenance.sha256 >/dev/null 2>&1; then
+    echo "ERROR: sha256sum -c docs/security-operations/provenance.sha256 ha fallado"
+    sha256sum -c docs/security-operations/provenance.sha256 || true
+    exit 1
+fi
+echo "PASS: provenance.sha256 verifica los archivos importados de upstream"
+
+# Las dos suites oficiales de la skill (no son código de un proyecto auditado).
+if ! command -v node >/dev/null 2>&1; then
+    echo "ERROR: se requiere node para ejecutar las suites oficiales de security-audit"
+    exit 1
+fi
+security_suite_out="$(mktemp)"
+for security_suite in \
+    "$skill_dir/validate-findings.test.cjs" \
+    "$skill_dir/validate-coverage-ledger.test.cjs"; do
+    if ! node --test "$security_suite" >"$security_suite_out" 2>&1; then
+        echo "ERROR: falló la suite oficial $security_suite"
+        tail -40 "$security_suite_out"
+        rm -f "$security_suite_out"
+        exit 1
+    fi
+    echo "PASS: suite oficial $(basename "$security_suite")"
+done
+rm -f "$security_suite_out"
+
+echo
 echo "== 3. Validar configuración efectiva esperada =="
 python3 - <<'PYTHON'
 import json
@@ -275,7 +329,7 @@ from pathlib import Path
 
 config = json.loads(Path("opencode.json").read_text(encoding="utf-8"))
 assert config.get("default_agent") == "build", "default_agent debe ser build"
-assert config.get("model") == "opencode-go/mimo-v2.6-flash", "modelo predeterminado inesperado"
+assert config.get("model") == "opencode-go/kimi-k3.1-pro", "modelo predeterminado inesperado"
 compaction = config.get("compaction") or {}
 assert compaction.get("auto") is True, "compaction.auto debe ser true"
 assert (compaction.get("keep") or {}).get("tokens") == 15000, "compaction.keep.tokens debe ser 15000"

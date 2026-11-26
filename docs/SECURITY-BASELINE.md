@@ -15,6 +15,15 @@
 - Los secretos conocidos se redactan en eventos, errores, cargas JSON y handoffs antes de persistirse.
 - Las autorizaciones temporales son específicas del agentRunId y de los recursos concretos. Las sugerencias save del proveedor no conceden permisos persistentes.
 
+## Modalidad security-audit
+
+- Toda instancia de una auditoría es de solo lectura en ambos motores; la auditoría nunca modifica el target. La corrección de hallazgos `confirmed` se hace en una ejecución tradicional independiente y `verified_fixed` exige evidencia de revalidación.
+- La política por defecto (y única implementada) es `source-only`: no se ejecuta código del target. La política `sandboxed-source-and-local-only` NO está implementada: se rechaza siempre con el error `sandbox_not_implemented`, aunque llegue con una autorización sandbox que parecería válida; no hay fallback silencioso ni metadata sandboxed.
+- Bloqueadores exactos hoy: `disk_limit_unavailable` (uso total de disco no garantizable) y `promotion_dirfd_unavailable` (Node no ofrece promoción por dirfd sin carrera); ambos desactivan la promoción dinámica.
+- La red de los proveedores IA queda fuera de cualquier sandbox; la red del target se denega dentro de ella.
+- El presupuesto nunca se supera: gate pre-reconocimiento, reservas de críticos y validación antes de cada invocación y clasificación de errores de proveedor con `autoReplay=false`.
+- Detalle en docs/security-operations/ARCHITECTURE.md; procedencia e integridad de la skill upstream en docs/security-operations/UPSTREAM.md.
+
 ## Dependencias npm
 
 La política de npm run security:audit ejecuta dos auditorías:

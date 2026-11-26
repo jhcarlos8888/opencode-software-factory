@@ -1,0 +1,8 @@
+# Proyecto externo de prueba para el launcher MCP de la fábrica.
+
+Este directorio existe a propósito SIN `.opencode`: verifica que el bootstrap
+de `opencode.json` arranca el servidor `factory_filesystem` con la ruta
+absoluta inyectada por Control Center y que la raíz del MCP sigue siendo este
+proyecto (rechazo de `../` y lectura de este fichero público).
+
+No se copia ningún launcher ni configuración a este fixture.

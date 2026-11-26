@@ -2482,3 +2482,182 @@ textarea::placeholder { color: #777f8b; }
   .favorite-add-row { grid-template-columns: minmax(0, 1fr); }
   .favorite-add-row .favorite-model-select { grid-column: auto; }
 }
+
+/* ===== SECURITY OPERATIONS — consola oscura de auditoría de ciberseguridad ===== */
+.security-ops { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; gap: 18px; overflow-wrap: anywhere; }
+.security-ops-header h2 { margin: 6px 0 8px; }
+.security-ops-header p { color: #9fb0c7; font-size: 14px; max-width: 860px; line-height: 1.7; }
+.security-ops-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.security-ops-panel {
+  min-width: 0;
+  background: #12161d;
+  border: 1px solid #2b3542;
+  border-radius: 12px;
+  padding: 16px 18px;
+  color: #d7e0ec;
+}
+.security-ops-panel h3 {
+  color: #8fe3c2;
+  font-size: 13.5px;
+  letter-spacing: .7px;
+  text-transform: uppercase;
+  margin-bottom: 12px;
+}
+.security-ops-panel h4 {
+  color: #9fb6d4;
+  font-size: 12px;
+  letter-spacing: .6px;
+  text-transform: uppercase;
+  margin: 14px 0 6px;
+}
+.security-ops-panel code { color: #ffd9a8; font-size: 12px; overflow-wrap: anywhere; }
+.security-ops-panel textarea,
+.security-ops-panel input,
+.security-ops-panel select {
+  width: 100%;
+  background: #0c1016;
+  color: #e7edf6;
+  border: 1px solid #33404f;
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 13px;
+}
+.security-ops-field { display: grid; gap: 5px; margin-bottom: 10px; }
+.security-ops-field label {
+  font-size: 10.5px;
+  letter-spacing: .9px;
+  text-transform: uppercase;
+  color: #8ea3bd;
+  font-weight: 700;
+}
+.security-ops-inline { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.security-ops-domains {
+  border: 1px solid #33404f;
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+  display: grid;
+  gap: 4px;
+}
+.security-ops-domains legend {
+  font-size: 10.5px;
+  letter-spacing: .9px;
+  text-transform: uppercase;
+  color: #8ea3bd;
+}
+.security-ops-domains label { display: flex; gap: 7px; align-items: center; font-size: 12px; color: #c9d6e6; }
+.security-ops-domains input { width: auto; }
+.security-ops-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+.security-ops-actions button {
+  background: #1d2733;
+  color: #d9e5f4;
+  border: 1px solid #3a4a5e;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.security-ops-actions button:hover:not(:disabled) { background: #27384c; }
+.security-ops-actions button.primary { background: #1f6f54; border-color: #2f9a76; color: #eafff6; }
+.security-ops-actions button.primary:hover:not(:disabled) { background: #258565; }
+.security-ops-hint { color: #f0c98a; font-size: 12.5px; margin-top: 8px; }
+.security-ops-intent { margin-top: 10px; display: grid; gap: 3px; font-size: 12.5px; color: #bcd0e6; }
+.security-ops-table-wrap { min-width: 0; max-width: 100%; overflow-x: auto; }
+.security-ops table th:last-child, .security-ops table td:last-child { white-space: nowrap; }
+.security-ops table { width: 100%; min-width: 540px; border-collapse: collapse; font-size: 12.5px; }
+.security-ops th {
+  text-align: left;
+  color: #8ea3bd;
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: .7px;
+  padding: 6px 8px;
+  border-bottom: 1px solid #33404f;
+}
+.security-ops td { padding: 7px 8px; border-bottom: 1px solid #232c38; color: #d7e0ec; vertical-align: top; }
+.security-ops tr.selected td { background: #1a2635; }
+.security-ops-phases { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 8px; }
+.security-ops-phase {
+  background: #0f141b;
+  border: 1px solid #2b3542;
+  border-radius: 9px;
+  padding: 8px;
+  display: grid;
+  gap: 3px;
+}
+.security-ops-phase-number { font-size: 15px; font-weight: 800; color: #7f9ab8; }
+.security-ops-phase-label { font-size: 11.5px; color: #cdd9e8; }
+.security-ops-phase-state { font-size: 11px; color: #8ea3bd; }
+.security-ops-phase.state-complete { border-color: #2f7d5f; }
+.security-ops-phase.state-complete .security-ops-phase-state { color: #7fe0b6; }
+.security-ops-phase.state-in_progress { border-color: #b78a3c; }
+.security-ops-phase.state-in_progress .security-ops-phase-state { color: #ffd9a8; }
+.security-ops-progress { color: #9fb6d4; font-size: 13px; margin-top: 10px; }
+.security-ops-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 8px; }
+.security-ops ul { margin: 4px 0 0 16px; padding: 0; font-size: 12.5px; color: #c9d6e6; }
+.security-ops li { margin-bottom: 3px; overflow-wrap: anywhere; }
+.security-ops-blockers {
+  border-left: 3px solid #b4554f;
+  background: #2a1a1c;
+  padding: 8px 12px;
+  border-radius: 6px;
+  margin-top: 10px;
+}
+.security-ops-blockers h4 { color: #f0a3a6; }
+.security-ops-severity-row { display: flex; flex-wrap: wrap; gap: 10px 16px; font-size: 12.5px; color: #cdd9e8; }
+.security-ops-remediation {
+  border: 1px dashed #3a4a5e;
+  border-radius: 9px;
+  padding: 10px 12px;
+  margin-top: 12px;
+}
+.security-ops-remediation label {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  font-size: 12.5px;
+  color: #d7e0ec;
+  margin-bottom: 5px;
+}
+.security-ops-remediation input { width: auto; }
+.security-ops-remediation-list ul { list-style: none; margin-left: 0; }
+.security-ops-remediation-list li { margin-bottom: 8px; overflow-wrap: anywhere; }
+.security-ops-revalidate { display: flex; gap: 8px; margin-top: 5px; align-items: center; flex-wrap: wrap; }
+.security-ops-revalidate input {
+  max-width: 100%;
+  background: #0c1016;
+  color: #e7edf6;
+  border: 1px solid #33404f;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  min-width: 0;
+}
+.security-ops-revalidate button {
+  background: #1d2733;
+  color: #d9e5f4;
+  border: 1px solid #3a4a5e;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-size: 12px;
+  font-weight: 600;
+}
+.security-ops-downloads { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center; margin-top: 6px; }
+.security-ops-downloads h4 { width: 100%; margin: 0; }
+.security-ops-downloads a { color: #9fd8ff; font-size: 12.5px; border-bottom: 1px dotted #3f6f8f; }
+@media (max-width: 1100px) {
+  .security-ops-grid, .security-ops-columns { grid-template-columns: minmax(0, 1fr); }
+  .security-ops-phases { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .security-ops-inline { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 640px) {
+  .security-ops-phases { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+
+/* Keep long paths, notices and audit data inside their own grid cells. */
+.security-ops > *, .security-ops-grid > *, .security-ops-columns > *,
+.security-ops-field, .security-ops-phase, .security-ops-domains { min-width: 0; }
+.security-ops .notice { flex-wrap: wrap; }
+.security-ops .notice span { min-width: 0; overflow-wrap: anywhere; }
+.security-ops-panel textarea, .security-ops-panel select { min-width: 0; max-width: 100%; }
+.security-ops-remediation label input { flex-shrink: 0; }

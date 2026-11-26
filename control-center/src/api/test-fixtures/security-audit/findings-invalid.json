@@ -1,0 +1,8 @@
+[
+  {
+    "verdict": "confirmed",
+    "fingerprint": "src-broken-fixture",
+    "title": "Not a complete confirmed record",
+    "severity": "high"
+  }
+]

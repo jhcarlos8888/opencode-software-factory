@@ -6,6 +6,7 @@ import { DatabaseSync } from "node:sqlite";
 import { buildExecutionSummary, createHandoffId, formatRoundSummaryMessage, type ExecutionSummary, type HandoffDescriptor, type HandoffOutputMetadata, type HandoffOutputRecord, type AgentResult } from "./orchestration.js";
 import { MAX_FILES_PER_WORK_THREAD, type InstructionFileMetadata, type StoredInstructionFile, type ValidInstructionFile } from "./instruction-files.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
+import { initializeSecurityAuditSchema } from "./security-audit-persistence.js";
 
 export type EngineId = "opencode" | "claude";
 export type ClaudeProviderId = "apmix" | "anthropic" | "opencode-go";
@@ -273,6 +274,12 @@ if (providerTable && !providerTable.sql.includes("'opencode-go'")) {
     COMMIT;
   `);
 }
+
+// Índice de recuperación de los runs security-audit. Los archivos oficiales
+// (coverage-ledger.json, findings.json, run-metadata.json) siguen siendo la
+// fuente canónica; estas tablas solo indexan y habilitan reanudación.
+// Llamada única, idempotente y aditiva, después del esquema actual.
+initializeSecurityAuditSchema(db);
 
 export function listAssignments(): AgentAssignment[] {
   const rows = db.prepare(
@@ -623,6 +630,17 @@ export interface ExecutionConfigurationSnapshot {
   instructionFiles?: Array<{ id: string; name: string; sha256: string; byteLength: number }>;
   workflowSkillDigest: string | null;
   workflowSkillContent: string;
+  /** Modalidad security-audit (solo cuando la rama existe). */
+  securityAudit?: {
+    profile: string;
+    scope: unknown;
+    budget: { maxInvocations: number | null; maxConcurrency: number; maxDurationMs: number };
+    executionPolicy: string;
+    resumeRunId: string | null;
+    roster: Array<{ agentId: string; engine: string; modelId: string }>;
+  };
+  /** Remediación explícita vinculada al run de auditoría de origen. */
+  securityRemediation?: { auditRunId: string; fingerprints: string[] };
 }
 export interface WorkThreadRecord {
   id: string;
@@ -739,6 +757,70 @@ export function createExecutionRecords(
     db.exec("ROLLBACK");
     throw error;
   }
+}
+
+export function appendExecutionAgent(agent: {
+  id: string;
+  runId: string;
+  agentId: string;
+  engine: EngineId;
+  modelId: string;
+  permissionProfile: PermissionProfile;
+  status: "queued" | "running" | "succeeded" | "failed" | "cancelled" | "skipped";
+  error?: string | null;
+}): void {
+  // Instancias adicionales fuera de los 7 agentes fijos (modalidad
+  // security-audit): cada invocación registra su propia fila con identidad,
+  // motor, modelo y permiso efectivo reales.
+  db.prepare(`
+    INSERT INTO execution_agents
+      (id, run_id, agent_id, engine, model_id, permission_profile, status, error)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `).run(
+    agent.id,
+    agent.runId,
+    agent.agentId,
+    agent.engine,
+    agent.modelId,
+    agent.permissionProfile,
+    agent.status,
+    agent.error ?? null
+  );
+}
+
+/** Instancia de la base de datos del proceso (modalidad security-audit). */
+export function getFactoryDatabase(): DatabaseSync {
+  return db;
+}
+
+/**
+ * Ejecuciones de la modalidad security-audit asociadas a un run: la original
+ * (`id = auditRunId`) y su reanudación (`securityAudit.resumeRunId`).
+ * **No** incluye ejecuciones de remediación: esos vínculos se consultan en
+ * `security_audit_remediations.execution_run_id` (consulta separada). Se
+ * resuelve con `json_extract` (sin LIKE) y se devuelve la más reciente al
+ * final.
+ */
+export function listSecurityAuditExecutionRunIds(auditRunId: string): string[] {
+  if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(auditRunId)) return [];
+  const rows = db
+    .prepare(
+      "SELECT id FROM execution_runs WHERE id = ? OR (" +
+        "json_valid(configuration_snapshot_json) AND " +
+        "json_extract(configuration_snapshot_json, '$.securityAudit.resumeRunId') = ?" +
+        ") ORDER BY started_at ASC, id ASC",
+    )
+    .all(auditRunId, auditRunId) as unknown as Array<{ id: string }>;
+  return rows.map((row) => row.id);
+}
+
+/** Estado terminal de una ejecución por id, o `null` si no existe. */
+export function getExecutionRunStatus(id: string): ExecutionStatus | null {
+  if (!id) return null;
+  const row = db
+    .prepare("SELECT status FROM execution_runs WHERE id = ?")
+    .get(id) as { status: ExecutionStatus } | undefined;
+  return row?.status ?? null;
 }
 
 export function updateExecutionSummary(id: string, summary: ExecutionSummary): void {

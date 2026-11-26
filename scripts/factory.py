@@ -24,7 +24,7 @@ EXPECTED_AGENTS = {
     "build", "architect", "implementer",
     "reviewer", "tester", "cloud-arbiter", "reverse",
 }
-EXPECTED_MODEL = ("opencode-go", "mimo-v2.6-flash")
+EXPECTED_MODEL = ("opencode-go", "kimi-k3.1-pro")
 EXPECTED_AGENT_MODES = {
     "build": "primary",
     "architect": "all",
@@ -277,6 +277,10 @@ def install(raw_target, dry_run=False):
         skipped = []
         conflicts = []
 
+        # opencode.json se copia byte a byte (incluido el bloque MCP
+        # factory_filesystem con el bootstrap estático node -e y codemode=true);
+        # este instalador no genera ni reescribe ese bloque. Su contrato lo
+        # exige scripts/verify-opencode-agents.py (filesystem_mcp_contract_error).
         # Preflight completo: no copiar nada si hay conflictos.
         for name, data in sources.items():
             rel = safe_relative(name)

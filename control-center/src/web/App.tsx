@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { OpenCodeQuestionForm, type OpenCodeFormField } from "./OpenCodeQuestionForm";
 import { InstructionTxtPicker, type SelectedInstructionFile, type InstructionFileMetadata } from "./InstructionTxtPicker";
 import { catalogProviderOptions, modelsForOpenCodeProvider, preferredOpenCodeProvider } from "./model-catalog";
+import { SecurityOperations } from "./SecurityOperations";
+import { projectEngineActivity } from "./engine-activity";
 import { MAX_WORK_INSTRUCTION_CHARS } from "../api/work-instruction-limit";
 
 type EngineId = "opencode" | "claude";
@@ -184,6 +186,7 @@ interface ExecutionConfigurationSnapshot {
     effectiveProfile: PermissionProfile;
     reason: string;
   }>;
+  securityAudit?: { profile: string; resumeRunId?: string | null; roster: Array<{ agentId: string; engine: string; modelId: string }> };
   roleInstructionDigests: Record<string, string>;
   roleInstructions: Record<string, string>;
   instructionFiles?: Array<{ id: string; name: string; sha256: string; byteLength: number }>;
@@ -863,7 +866,7 @@ export default function App() {
   const statusLabels: Record<string, string> = {
     queued: "En cola", running: "Trabajando", waiting: "Esperando tu decisión",
     succeeded: "Completado", failed: "Falló", cancelled: "Cancelado",
-    interrupted: "Interrumpido", skipped: "Deshabilitado / omitido"
+    interrupted: "Interrumpido", skipped: "No ejecutado", disabled: "Deshabilitado por el usuario", available: "Disponible · aún sin invocar", "not-invoked": "Sin invocación en esta ronda", "not-selected": "No requerido por el plan"
   };
   const statusClasses: Record<string, string> = {
     queued: "status-queued", running: "status-running", waiting: "status-waiting",
@@ -913,7 +916,7 @@ export default function App() {
             <div className="auditor-status-panel" aria-label="Estado del agente Auditor">
               <div className="auditor-status-heading">
                 <strong>◈ AGENTE AUDITOR · SEGURIDAD OPERATIVA</strong>
-                <span>{execution ? "ACTIVO EN LA RONDA" : "LISTO"}</span>
+                <span>{activeExecution ? "ACTIVO EN LA RONDA" : execution ? "REGISTRO DE LA RONDA" : "LISTO"}</span>
               </div>
               <p>Motor de capacidades: valida el comando nativo, el alcance autorizado y cada operación. La lectura y las pruebas seguras no requieren clics repetitivos; las acciones sensibles conservan revisión humana.</p>
               <div className="auditor-status-details">
@@ -1073,6 +1076,7 @@ export default function App() {
           <a className="nav-item" href="#decisions"><span>⚑</span> Centro de decisiones</a>
           <a className="nav-item" href="#activity"><span>▣</span> Consola de actividad</a>
           <a className="nav-item" href="#roadmap"><span>⌁</span> Orquestación</a>
+          <a className="nav-item" href="#security"><span>⛨</span> Security operations</a>
         </nav>
 
         <div className="sidebar-bottom">
@@ -2125,6 +2129,27 @@ export default function App() {
             </div>
           </section>
 
+          <div className="section-block" id="security">
+            <SecurityOperations
+              key={projectPath}
+              projectPath={projectPath}
+              researchDepth={researchDepth}
+              teamSaved={teamSaved}
+              preflightConsumed={preflightConsumed}
+              activeExecution={activeExecution}
+              onExecutionStarted={(runId, consumesPreflight) => {
+                if (consumesPreflight) setPreflightConsumed(true);
+                // Security Operations uses the same native execution console.
+                void api<{ execution: ExecutionData }>("/api/executions/" + encodeURIComponent(runId))
+                  .then((result) => {
+                    setExecution(result.execution);
+                    setWorkThread(null);
+                  })
+                  .catch((cause) => setError(cause instanceof Error ? cause.message : String(cause)));
+              }}
+            />
+          </div>
+
           <footer className="footer">
             <span>OpenCode Software Factory · Factory Control Center 0.1.0</span>
             <span>API local · Discovery en modo de solo lectura</span>
@@ -2203,20 +2228,24 @@ function describeEngineActivity(message: string, kind: string): {
 }
 
 function EngineActivityPanel({ engine, execution, roleNames, statusLabels }: EngineActivityPanelProps) {
-  const agentRuns = execution.agents.filter((agent) => agent.engine === engine);
+  const audit = Boolean(execution.run.configurationSnapshot?.securityAudit);
+  const activeRound = ["queued", "running", "waiting"].includes(execution.run.status);
+  const activity = projectEngineActivity(engine, execution.agents,
+    execution.run.configurationSnapshot?.assignments ?? [], audit, activeRound);
+  const agentRuns = activity.instances;
   const agentRunIds = new Set(agentRuns.map((agent) => agent.id));
   const events = execution.events.filter((event) =>
     (event.agentRunId !== null && agentRunIds.has(event.agentRunId)) ||
     (engine === "opencode" && event.agentRunId === null && event.area === "OPENCODE-SERVER")
   );
-  const isActive = agentRuns.some((agent) => ["queued", "running", "waiting"].includes(agent.status));
-  const isWaiting = agentRuns.some((agent) => agent.status === "waiting");
-  const allSucceeded = agentRuns.length > 0 && agentRuns.every((agent) => agent.status === "succeeded");
+  const isActive = activity.active;
+  const isWaiting = activity.waiting;
+  const allSucceeded = activity.allSucceeded;
   const title = engine === "opencode" ? "OpenCode" : "Claude Code";
-  const status = agentRuns.length === 0 ? "Sin agentes en esta ronda"
+  const status = agentRuns.length === 0 ? (activeRound && audit && activity.roles.some(role => role.status === "available") ? "Disponible · esperando fase" : "Sin invocaciones en esta ronda")
     : isWaiting ? "Esperando tu decisión"
     : isActive ? "Trabajando"
-    : allSucceeded ? "Trabajo completado"
+    : allSucceeded ? (activeRound ? "Intervenciones completadas · ronda activa" : "Trabajo completado")
     : agentRuns.some((agent) => agent.status === "failed") ? "Requiere revisión"
     : "Ronda finalizada";
   const visibleEvents = events.slice(-36);
@@ -2228,7 +2257,7 @@ function EngineActivityPanel({ engine, execution, roleNames, statusLabels }: Eng
           <span className="engine-console-mark">{engine === "opencode" ? "O" : "C"}</span>
           <div>
             <strong>{title}</strong>
-            <span>{agentRuns.length} especialista(s) asignado(s)</span>
+            <span>{activity.configuredCount} roles del equipo · {agentRuns.length} {audit ? "invocaciones de esta ronda" : "intervenciones"}</span>
           </div>
         </div>
         <span className={"engine-console-state " + (isActive ? "is-running" : allSucceeded ? "is-success" : "is-idle")}>
@@ -2237,14 +2266,14 @@ function EngineActivityPanel({ engine, execution, roleNames, statusLabels }: Eng
       </header>
 
       <div className="engine-console-agents">
-        {agentRuns.length > 0 ? agentRuns.map((agent) => (
+        {activity.roles.length > 0 ? activity.roles.map((role) => (
           <span
-            className={"engine-agent-chip engine-agent-" + agent.status}
-            key={agent.id}
-            title={title + " · " + agent.modelId + " · " + agent.permissionProfile}
+            className={"engine-agent-chip engine-agent-" + role.status}
+            key={role.agentId}
+            title={title + " · " + role.modelId + " · " + role.instances.length + " invocaciones reales"}
           >
-            {roleNames[agent.agentId] ?? agent.agentId}
-            <small>{statusLabels[agent.status] ?? agent.status}</small>
+            {roleNames[role.agentId] ?? role.agentId}
+            <small>{statusLabels[role.status] ?? role.status}{audit && role.instances.length > 0 ? " · " + role.succeeded + "/" + role.instances.length : ""}</small>
           </span>
         )) : (
           <span className="engine-no-agents">Este motor no tiene especialistas asignados en esta ronda.</span>
@@ -2307,7 +2336,7 @@ function EngineActivityPanel({ engine, execution, roleNames, statusLabels }: Eng
       </div>
       <footer className="engine-console-footer">
         <span>{events.length} eventos capturados</span>
-        <span>{agentRuns.filter((agent) => agent.status === "succeeded").length}/{agentRuns.length} especialistas completados</span>
+        <span>{activity.succeeded}/{agentRuns.length} {audit ? "invocaciones completadas" : "intervenciones completadas"}</span>
       </footer>
     </section>
   );

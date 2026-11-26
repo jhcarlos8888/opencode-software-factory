@@ -1,7 +1,7 @@
 ---
 description: Árbitro final de integración que consolida todos los handoffs de Claude Code y OpenCode, resuelve discrepancias y produce el resumen ejecutivo de una ejecución.
 mode: subagent
-model: opencode-go/mimo-v2.6-flash
+model: opencode-go/kimi-k3.1-pro
 permissions:
   - action: edit
     resource: "*"
@@ -53,9 +53,9 @@ No inventes sesiones, modelos efectivos, handoffs, pruebas ni resultados. Si la 
 
 ## Lectura y búsqueda segura del proyecto
 
-- Para enumerar archivos usa exclusivamente factory_filesystem_list_files.
-- Para leer código o documentación usa factory_filesystem_read_file.
-- Para buscar símbolos o texto usa factory_filesystem_search_text (búsqueda literal).
+- Para enumerar archivos usa exclusivamente la herramienta canónica factory_filesystem_list_files (equivalencia en execute: tools.factory_filesystem.list_files).
+- Para leer código o documentación usa la herramienta canónica factory_filesystem_read_file (equivalencia en execute: tools.factory_filesystem.read_file).
+- Para buscar símbolos o texto usa la herramienta canónica factory_filesystem_search_text (equivalencia en execute: tools.factory_filesystem.search_text; búsqueda literal).
 - No invoques las herramientas nativas Glob, Grep ni Read: la fábrica las bloquea deliberadamente porque OpenCode V2 no vincula de forma segura el ámbito de búsqueda de Glob/Grep con la autorización de la ruta.
 - No intentes sustituirlas por find, rg, grep, cat o scripts de shell para leer o enumerar archivos; usa el servidor MCP local de la fábrica.
 - Estas herramientas son solo lectura, limitan tamaño/profundidad/resultados y rechazan rutas absolutas, traversal, symlinks y archivos sensibles.

@@ -153,6 +153,12 @@ aislados. Un agente no debe cerrar procesos según el nombre genérico
 `node server.js` ni matar el PID que simplemente escucha el puerto
 del proyecto: ese proceso puede pertenecer a un servicio persistente.
 
+## Security Operations (auditoría de ciberseguridad)
+
+La modalidad `security-audit` añade la sección `SECURITY OPERATIONS` en la interfaz y sus rutas en la API (`/api/security-audit/...`): clasificación de intención sin efectos, inicio explícito de auditorías con las mismas validaciones que una ejecución (preconsulta, equipo, favoritos, alcance del Auditor), historial y estado real desde SQLite, reanudación, cancelación reutilizando `cancelExecution`, validación con los dos validadores oficiales, descarga de artefactos con allowlist y remediación como ejecución tradicional independiente ligada a hallazgos `confirmed`.
+
+Todo el detalle está en `docs/security-operations/` (arquitectura, guía, integración, causa raíz del MCP y procedencia upstream). Los artefactos de cada corrida se guardan en `~/.local/state/opencode-software-factory/security-audits/<runId>/` con permisos 0700/0600; la base conserva el índice de recuperación en las tablas `security_audit_*` (incluido el historial append-only de hallazgos en `security_audit_findings_history`). Limitación explícita: la única política de ejecución implementada es `source-only`; un inicio con `sandboxed-source-and-local-only` se rechaza con `sandbox_not_implemented` aunque la autorización sandbox parezca válida.
+
 ## Persistencia y privacidad
 
 El historial de ejecuciones, eventos, decisiones, aprobaciones, handoffs y procesos de trabajo se guarda en SQLite en:

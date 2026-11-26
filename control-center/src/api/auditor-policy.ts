@@ -366,5 +366,8 @@ export function assessOpenCodePermission(
       reason: "Uno o más segmentos no son operaciones permitidas por la lista conservadora." };
   }
   if (!tool) return { verdict: "human", category: "unknown", reason: "Acción sin nombre." };
-  return assessAuditorTool({ engine: "opencode", toolName: tool, input, projectPath, permissionProfile });
+  return assessAuditorTool({ engine: "opencode", toolName: tool,
+    input: tool === "shell" && authority?.requireNativeShellEvidence && nativeInput ? nativeInput : input,
+    projectPath, permissionProfile, roundInstructions: authority?.instructions,
+    capabilityScope: authority?.capabilityScope });
 }

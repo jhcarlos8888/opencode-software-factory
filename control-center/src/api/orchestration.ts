@@ -720,6 +720,16 @@ export function buildExecutionSummary(input: {
   decisions?: ApprovalAuditDecision[];
   approvalEvents?: ApprovalAuditEvent[];
   generatedAt?: string;
+  /**
+   * Campo ADITIVO de la modalidad security-audit: el outcome real del run.
+   * Un outcome no `complete` fuerza un veredicto fallido con mensaje
+   * coherente; nunca hay resumen ejecutivo de éxito para una auditoría
+   * incompleta o cancelada.
+   */
+  securityAudit?: {
+    status: "complete" | "incomplete" | "cancelled";
+    incompleteReason: string | null;
+  };
 }): ExecutionSummary {
   const agents = input.agents;
   const integrity = assessHandoffIntegrity(agents, input.results);
@@ -780,8 +790,17 @@ export function buildExecutionSummary(input: {
   const failedPipeline = failed.length > 0;
   const collaborationIncomplete = collaborationExpected && (!collaborationVerified || !concurrentCrossEngineVerified);
   const approvalAuditIncomplete = approvals.pending > 0 || approvals.responding > 0 || approvals.orphaned > 0;
+  const auditOutcome = input.securityAudit ?? null;
+  const auditNotComplete = auditOutcome !== null && auditOutcome.status !== "complete";
+  const auditNote = auditOutcome === null || auditOutcome.status === "complete"
+    ? null
+    : auditOutcome.status === "cancelled"
+      ? "Auditoría de seguridad CANCELADA por el usuario: la pasada quedó parcial y la cobertura NO está declarada."
+      : "Auditoría de seguridad INCOMPLETA" +
+        (auditOutcome.incompleteReason ? ` (motivo oficial \`${auditOutcome.incompleteReason}\`)` : "") +
+        ": la pasada quedó parcial, la cobertura NO está declarada y los resultados son parciales.";
   const verdict: ExecutionSummary["verdict"] =
-    failedPipeline || mandatoryUnavailable ? "failed" :
+    auditNotComplete || failedPipeline || mandatoryUnavailable ? "failed" :
       skipped.length > 0 || collaborationIncomplete || integrity.status === "observations" || approvalAuditIncomplete ? "observations" : "completed";
   const skippedText = skipped.length ? ` Agentes deshabilitados u omitidos: ${skipped.join(", ")}.` : "";
   const missingText = missingExpected.length ? ` No hay registro de: ${missingExpected.join(", ")}.` : "";
@@ -791,12 +810,19 @@ export function buildExecutionSummary(input: {
       ? ` ${verifiedCrossEngineHandoffs} de ${crossEngineHandoffs} handoffs entre motores fueron verificados.`
       : " Esta ronda no solicitó colaboración entre motores; no es un criterio de éxito.";
   const fallback = `Se completaron ${succeeded} de ${agents.length} agentes registrados. Se entregaron ${handoffs.length} handoffs.${collaborationDescription}${skippedText}${missingText}`;
-  const headline = verdict === "completed" ? "Ejecución completada" :
-    verdict === "observations" ? "Ejecución completada con observaciones" : "Objetivo de integración no cumplido";
+  const headline = auditNotComplete
+    ? auditOutcome!.status === "cancelled"
+      ? "Ejecución cancelada: auditoría de seguridad sin cerrar"
+      : "Auditoría de seguridad incompleta" +
+        (auditOutcome!.incompleteReason ? ` (${auditOutcome!.incompleteReason})` : "")
+    : verdict === "completed" ? "Ejecución completada" :
+      verdict === "observations" ? "Ejecución completada con observaciones" : "Objetivo de integración no cumplido";
+  const baseOverview = executive || specialistSummary.overview || (fallback + " No se dispone de un informe de contenido válido para resumir; estas métricas no acreditan el cumplimiento funcional.");
+  const overview = auditNote ? auditNote + (baseOverview ? "\n\n" + baseOverview : "") : baseOverview;
   return {
     verdict,
     headline,
-    overview: executive || specialistSummary.overview || (fallback + " No se dispone de un informe de contenido válido para resumir; estas métricas no acreditan el cumplimiento funcional."),
+    overview,
     findings,
     nextSteps,
     integrity,

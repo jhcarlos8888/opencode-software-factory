@@ -314,3 +314,20 @@ test("Observed Git diff with fixed separator and bounded head is permitted, not 
   ]) assert.notEqual(claude("Bash", { command: unsafe }).verdict, "auto", unsafe);
   assert.notEqual(claude("Bash", { command }, "read-only").verdict, "auto");
 });
+
+test("native ordinary npm test is automatically approved only for a verified project and profile", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "auditor-demo-test-")));
+  try {
+    writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test"}}));
+    const req = { action:"shell", resources:["npm test"], metadata:{input:{command:"npm test"}}, save:["*"] };
+    const native = {command:"npm test",workdir:root};
+    const authority = {instructions:"Run project tests",agentId:"tester",requireNativeShellEvidence:true,capabilityScope:""};
+    assert.equal(assessOpenCodePermission(req,root,"workspace-write",authority,native).verdict,"auto");
+    assert.notEqual(assessOpenCodePermission(req,root,"read-only",authority,native).verdict,"auto");
+    assert.notEqual(assessOpenCodePermission(req,root,"workspace-write",authority,null).verdict,"auto");
+    assert.notEqual(assessOpenCodePermission(req,root,"workspace-write",authority,{...native,workdir:"/tmp"}).verdict,"auto");
+    assert.notEqual(assessOpenCodePermission(req,root,"workspace-write",authority,{...native,command:"npm test && kill 1"}).verdict,"auto");
+    writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test",pretest:"echo unexpected"}}));
+    assert.notEqual(assessOpenCodePermission(req,root,"workspace-write",authority,native).verdict,"auto");
+  } finally { rmSync(root,{recursive:true,force:true}); }
+});

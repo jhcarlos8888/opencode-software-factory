@@ -105,8 +105,9 @@ repositorio de trabajo. En otro equipo verifica las rutas con
 Referencias: [manual del panel](control-center/README.md),
 [guía de usuario](docs/GUIA-USUARIO-CONTROL-CENTER.md),
 [arquitectura](docs/multi-engine/01-arquitectura-multimotor.md),
-[hoja de ruta](docs/multi-engine/02-hoja-de-ruta.md) y
-[seguridad](docs/SECURITY-BASELINE.md). La salud del servicio no demuestra
+[hoja de ruta](docs/multi-engine/02-hoja-de-ruta.md),
+[seguridad](docs/SECURITY-BASELINE.md) y
+[security operations](docs/security-operations/README.md). La salud del servicio no demuestra
 por sí sola la colaboración real entre motores ni la disponibilidad de cuotas.
 
 ## Objetivos
@@ -123,9 +124,9 @@ por sí sola la colaboración real entre motores ni la disponibilidad de cuotas.
 - `docs/`: guía de operación, seguridad, arquitectura y hoja de ruta.
 - `.opencode/agents/`: 7 agentes Markdown (`build`, `architect`,
   `implementer`, `reviewer`, `tester`, `cloud-arbiter`, `reverse`).
-- `.opencode/commands/`: 5 comandos (`/planificar`, `/implementar`,
-  `/revisar`, `/verificar`, `/calidad-java`).
-- `.opencode/skills/`: 10 skills de la fábrica (un directorio con
+- `.opencode/commands/`: 6 comandos (`/planificar`, `/implementar`,
+  `/revisar`, `/verificar`, `/calidad-java`, `/auditoria-seguridad`).
+- `.opencode/skills/`: 12 skills de la fábrica (un directorio con
   `SKILL.md` por skill).
 - `.agents/skills/`: 1 skill de terceros (`reverse-engineer-anything`, 8
   ficheros) que la fábrica instala pero no mantiene.
@@ -217,9 +218,12 @@ python3 scripts/factory.py uninstall <ruta-del-proyecto>
 python3 scripts/factory.py self-test
 ```
 
-`install` copia 32 ficheros en un proyecto nuevo: 7 agentes + 5 comandos +
-10 skills de la fábrica (un `SKILL.md` por skill) + 8 ficheros de la skill
-de terceros `reverse-engineer-anything` + `opencode.json` + `AGENTS.md`.
+`install` copia 55 ficheros en un proyecto nuevo: 7 agentes + 6 comandos +
+32 ficheros de las 12 skills de la fábrica (un `SKILL.md` por skill;
+`security-audit` aporta además sus documentos, validadores y tests) + el
+launcher MCP `.opencode/mcp/factory-filesystem.mjs` + 8 ficheros de la skill
+de terceros `reverse-engineer-anything` + `opencode.json` (y solo si falta,
+`AGENTS.md`).
 
 Qué hace cada comando:
 
@@ -285,11 +289,11 @@ Qué hace cada comando:
 
 ### Uso dentro de OpenCode
 
-La instalación añade al proyecto consumidor 5 comandos, 7 agentes y 10
+La instalación añade al proyecto consumidor 6 comandos, 7 agentes y 12
 skills (más una skill de terceros). Tras instalar, reinicia la sesión de
 OpenCode en el proyecto para que cargue los ficheros nuevos.
 
-#### Comandos (5)
+#### Comandos (6)
 
 | Comando | Agente | Qué hace |
 | --- | --- | --- |
@@ -298,6 +302,7 @@ OpenCode en el proyecto para que cargue los ficheros nuevos.
 | `/verificar` | `tester` | Ejecuta build y tests reales y devuelve evidencia: comando exacto, código de salida y fallos; no modifica archivos |
 | `/revisar` | `reviewer` | Revisa el diff actual en busca de defectos demostrables; solo lectura |
 | `/calidad-java` | `tester` | Batería Java completa (build, tests, checkstyle, spotbugs, pmd, jacoco, OWASP) con códigos de salida reales e informe de evidencia |
+| `/auditoria-seguridad <petición>` | `reviewer` | Guidance de seguridad con la skill `security-audit`; no escribe en el target y no arranca las seis fases (la auditoría completa se inicia desde Security Operations) |
 
 Nota: los comandos `/preguntar` y `/explicar-codigo`, que vivían en la
 configuración global del usuario, se retiraron a propósito durante la
@@ -316,10 +321,13 @@ un respaldo externo al repositorio).
 | `cloud-arbiter` | `subagent` | Árbitro para discrepancias difíciles o fallos persistentes; no usar de forma rutinaria |
 | `reverse` | `all` | Ingeniería inversa estática de flujos y dependencias; puede operar como principal o subagente, siempre en solo lectura |
 
-Los siete fijan `opencode-go/mimo-v2.6-flash` en su frontmatter; `doctor`
-lo comprueba agente por agente.
+Cada agente fija su modelo de OpenCode Go en el frontmatter; `doctor`
+comprueba el contrato por rol: Kimi K3.1 Pro para build y cloud-arbiter,
+GLM-5.3-Flash para implementer y tester, y DeepSeek V4.1 Flash para
+architect, reverse y reviewer. Las asignaciones del Control Center
+se administran independientemente desde su interfaz.
 
-#### Skills (10 en `.opencode/skills`)
+#### Skills (12 en `.opencode/skills`)
 
 Se cargan con la herramienta `skill` cuando la tarea lo pida:
 
@@ -333,13 +341,14 @@ Se cargan con la herramienta `skill` cuando la tarea lo pida:
 | `metric-collector` | Para registrar y comparar tiempos, cobertura y códigos de salida entre ejecuciones |
 | `dependency-audit` | Al revisar vulnerabilidades (CVE), licencias o versiones de dependencias |
 | `security-scan` | Al pedir SAST, detección de secretos o hardening de seguridad |
+| `security-audit` | Guidance y auditoría de ciberseguridad (por defecto guidance; la auditoría completa con seis fases se inicia desde Security Operations del Control Center) |
 | `spring-boot-architecture` | Al crear, revisar o modificar un servicio Spring Boot |
 | `java-build-quality` | Al verificar un proyecto Java o pedir cobertura/análisis estático (comandos exactos Maven/Gradle, rutas de informes, qué hacer si falta una herramienta) |
 
 Todas las skills deben tener frontmatter válido (`---` de apertura y
 cierre, `name` igual al directorio y `description` no vacía): sin él
-OpenCode no carga la skill. `verify-factory.sh` lo comprueba sobre las 10
-locales y la de terceros (11 en total).
+OpenCode no carga la skill. `verify-factory.sh` lo comprueba sobre las 12
+locales y la de terceros (13 en total).
 
 Además, la skill de terceros `reverse-engineer-anything` se instala en
 `.agents/skills/` (ingeniería inversa sobre artefactos ya compilados o
@@ -593,7 +602,7 @@ de rechazar, y existe el flag global `--auto`
 | `jq -e . opencode.json` | JSON de la fábrica bien formado | `0` |
 | `python3 -m py_compile scripts/factory.py` | Sintaxis del instalador | `0` |
 | `python3 scripts/factory.py self-test` | Instalación/preservación/reversión/inyección `quality` en directorios temporales | `0`, salida `SELF-TEST COMPLETADO` |
-| `bash scripts/verify-factory.sh` | Batería estructural completa (config, modelo, newline, plantilla y fragmentos de calidad, agentes, skills y su frontmatter, config y agentes efectivos de OpenCode, self-test) | `0` y 12 líneas `PASS` |
+| `bash scripts/verify-factory.sh` | Batería estructural completa (config, modelo, newline, plantilla y fragmentos de calidad, agentes, skills y su frontmatter, procedencia `security-audit` con `sha256sum -c` y sus dos suites oficiales, config y agentes efectivos de OpenCode, self-test) | `0` y 18 líneas `PASS` |
 | `python3 scripts/factory.py status <proyecto>` | Estado de los archivos instalados | `0` sin cambios, `2` con cambios |
 | `python3 scripts/factory.py doctor <proyecto>` | Comprobación funcional en el proyecto consumidor | `0` todo PASS, `2` hallazgos, `1` error técnico |
 | `python3 scripts/factory.py quality <proyecto> [--apply]` | Plugins de calidad del build | `0` completo, `1` error, `2` falta algo o build ambiguo |
@@ -625,9 +634,10 @@ tras agotar los intentos informa los hallazgos con la respuesta disponible.
 
 ## Modelo de referencia
 
-`opencode-go/mimo-v2.6-flash` (MiMo V2.6 Flash, servido por el proveedor
-integrado OpenCode Go). Es el modelo fijado en `opencode.json` y en los
-siete agentes. El proveedor integrado `opencode-go` no necesita entrada en
+`opencode-go/kimi-k3.1-pro` (Kimi K3.1 Pro, servido por el proveedor
+integrado OpenCode Go) es el modelo predeterminado de `opencode.json` y
+de build y cloud-arbiter. Implementer y tester usan `opencode-go/glm-5.3-flash`;
+architect, reverse y reviewer usan `opencode-go/deepseek-v4.1-flash`. El proveedor integrado `opencode-go` no necesita entrada en
 el bloque `providers` de `opencode.json`: el formato
 `opencode-go/<model-id>` en la clave `model` basta porque OpenCode ya
 integra el proveedor. El bloque `providers` versiona únicamente

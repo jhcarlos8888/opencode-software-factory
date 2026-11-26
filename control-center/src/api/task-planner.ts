@@ -1,7 +1,29 @@
+import { detectSecurityAuditIntent, SECURITY_AMBIGUOUS_SIGNAL_IDS } from "./security-audit-intent.js";
+
+/** Vocabulario security que convierte un guidance general en metadata security. */
+const SECURITY_VOCABULARY =
+  /seguridad|ciberseguridad|vulnerab|xss|csrf|cve|pen[\s-]?test|auditor[ií]a|hallazgo|findings?|malware|inyecci[oó]n|phishing|brecha|incidente/i;
+
+export interface PlanTaskOptions {
+  /**
+   * Ruta de remediación explícita: desactiva la clasificación security para
+   * que el flujo tradicional use su plan normal de implementación.
+   */
+  securityRemediation?: boolean;
+}
+
 export type TaskKind = "explanation" | "diagnosis" | "implementation" | "testing" | "architecture-review" | "general";
 export type ResearchDepth = "quick" | "focused" | "deep";
 export type TaskPermissionProfile = "read-only" | "workspace-write" | "approval-required";
 export type TaskPermissionMode = "automatic" | "manual";
+/** Operación security detectada en la instrucción (sin arrancar la auditoría). */
+export type SecurityOperationKind = "none" | "guidance" | "full_audit" | "remediation";
+
+export interface SecurityOperationMeta {
+  kind: SecurityOperationKind;
+  requiresClarification: boolean;
+  matchedSignals: readonly string[];
+}
 export interface TaskPlan {
   kind: TaskKind;
   complexity: "low" | "medium" | "high";
@@ -9,12 +31,19 @@ export interface TaskPlan {
   recommendedAgents: string[];
   reasons: string[];
   changesExpected: boolean;
+  /** Metadata aditiva: no cambia el equipo, los permisos ni el plan. */
+  securityOperation: SecurityOperationMeta;
 }
+
 function normalize(value: string): string {
   return value.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "");
 }
 /** Classifies requested work independently from repository size/complexity. */
-export function planTask(instructions: string, depthOverride?: ResearchDepth): TaskPlan {
+export function planTask(
+  instructions: string,
+  depthOverride?: ResearchDepth,
+  options: PlanTaskOptions = {},
+): TaskPlan {
   const text = normalize(instructions);
   // Normalize intent before assigning a write-capable team. Natural Spanish
   // requests often use gerunds, polite questions or results ("quiero la letra
@@ -99,8 +128,31 @@ export function planTask(instructions: string, depthOverride?: ResearchDepth): T
     reasons.push("Se detectaron referencias explicitas a binarios o ingenieria inversa.");
   }
   if (broadScope) reasons.push("El alcance declarado abarca multiples modulos o el proyecto completo.");
+  // Metadata aditiva: NO cambia el equipo, changesExpected ni los permisos.
+  // El plan tradicional se conserva exactamente igual para cualquier
+  // instrucción (p. ej. "Corrige CVE…" o "auditoría de cobertura"); solo la
+  // ruta de remediación explícita desactiva esta clasificación.
+  const securityDetection = options.securityRemediation
+    ? { intent: "guidance" as const, requiresClarification: false, matchedSignals: [] as string[] }
+    : detectSecurityAuditIntent(instructions);
+  const securityKind: SecurityOperationKind = options.securityRemediation
+    ? "none"
+    : securityDetection.intent === "full_audit" || securityDetection.intent === "remediation"
+      ? securityDetection.intent
+      : securityDetection.intent === "guidance" &&
+          (securityDetection.matchedSignals.some((id) => SECURITY_AMBIGUOUS_SIGNAL_IDS.has(id)) ||
+            SECURITY_VOCABULARY.test(instructions))
+        ? "guidance"
+        : "none";
   const selectedDepth = depthOverride ?? depth;
-  return { kind, complexity, depth: selectedDepth, recommendedAgents: agents, reasons, changesExpected };
+  return {
+    kind, complexity, depth: selectedDepth, recommendedAgents: agents, reasons, changesExpected,
+    securityOperation: {
+      kind: securityKind,
+      requiresClarification: securityDetection.requiresClarification,
+      matchedSignals: securityDetection.matchedSignals
+    }
+  };
 }
 
 

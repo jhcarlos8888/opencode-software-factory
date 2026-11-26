@@ -92,3 +92,33 @@ export function inspectFactoryFilesystemMcp(payload: unknown): OpenCodeMcpRegist
   const error = typeof statusObject?.error === "string" ? statusObject.error : null;
   return { ready: status === "connected", status, error };
 }
+
+/**
+ * OpenCode V2 ignores enabled:false on server entries. Omit the external
+ * entries altogether, using a private runtime root. A controlled argv
+ * argument anchors the internal MCP to the real project independently of
+ * the engine session's private location (never load target-local agents/MCP).
+ */
+export function sourceOnlyOpenCodeConfig(config: Record<string, unknown>, projectPath: string): Record<string, unknown> {
+  const mcp = config.mcp as { servers?: Record<string, Record<string, unknown>> } | undefined;
+  if (!mcp?.servers?.factory_filesystem) throw new Error("Falta el MCP interno de lectura");
+  return { ...config, mcp: { servers: { factory_filesystem: {
+    ...mcp.servers.factory_filesystem,
+    command: ["node", "-e",
+      'const p=require("node:path"),u=require("node:url");const e=p.resolve(process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT);process.chdir(process.argv[1]);import(u.pathToFileURL(e).href).catch(err=>{console.error("[factory-filesystem] "+String(err.message));process.exit(1)});',
+      projectPath],
+    enabled: true,
+  } } } };
+}
+
+export function unexpectedAuditMcpServers(payload: unknown): string[] {
+  const entries = Array.isArray(payload) ? payload :
+    (payload && typeof payload === "object" && Array.isArray((payload as { data?: unknown }).data)
+      ? (payload as { data: unknown[] }).data : []);
+  return entries.flatMap(entry => {
+    if (!entry || typeof entry !== "object") return ["<unknown>"];
+    const value = entry as { name?: unknown; status?: { status?: unknown } };
+    if (value.name === "factory_filesystem" || value.status?.status === "disabled") return [];
+    return [typeof value.name === "string" ? value.name : "<unknown>"];
+  });
+}

@@ -86,3 +86,27 @@ test("the runtime registry contract matches the seven checked-in factory agent m
     reverse: "all"
   });
 });
+
+
+test("audit runtime disables extra MCP servers without altering the provider configuration", async () => {
+  const { sourceOnlyOpenCodeConfig, unexpectedAuditMcpServers } = await import("./opencode-agents.js");
+  const original = { model: "opencode-go/deepseek", mcp: { servers: {
+    factory_filesystem: { type: "local", enabled: true, codemode: true },
+    playwright: { type: "local" }, context7: { type: "remote", enabled: true }
+  }}};
+  const output = sourceOnlyOpenCodeConfig(original, "/test/project with spaces") as typeof original;
+  assert.equal(output.model, original.model);
+  assert.equal(output.mcp.servers.factory_filesystem.codemode, true);
+  assert.deepEqual(Object.keys(output.mcp.servers), ["factory_filesystem"]);
+  assert.equal((output.mcp.servers.factory_filesystem as unknown as {command:string[]}).command.at(-1), "/test/project with spaces");
+  assert.equal(original.mcp.servers.context7.enabled, true);
+  assert.deepEqual(unexpectedAuditMcpServers({data:[
+    {name:"factory_filesystem",status:{status:"connected"}},
+    {name:"playwright",status:{status:"disabled"}}
+  ]}),[]);
+  assert.deepEqual(unexpectedAuditMcpServers({data:[
+    {name:"factory_filesystem",status:{status:"connected"}},
+    {name:"unknown",status:{status:"connected"}}
+  ]}),["unknown"]);
+  assert.throws(() => sourceOnlyOpenCodeConfig({}, "/test"), /MCP interno/);
+});

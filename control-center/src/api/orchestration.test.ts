@@ -858,3 +858,52 @@ test("OpenCode canonical report with progress before explicit handoff separator 
   assert.equal(hasHandoffIdAtStart(identity.handoffId + "-FAKE", identity.handoffId), false);
   assert.equal(selectOpenCodeHandoffReport(report, identity).preamble, null);
 });
+
+const AUDIT_SUMMARY_AGENTS = [{
+  agentId: "architect", engine: "opencode" as const, status: "succeeded" as const,
+  startedAt: "2026-01-01T10:00:00Z", finishedAt: "2026-01-01T10:01:00Z", handoffIn: []
+}];
+
+test("an incomplete security-audit outcome never produces an executive success summary", () => {
+  const summary = buildExecutionSummary({
+    instructions: "Auditoría de seguridad",
+    agents: AUDIT_SUMMARY_AGENTS,
+    results: [],
+    securityAudit: { status: "incomplete", incompleteReason: "validator_failed" }
+  });
+  assert.equal(summary.verdict, "failed");
+  assert.match(summary.headline, /Auditoría de seguridad incompleta/);
+  assert.match(summary.headline, /validator_failed/);
+  assert.match(summary.overview, /INCOMPLETA/);
+  assert.match(summary.overview, /cobertura NO está declarada/);
+  // Sin el campo, la misma entrada no cambia de veredicto (campo aditivo).
+  const baseline = buildExecutionSummary({
+    instructions: "Auditoría de seguridad",
+    agents: AUDIT_SUMMARY_AGENTS,
+    results: []
+  });
+  assert.equal(baseline.verdict, "completed");
+});
+
+test("a cancelled security-audit outcome keeps the failure coherent", () => {
+  const summary = buildExecutionSummary({
+    instructions: "Auditoría de seguridad",
+    agents: AUDIT_SUMMARY_AGENTS,
+    results: [],
+    securityAudit: { status: "cancelled", incompleteReason: "cancelled_by_user" }
+  });
+  assert.equal(summary.verdict, "failed");
+  assert.match(summary.headline, /cancelada/i);
+  assert.match(summary.overview, /CANCELADA/);
+});
+
+test("a complete security-audit outcome leaves the summary logic untouched", () => {
+  const summary = buildExecutionSummary({
+    instructions: "Auditoría de seguridad",
+    agents: AUDIT_SUMMARY_AGENTS,
+    results: [],
+    securityAudit: { status: "complete", incompleteReason: null }
+  });
+  assert.equal(summary.verdict, "completed");
+  assert.equal(summary.headline, "Ejecución completada");
+});

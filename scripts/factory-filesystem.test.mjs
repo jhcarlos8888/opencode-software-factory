@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { existsSync } from "node:fs";
 import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -97,64 +98,139 @@ test("search_text respects result, depth, file and total-byte limits", async () 
   }
 });
 
-test("the exact OpenCode environment-resolved launcher starts the MCP in the selected project root", async () => {
-  const f = await fixture();
-  try {
-    const factoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
-    // The installed runtime is a symlink to the repository. Test the exact
-    // lexical path the Control Center passes to OpenCode and Claude Code.
-    const runtimeAlias = join(f.base, "factory-runtime");
-    await symlink(factoryRoot, runtimeAlias, "dir");
-    const config = JSON.parse(await readFile(join(factoryRoot, "opencode.json"), "utf8"));
-    const server = config.mcp?.servers?.factory_filesystem;
-    assert.equal(server?.type, "local");
-    assert.deepEqual(server?.command, ["node", "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}"]);
-    assert.equal(server?.environment?.FACTORY_FILESYSTEM_MCP_ENTRYPOINT, "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}");
+test("A: el bootstrap arranca sin env con cwd en la fábrica y lista las cuatro herramientas", async () => {
+  const factoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+  const config = JSON.parse(await readFile(join(factoryRoot, "opencode.json"), "utf8"));
+  const server = config.mcp?.servers?.factory_filesystem;
+  assert.equal(server?.type, "local");
+  // Contrato canónico: bootstrap estático [node, -e, código] + codemode + guards.
+  const [binary, flag, bootstrap] = server?.command ?? [];
+  assert.equal(binary, "node");
+  assert.equal(flag, "-e");
+  assert.match(bootstrap ?? "", /FACTORY_FILESYSTEM_MCP_ENTRYPOINT/);
+  assert.match(bootstrap ?? "", /pathToFileURL/);
+  assert.match(bootstrap ?? "", /\.opencode\/mcp\/factory-filesystem\.mjs/);
+  assert.equal(server?.enabled, true);
+  assert.equal(server?.codemode, true);
+  assert.equal(server?.environment?.FACTORY_FILESYSTEM_MCP_ENTRYPOINT, "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}");
+  // Anti-regresión: sin launcher env-only ni codemode=false.
+  assert.equal((bootstrap ?? "").includes("{env:"), false);
+  assert.notEqual(server?.codemode, false);
 
-    const entryPoint = join(runtimeAlias, ".opencode", "mcp", "factory-filesystem.mjs");
-    const resolvedCommand = server.command.map((part) =>
-      part.replaceAll("{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}", entryPoint)
-    );
-    const resolvedEnvironment = Object.fromEntries(
-      Object.entries(server.environment).map(([key, value]) => [
-        key,
-        value.replaceAll("{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}", entryPoint)
-      ])
-    );
-    const child = spawn(resolvedCommand[0], resolvedCommand.slice(1), {
-      cwd: f.project,
-      env: { ...process.env, ...resolvedEnvironment },
-      stdio: ["pipe", "pipe", "pipe"]
-    });
-    let output = "";
-    let errorOutput = "";
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk) => { output += chunk; });
-    child.stderr.on("data", (chunk) => { errorOutput += chunk; });
+  // Comportamiento: SIN variable de entorno y con cwd en la fábrica.
+  const env = { ...process.env };
+  delete env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT;
+  const child = spawn(binary, [flag, bootstrap], {
+    cwd: factoryRoot,
+    env,
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  let output = "";
+  let errorOutput = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { errorOutput += chunk; });
 
-    child.stdin.write(JSON.stringify({
-      jsonrpc: "2.0", id: 1, method: "initialize",
-      params: { protocolVersion: "2024-11-05" }
-    }) + "\n");
-    child.stdin.write(JSON.stringify({
-      jsonrpc: "2.0", id: 2, method: "tools/list", params: {}
-    }) + "\n");
-    child.stdin.end();
+  child.stdin.write(JSON.stringify({
+    jsonrpc: "2.0", id: 1, method: "initialize",
+    params: { protocolVersion: "2024-11-05" }
+  }) + "\n");
+  child.stdin.write(JSON.stringify({
+    jsonrpc: "2.0", id: 2, method: "tools/list", params: {}
+  }) + "\n");
+  child.stdin.end();
 
-    const [exitCode, exitSignal] = await once(child, "close");
-    assert.equal(exitCode, 0, errorOutput || "Configured MCP launcher exited unsuccessfully: " + exitSignal);
-    const responses = output.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-    assert.equal(responses.length, 2, "configured launcher must answer both MCP requests before it exits");
-    assert.equal(responses[0].result.serverInfo.name, "factory-filesystem");
-    assert.deepEqual(
-      responses[1].result.tools.map((tool) => tool.name).sort(),
-      ["list_files", "read_file", "search_text", "summarize_junit"]
-    );
-    assert.match(responses[1].result.tools[0].description, /proyecto/i);
-  } finally {
-    await rm(f.base, { recursive: true, force: true });
-  }
+  const [exitCode, exitSignal] = await once(child, "close");
+  assert.equal(exitCode, 0, errorOutput || "Bootstrap sin env falló: " + exitSignal);
+  const responses = output.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.equal(responses.length, 2, "debe responder initialize y tools/list antes de salir");
+  assert.equal(responses[0].result.serverInfo.name, "factory-filesystem");
+  assert.deepEqual(
+    responses[1].result.tools.map((tool) => tool.name).sort(),
+    ["list_files", "read_file", "search_text", "summarize_junit"]
+  );
+  assert.match(responses[1].result.tools[0].description, /proyecto/i);
+});
+
+test("B: con env absoluto y cwd en un proyecto externo sin .opencode, la raíz del MCP es el proyecto externo", async () => {
+  const factoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+  const config = JSON.parse(await readFile(join(factoryRoot, "opencode.json"), "utf8"));
+  const [, flag, bootstrap] = config.mcp.servers.factory_filesystem.command;
+  const external = resolve(
+    fileURLToPath(new URL("../control-center/src/api/test-fixtures/external-mcp-project/", import.meta.url)),
+  );
+  // El proyecto externo NO tiene `.opencode` ni launcher propio.
+  assert.equal(existsSync(join(external, ".opencode")), false, "el fixture externo no lleva .opencode");
+  const launcher = join(factoryRoot, ".opencode", "mcp", "factory-filesystem.mjs");
+
+  const child = spawn("node", [flag, bootstrap], {
+    cwd: external,
+    env: { ...process.env, FACTORY_FILESYSTEM_MCP_ENTRYPOINT: launcher },
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  let output = "";
+  let errorOutput = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { errorOutput += chunk; });
+
+  const requests = [
+    { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" } },
+    { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} },
+    { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "read_file", arguments: { path: "public-fixture.txt" } } },
+    { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "read_file", arguments: { path: "../fuera.txt" } } },
+  ];
+  child.stdin.write(requests.map((request) => JSON.stringify(request)).join("\n") + "\n");
+  child.stdin.end();
+
+  const [exitCode, exitSignal] = await once(child, "close");
+  assert.equal(exitCode, 0, errorOutput || "Bootstrap con env falló: " + exitSignal);
+  const responses = output.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.equal(responses.length, 4, errorOutput);
+  assert.deepEqual(
+    responses[1].result.tools.map((tool) => tool.name).sort(),
+    ["list_files", "read_file", "search_text", "summarize_junit"]
+  );
+  // Raíz del MCP = proyecto externo: lectura pública correcta…
+  assert.equal(responses[2].result.isError, false);
+  assert.match(responses[2].result.content[0].text, /Proyecto externo de prueba/);
+  // …y traversal rechazado.
+  assert.equal(responses[3].result.isError, true);
+  // No se copia ningún launcher al proyecto externo.
+  assert.equal(existsSync(join(external, ".opencode")), false, "sin launcher copiado al target");
+});
+
+test("C: un entrypoint inexistente falla de forma visible sin fallback silencioso", async () => {
+  const factoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+  const config = JSON.parse(await readFile(join(factoryRoot, "opencode.json"), "utf8"));
+  const [, flag, bootstrap] = config.mcp.servers.factory_filesystem.command;
+  const missing = join(factoryRoot, ".opencode", "mcp", "no-existe.mjs");
+
+  const child = spawn("node", [flag, bootstrap], {
+    cwd: factoryRoot,
+    env: { ...process.env, FACTORY_FILESYSTEM_MCP_ENTRYPOINT: missing },
+    stdio: ["pipe", "pipe", "pipe"]
+  });
+  let output = "";
+  let errorOutput = "";
+  child.stdout.setEncoding("utf8");
+  child.stderr.setEncoding("utf8");
+  child.stdout.on("data", (chunk) => { output += chunk; });
+  child.stderr.on("data", (chunk) => { errorOutput += chunk; });
+
+  child.stdin.write(JSON.stringify({
+    jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" }
+  }) + "\n");
+  child.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\n");
+  child.stdin.end();
+
+  const [exitCode] = await once(child, "close");
+  assert.notEqual(exitCode, 0, "debe fallar, no caer al launcher relativo");
+  assert.match(errorOutput, /factory-filesystem/);
+  const responses = output.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+  assert.equal(responses.some((response) => response.id === 2), false, "sin respuesta de tools/list");
 });
 
 test("the stdio MCP protocol exposes only the named safe read-only tools", async () => {
@@ -176,7 +252,8 @@ test("the stdio MCP protocol exposes only the named safe read-only tools", async
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05" } },
       { jsonrpc: "2.0", method: "notifications/initialized" },
       { jsonrpc: "2.0", id: 2, method: "tools/list" },
-      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "search_text", arguments: { query: "factory filesystem safe search" } } }
+      { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "search_text", arguments: { query: "factory filesystem safe search" } } },
+      { jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "read_file", arguments: { path: ".env" } } }
     ];
     child.stdin.write(requests.map((request) => JSON.stringify(request)).join("\n") + "\n");
     child.stdin.end();
@@ -184,7 +261,7 @@ test("the stdio MCP protocol exposes only the named safe read-only tools", async
     assert.equal(exitCode, 0, errorOutput || "MCP child exited unsuccessfully: " + exitSignal);
 
     const responses = output.trim().split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-    assert.equal(responses.length, 3);
+    assert.equal(responses.length, 4);
     assert.equal(responses[0].id, 1);
     assert.equal(responses[0].result.serverInfo.name, "factory-filesystem");
     const tools = responses[1].result.tools.map((tool) => tool.name).sort();
@@ -192,6 +269,11 @@ test("the stdio MCP protocol exposes only the named safe read-only tools", async
     assert.equal(responses[2].id, 3);
     assert.equal(responses[2].result.isError, false);
     assert.match(responses[2].result.content[0].text, /README.md/);
+    // Rechazo visible por el protocolo: un archivo sensible nunca se entrega.
+    assert.equal(responses[3].id, 4);
+    assert.equal(responses[3].result.isError, true);
+    assert.match(responses[3].result.content[0].text, /sensibles/);
+    assert.equal(responses[3].result.content[0].text.includes("TOKEN="), false);
     assert.equal(errorOutput.includes("Error:"), false);
   } finally {
     await rm(f.base, { recursive: true, force: true });

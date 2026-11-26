@@ -12,7 +12,8 @@ import {
   getClaudeProviderPreference, getExecutionAgentHandoffOutput, getProjectPreferences, getProjectPreflight,
   getWorkThreadSnapshot, getWorkInstructionFile, listAssignments, listFavoriteModels, recordProjectPreflight, saveAssignments, saveWorkInstructionFile,
   saveClaudeProviderPreference, saveFavoriteModels, saveProjectPreferences, synchronizeConfiguredClaudeModel,
-  updateWorkThreadStatus, recoverMetricsOnlySummaries,
+  updateWorkThreadStatus, recoverMetricsOnlySummaries, getFactoryDatabase,
+  listSecurityAuditExecutionRunIds,
   type AgentAssignment, type ClaudeProviderId, type EngineId, type FavoriteModel, type ModelTier, type PermissionMode, type PermissionProfile,
   type WorkThreadSnapshot
 } from "./database.js";
@@ -20,10 +21,11 @@ import { getClaudeModels, getDetectedClaudeProvider, getEngineVersion, getOpenCo
 import { analyzeProject } from "./projects.js";
 import { cancelExecution, getExecution, getLatestExecution, recoverExecutionState, respondExecutionDecision, startExecution } from "./execution.js";
 import { compareRuntimeBuilds, parseRuntimeBuildInfo } from "./runtime-build.js";
-import { CONTROL_CENTER_SECURITY_HEADERS, inspectRequestSecurity } from "./request-security.js";
+import { CONTROL_CENTER_SECURITY_HEADERS, effectiveApiPort, inspectRequestSecurity } from "./request-security.js";
 import { validateCapabilityScopeInput } from "./auditor-capabilities.js";
 import { workInstructionLimitError } from "./work-instruction-limit.js";
 import { formatInstructionFilePrompt, validateInstructionFile } from "./instruction-files.js";
+import { registerSecurityAuditRoutes } from "./security-audit-api.js";
 
 const currentDir = dirname(fileURLToPath(import.meta.url));
 const factoryRoot = resolve(process.env.FACTORY_ROOT || resolve(currentDir, "../../.."));
@@ -41,7 +43,7 @@ function readBuildInfoFromDisk() {
 // immutable startup fingerprint with the artifact currently present on disk.
 const runtimeBuildInfo = readBuildInfoFromDisk();
 const host = "127.0.0.1";
-const port = Number(process.env.FACTORY_API_PORT || 4141);
+const port = effectiveApiPort(process.env);
 
 function findNonFavoriteAssignment(assignments: AgentAssignment[]): AgentAssignment | undefined {
   const activeClaudeProvider = getClaudeProviderPreference();
@@ -105,6 +107,25 @@ app.addHook("onSend", async (_request, reply, payload) => {
     reply.header(name, value);
   }
   return payload;
+});
+
+// Rutas de la modalidad security-audit (intención, auditorías, estado,
+// reanudación, cancelación, validación, artefactos y remediación).
+registerSecurityAuditRoutes(app, {
+  factoryRoot,
+  startExecution,
+  cancelExecution,
+  analyzeProject,
+  getProjectPreflight,
+  consumeProjectPreflight,
+  listAssignments,
+  listFavoriteModels,
+  getClaudeProviderPreference,
+  getExecution,
+  getFactoryDatabase,
+  listSecurityAuditExecutionRunIds,
+  validateCapabilityScopeInput,
+  workInstructionLimitError
 });
 
 app.get("/api/health", async () => {

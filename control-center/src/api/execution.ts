@@ -2,8 +2,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import { request as httpRequest } from "node:http";
-import { readFile, realpath, stat } from "node:fs/promises";
-import { homedir } from "node:os";
+import { readFile, realpath, stat, mkdtemp, writeFile, rm, cp, lstat } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, dirname, join, resolve } from "node:path";
 import { query as claudeQuery } from "@anthropic-ai/claude-agent-sdk";
 import { readClaudeLocalConfig } from "./models.js";
@@ -11,7 +11,7 @@ import { addAgentRunApprovals, matchesAgentRunApproval, buildRunApprovalPatterns
 import {
   createExecutionAdmissionGate, grantAgentRunApprovalKey, hasAgentRunApprovalKey
 } from "./execution-guards.js";
-import { inspectFactoryFilesystemMcp, inspectOpenCodeAgentRegistry } from "./opencode-agents.js";
+import { inspectFactoryFilesystemMcp, inspectOpenCodeAgentRegistry, sourceOnlyOpenCodeConfig, unexpectedAuditMcpServers } from "./opencode-agents.js";
 import { buildOpenCodePermissionRules } from "./opencode-permissions.js";
 import { EXECUTION_WAVES } from "./execution-waves.js";
 import { summarizeOpenCodeToolResult } from "./opencode-tool-audit.js";
@@ -39,13 +39,32 @@ import {
 } from "./orchestration.js";
 import {
   addExecutionEvent, addWorkMessage, createExecutionDecision, createExecutionRecords, getClaudeProviderPreference,
-  getExecutionApprovalEvents, getExecutionShellToolEvents, getExecutionDecision, getExecutionSnapshot, getLatestExecutionId, listAssignments, listFavoriteModels,
+  getExecutionApprovalEvents, getExecutionShellToolEvents, getExecutionDecision, getExecutionRunStatus, getExecutionSnapshot, getLatestExecutionId, listAssignments, listFavoriteModels,
+  listSecurityAuditExecutionRunIds,
   claimExecutionDecision, markUnfinishedExecutionsInterrupted, orphanExecutionDecisions, orphanExecutionDecisionsForAgent,
   releaseExecutionDecisionClaim, resolveExecutionDecision, updateExecutionAgent, updateExecutionRun, updateExecutionSummary,
-  updateWorkThreadStatus,
+  updateWorkThreadStatus, appendExecutionAgent, getFactoryDatabase,
   type AgentAssignment, type EngineId, type ExecutionAgentRecord, type ExecutionDecisionRecord,
   type ExecutionSnapshot, type ExecutionStatus
 } from "./database.js";
+import { finishSecurityAuditInvocation, listSecurityAuditRuns, recordSecurityAuditInvocation, setSecurityAuditInvocationSession } from "./security-audit-persistence.js";
+import { classifySecurityAuditProviderError } from "./security-audit-contracts.js";
+import {
+  finalizeSecurityAuditInterrupted,
+  runSecurityAuditOrchestrator,
+  SECURITY_AUDIT_MAX_OUTPUT_CHARS,
+  type SecurityAuditAgentInvoker,
+  type SecurityAuditInvocationRequest,
+  type SecurityAuditInvocationResult,
+  type SecurityAuditOrchestratorConfig,
+  type SecurityAuditOutcome,
+  type SecurityAuditRosterEntry,
+} from "./security-audit-orchestrator.js";
+import {
+  validateSecurityAuditStartOptions,
+  type ResolvedSecurityAuditStart,
+  type SecurityAuditExecutionOptions,
+} from "./security-audit-start.js";
 
 type DecisionAnswer = { action: "allow" | "allow-run" | "deny" | "answer"; answer?: string };
 type OpenCodeRuntime = {
@@ -55,11 +74,14 @@ type OpenCodeRuntime = {
   sessions: Map<string, string>;
   filesystemReadyProjects: Set<string>;
   closing: boolean;
+  sourceOnly: boolean;
+  sessionRoot: string | null;
 };
 type PendingResolver = (answer: DecisionAnswer) => void;
 type RuntimeState = {
   runId: string;
   cancelled: boolean;
+  securityAuditRunId?: string;
   openCode?: OpenCodeRuntime;
   claudeControllers: Map<string, AbortController>;
   resolvers: Map<string, PendingResolver>;
@@ -101,6 +123,10 @@ const readTools = new Set(["Read", "Glob", "Grep", "LS", "List", "Skill", "LSP",
 const writeTools = new Set(["Edit", "Write", "NotebookEdit", "MultiEdit", "NotebookWrite", "NotebookCellEdit"]);
 const shellTools = new Set(["Bash", "BashOutput", "KillShell"]);
 const delegationTools = new Set(["Agent", "Task", "TaskCreate", "TaskGet", "TaskStop"]);
+/** Agentes con capacidad declarada para las fases de una auditoría security-audit. */
+const SECURITY_AUDIT_AGENT_IDS: readonly string[] = [
+  "architect", "build", "implementer", "reviewer", "tester", "reverse", "cloud-arbiter"
+];
 function addLog(runId: string, area: string, kind: string, message: string, agentRunId: string | null = null): void {
   addExecutionEvent(runId, area, kind, sanitizeText(message), agentRunId);
 }
@@ -120,8 +146,8 @@ function claudeToolApprovalKey(toolName: string, input: unknown): string {
   return createHash("sha256").update(`${toolName}:${stableJson(input)}`).digest("hex");
 }
 
-function createPermissionRules(profile: AgentAssignment["permissionProfile"]) {
-  return buildOpenCodePermissionRules(profile);
+function createPermissionRules(profile: AgentAssignment["permissionProfile"], sourceOnly = false) {
+  return buildOpenCodePermissionRules(profile, sourceOnly);
 }
 
 async function freePort(): Promise<number> {
@@ -137,7 +163,28 @@ async function freePort(): Promise<number> {
   return port;
 }
 
-async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, runId: string): Promise<OpenCodeRuntime> {
+async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, runId: string, sourceOnly = false): Promise<OpenCodeRuntime> {
+  let configPath = join(factoryRoot, "opencode.json");
+  let privateConfigDir: string | null = null;
+  if (sourceOnly) {
+    const derived = sourceOnlyOpenCodeConfig(JSON.parse(await readFile(configPath, "utf8")), projectPath);
+    privateConfigDir = await mkdtemp(join(tmpdir(), "factory-audit-opencode-"));
+    configPath = join(privateConfigDir, "opencode.json");
+    try {
+      await writeFile(configPath, JSON.stringify(derived), { mode: 0o600 });
+      for (const folder of ["agents", "skills"]) {
+        await cp(join(factoryRoot, ".opencode", folder), join(privateConfigDir, ".opencode", folder), {
+          recursive: true, filter: async (source) => {
+            const info = await lstat(source);
+            if (info.isSymbolicLink() || (!info.isDirectory() && !info.isFile())) {
+              throw new Error("Activo de agente/skill no físico en el runtime de auditoría");
+            }
+            return true;
+          }
+        });
+      }
+    } catch (error) { await rm(privateConfigDir, { recursive: true, force: true }); throw error; }
+  }
   const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
   // The user systemd service may not source NVM's shell initialization.
@@ -149,12 +196,16 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
     // Start in the factory, not the user's project; the project is attached
     // later as the session Location. This prevents project-local agents,
     // MCP settings and commands from overriding the factory's configuration.
-    cwd: factoryRoot,
+    // El launcher del MCP se resuelve con el bootstrap de opencode.json: la
+    // variable de entorno absoluta que se inyecta aquí es la que permite que
+    // el servidor arranque también en proyectos externos sin `.opencode`.
+    // El cwd del MCP NO se fija: sigue siendo el proyecto para los guards.
+    cwd: privateConfigDir ?? factoryRoot,
     env: {
       ...process.env,
       PATH: childPath,
-      OPENCODE_CONFIG: join(factoryRoot, "opencode.json"),
-      OPENCODE_CONFIG_DIR: join(factoryRoot, ".opencode"),
+      OPENCODE_CONFIG: configPath,
+      OPENCODE_CONFIG_DIR: join(privateConfigDir ?? factoryRoot, ".opencode"),
       OPENCODE_DISABLE_EXTERNAL_SKILLS: "true",
       FACTORY_FILESYSTEM_MCP_ENTRYPOINT: join(factoryRoot, ".opencode", "mcp", "factory-filesystem.mjs")
     },
@@ -183,7 +234,9 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
   };
   child.stdout?.on("data", (chunk: Buffer) => consumeServerOutput(chunk, false));
   child.stderr?.on("data", (chunk: Buffer) => consumeServerOutput(chunk, true));
-  child.once("exit", () => { closed = true; });
+  const cleanupConfig = () => { if (privateConfigDir) void rm(privateConfigDir, { recursive: true, force: true }).catch(() => undefined); };
+  child.once("exit", () => { closed = true; cleanupConfig(); });
+  child.once("error", () => { closed = true; cleanupConfig(); });
   const deadline = Date.now() + 18000;
   while (Date.now() < deadline) {
     if (closed) throw new Error("El servidor local de OpenCode terminó antes de quedar disponible.");
@@ -194,17 +247,17 @@ async function startOpenCodeRuntime(projectPath: string, factoryRoot: string, ru
         if (response.ok) {
           addLog(runId, "OPENCODE-SERVER", "success", "Servidor local aislado de OpenCode disponible en localhost.");
           const runtime: OpenCodeRuntime = {
-            child, baseUrl, password, sessions: new Map(), filesystemReadyProjects: new Set(), closing: false
+            child, baseUrl, password, sessions: new Map(), filesystemReadyProjects: new Set(), closing: false, sourceOnly, sessionRoot: privateConfigDir
           };
           try {
-            await waitForFactoryOpenCodeAgents(runtime, factoryRoot, runId);
+            await waitForFactoryOpenCodeAgents(runtime, privateConfigDir ?? factoryRoot, runId);
           } catch (error) {
             child.kill("SIGTERM");
             throw error;
           }
           return runtime;
         }
-      } catch { /* server still starting */ }
+      } catch (error) { if (closed || child.killed) throw error; /* server still starting */ }
     }
     await delay(250);
   }
@@ -312,7 +365,7 @@ async function waitForFactoryFilesystemMcp(
   if (runtime.filesystemReadyProjects.has(projectPath)) return;
 
   const query = new URLSearchParams();
-  query.set("location[directory]", projectPath);
+  query.set("location[directory]", runtime.sessionRoot ?? projectPath);
   const endpoint = "/api/mcp?" + query.toString();
   const deadline = Date.now() + 15000;
   let reportedWaiting = false;
@@ -323,6 +376,10 @@ async function waitForFactoryFilesystemMcp(
       const payload = await openCodeRequest<unknown>(runtime, "GET", endpoint, undefined, 2500);
       lastStatus = inspectFactoryFilesystemMcp(payload);
       if (lastStatus.ready) {
+        if (runtime.sourceOnly) {
+          const extras = unexpectedAuditMcpServers(payload);
+          if (extras.length) throw new Error("MCP server externo no deshabilitado en source-only: " + extras.join(", "));
+        }
         runtime.filesystemReadyProjects.add(projectPath);
         addLog(
           runId,
@@ -534,6 +591,26 @@ async function pollOpenCodeAgent(
         "/api/session/" + encodeURIComponent(sessionId) + "/message", undefined, 3000).catch(() => null);
       nativeInput = findNativeGitToolInput(refreshedMessages, request);
     }
+    if (state.securityAuditRunId) {
+      const action = String(request.action ?? request.permission ?? "");
+      // Do not escalate forbidden source-only tools to a human. Only the exact
+      // managed read tools may receive a one-time grant; the MCP checks inputs.
+      const safe = !requestsSandboxBypass(request) && !requestsSandboxBypass(request.metadata) &&
+        ["factory_filesystem_list_files", "factory_filesystem_read_file",
+        "factory_filesystem_search_text", "factory_filesystem_summarize_junit"].includes(action);
+      try {
+        await replyOpenCodePermission(runtime, sessionId, requestId, safe ? "once" : "reject",
+          safe ? undefined : "Auditoría source-only: usa únicamente las herramientas de lectura factory_filesystem y la skill local.");
+        state.seenOpenCodePermissionRequests.add(requestKey);
+        addLog(state.runId, "AUDITOR", safe ? "success" : "warning",
+          safe ? "Permiso aprobado automáticamente por Auditor (solo esta operación): " + agent.agentId + " · " + action :
+            "Operación denegada automáticamente por Auditor (source-only): " + agent.agentId + " · " + action, agent.id);
+        continue;
+      } catch (error) {
+        // No fallback to broader permissions on a failed denial.
+        throw new Error("No se pudo resolver la solicitud source-only: " + sanitizeText(String(error)));
+      }
+    }
     const auditorDecision = assessOpenCodePermission(
       request, currentRun?.projectPath ?? "", agent.permissionProfile,
       { instructions: currentRun?.instructions ?? "", agentId: agent.agentId, requireNativeShellEvidence: true, capabilityScope: currentRun?.configurationSnapshot?.auditorScope ?? "" }, nativeInput
@@ -627,8 +704,8 @@ async function runOpenCodeAgent(
     title: `Factory · ${agent.agentId} · ${new Date().toLocaleString("es-CO")}`,
     agent: agent.agentId,
     model,
-    location: { directory: projectPath },
-    permissions: createPermissionRules(agent.permissionProfile)
+    location: { directory: runtime.sessionRoot ?? projectPath },
+    permissions: createPermissionRules(agent.permissionProfile, Boolean(state.securityAuditRunId))
   };
   // Do not silently fall back to OpenCode's default agent. The runtime startup
   // gate has already verified this custom agent and its mode. If it disappears
@@ -648,6 +725,7 @@ async function runOpenCodeAgent(
     throw error;
   }
   runtime.sessions.set(agent.id, sessionId);
+  if (state.securityAuditRunId) setSecurityAuditInvocationSession(getFactoryDatabase(), agent.id, sessionId);
   updateExecutionAgent(agent.id, { sessionId, status: "running", startedAt: new Date().toISOString() });
   addLog(state.runId, agent.agentId.toUpperCase(), "info", `Sesión OpenCode creada: ${sessionId}. Modelo: ${agent.modelId}.`, agent.id);
 
@@ -692,6 +770,208 @@ async function runOpenCodeAgent(
   );
   validateOpenCodeTurnResult(lastText, sessionMessages);
   return lastText;
+}
+
+function extractSecurityAuditProviderError(message: string): { kind: string; status: number | null } {
+  const match = message.match(/\b(429|408|401|403|400|500|502|503|504)\b/);
+  const status = match ? Number(match[1]) : null;
+  const classification = classifySecurityAuditProviderError(status !== null ? { status } : null);
+  return { kind: classification.kind, status: classification.status };
+}
+
+/**
+ * Aborto REAL por vencimiento del presupuesto de duración (security-audit):
+ * interrumpe las invocaciones activas con los mecanismos existentes
+ * (controllers `Claude.abort` e `interrupt` de sesiones OpenCode) SIN marcar
+ * la ejecución como cancelada por el usuario: jamás toca `state.cancelled`,
+ * no mata el runtime ni reescribe el estado del run.
+ */
+function abortActiveSecurityAuditInvocations(state: RuntimeState): void {
+  for (const controller of state.claudeControllers.values()) controller.abort();
+  if (state.openCode && !state.openCode.closing) {
+    for (const sessionId of state.openCode.sessions.values()) {
+      void openCodeRequest(state.openCode, "POST", `/api/session/${encodeURIComponent(sessionId)}/interrupt`)
+        .catch(() => undefined);
+    }
+  }
+  addLog(state.runId, "SECURITY-AUDIT", "warning",
+    "Presupuesto de duración agotado: se abortan las instancias activas " +
+    "(la ejecución NO queda cancelada por el usuario).");
+}
+
+/**
+ * Adaptador PRODUCTIVO del invoker de auditoría: una fila `execution_agents`
+ * nueva y una sesión nueva por instancia, permiso `read-only` en ambos
+ * motores, y registro real en `security_audit_invocations` (motor, modelo,
+ * sesión, agentRunId, handoff, timestamps, huella y cross-engine PLANIFICADO).
+ * El éxito de la verificación cruzada nunca se registra aquí: la fila inicia
+ * con `cross_engine = 0` y solo el orquestador afirma el veredicto real. Las
+ * invocaciones de un mismo motor se serializan: no se promete paralelismo que
+ * el runtime no ofrece.
+ */
+function createSecurityAuditInvoker(args: {
+  state: RuntimeState;
+  projectPath: string;
+  factoryRoot: string;
+  roleInstructions: Record<string, string>;
+  claudeSkillsPlugin: ClaudeFactorySkillsPlugin | null;
+  auditRunId: string;
+}): SecurityAuditAgentInvoker {
+  const queues: Record<EngineId, Promise<unknown>> = {
+    opencode: Promise.resolve(),
+    claude: Promise.resolve()
+  };
+
+  const runOne = async (request: SecurityAuditInvocationRequest): Promise<SecurityAuditInvocationResult> => {
+    const instanceId = request.instanceId;
+    const startedAt = new Date().toISOString();
+    appendExecutionAgent({
+      id: instanceId,
+      runId: args.state.runId,
+      agentId: request.agentId,
+      engine: request.engine,
+      modelId: request.modelId,
+      permissionProfile: "read-only",
+      status: "queued"
+    });
+    recordSecurityAuditInvocation(getFactoryDatabase(), {
+      instanceId,
+      runId: args.auditRunId,
+      phase: request.phase,
+      role: request.role,
+      agentId: request.agentId,
+      engine: request.engine,
+      model: request.modelId,
+      agentRunId: instanceId,
+      handoffId: request.handoffId,
+      verificationKind: request.verificationKind,
+      fingerprint: request.fingerprint,
+      discovererInstanceId: request.discovererInstanceId,
+      crossEnginePlanned: request.crossEnginePlanned
+    });
+    updateExecutionAgent(instanceId, { status: "running", startedAt, error: null });
+    if (getExecutionRunStatus(args.state.runId) === "queued") updateExecutionRun(args.state.runId, "running");
+    addLog(args.state.runId, request.agentId.toUpperCase(), "info",
+      `Instancia security-audit ${instanceId} · fase ${request.phase} (${request.role}) · ` +
+      `motor ${request.engine} · modelo ${request.modelId} · permiso read-only · ` +
+      `cross-engine planificado: ${request.crossEnginePlanned ? "sí" : "no"} (sin éxito afirmado antes de invocar).`, instanceId);
+
+    const agent: AgentInput = {
+      id: instanceId,
+      runId: args.state.runId,
+      agentId: request.agentId,
+      engine: request.engine,
+      modelId: request.modelId,
+      permissionProfile: "read-only",
+      permissionMode: "automatic",
+      permissionReason: "Modalidad security-audit: todas las instancias son de solo lectura en ambos motores.",
+      enabled: true
+    };
+
+    try {
+      if (args.state.cancelled) throw new Error("Ejecución cancelada por el usuario.");
+      let output: string;
+      if (request.engine === "opencode") {
+        output = await runOpenCodeAgent(args.state, agent, args.projectPath, args.factoryRoot, request.prompt);
+      } else {
+        if (!args.claudeSkillsPlugin) {
+          throw new Error("Claude no está disponible para esta instancia de auditoría.");
+        }
+        output = await runClaudeAgent(
+          args.state,
+          agent,
+          args.projectPath,
+          args.factoryRoot,
+          request.prompt,
+          args.roleInstructions[request.agentId] ?? "",
+          args.claudeSkillsPlugin
+        );
+      }
+      const finishedAt = new Date().toISOString();
+      const sessionId = getExecutionSnapshot(args.state.runId)?.agents.find((item) => item.id === instanceId)?.sessionId ?? null;
+      // F06: la sesión REAL de la instancia queda persistida en la fila.
+      setSecurityAuditInvocationSession(getFactoryDatabase(), instanceId, sessionId);
+      // Salida acotada: por encima del límite se trunca y el orquestador la
+      // descarta como malformada/truncada (sin repararla).
+      const bounded = output.length > SECURITY_AUDIT_MAX_OUTPUT_CHARS
+        ? output.slice(0, SECURITY_AUDIT_MAX_OUTPUT_CHARS)
+        : output;
+      updateExecutionAgent(instanceId, { status: "succeeded", finishedAt, error: null });
+      finishSecurityAuditInvocation(getFactoryDatabase(), instanceId, "succeeded");
+      return {
+        instanceId,
+        agentRunId: instanceId,
+        agentId: request.agentId,
+        engine: request.engine,
+        modelId: request.modelId,
+        sessionId,
+        handoffId: request.handoffId,
+        status: "succeeded",
+        output: bounded,
+        startedAt,
+        finishedAt,
+        fingerprint: request.fingerprint,
+        // F06: el invocador NUNCA afirma verificación cruzada; solo el
+        // orquestador la declara tras interpretar la salida con evidencia.
+        crossEngineVerified: false
+      };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const finishedAt = new Date().toISOString();
+      const cancelled = args.state.cancelled;
+      const providerError = extractSecurityAuditProviderError(message);
+      // F06: la sesión real (si llegó a crearse) queda persistida también en fallo.
+      setSecurityAuditInvocationSession(
+        getFactoryDatabase(),
+        instanceId,
+        getExecutionSnapshot(args.state.runId)?.agents.find((item) => item.id === instanceId)?.sessionId ?? null,
+      );
+      updateExecutionAgent(instanceId, {
+        status: cancelled ? "cancelled" : "failed",
+        error: sanitizeText(message),
+        finishedAt
+      });
+      finishSecurityAuditInvocation(
+        getFactoryDatabase(),
+        instanceId,
+        cancelled ? "cancelled" : "failed",
+        providerError
+      );
+      addLog(args.state.runId, request.agentId.toUpperCase(), "warning",
+        `Instancia ${instanceId} ${cancelled ? "cancelada" : "fallida"}: ${sanitizeText(message)} ` +
+        `(proveedor=${providerError.kind}${providerError.status ? "/" + providerError.status : ""}; autoReplay=false).`,
+        instanceId);
+      return {
+        instanceId,
+        agentRunId: instanceId,
+        agentId: request.agentId,
+        engine: request.engine,
+        modelId: request.modelId,
+        sessionId: getExecutionSnapshot(args.state.runId)?.agents.find((item) => item.id === instanceId)?.sessionId ?? null,
+        handoffId: request.handoffId,
+        status: cancelled ? "cancelled" : "failed",
+        output: "FASE FALLIDA: " + sanitizeText(message),
+        startedAt,
+        finishedAt,
+        fingerprint: request.fingerprint,
+        // F06: un fallo jamás es verificación cruzada afirmada.
+        crossEngineVerified: false,
+        providerError
+      };
+    }
+  };
+
+  return {
+    invoke(request: SecurityAuditInvocationRequest): Promise<SecurityAuditInvocationResult> {
+      const previous = queues[request.engine];
+      const current = previous.then(
+        () => runOne(request),
+        () => runOne(request)
+      );
+      queues[request.engine] = current.then(() => undefined, () => undefined);
+      return current;
+    }
+  };
 }
 
 async function loadRoleInstructions(factoryRoot: string, agentId: string): Promise<string> {
@@ -1087,6 +1367,7 @@ async function runClaudeAgent(
       const messageSessionId = typeof record.session_id === "string" ? record.session_id : null;
       if (messageSessionId && messageSessionId !== sessionId) {
         sessionId = messageSessionId;
+        if (state.securityAuditRunId) setSecurityAuditInvocationSession(getFactoryDatabase(), agent.id, sessionId);
         updateExecutionAgent(agent.id, { sessionId });
         addLog(state.runId, agent.agentId.toUpperCase(), "info", `Sesión Claude Code: ${sessionId}.`, agent.id);
       }
@@ -1183,7 +1464,8 @@ async function executeRun(
     skillContent: string;
     instructionFileContext: string;
     roleInstructions: Record<string, string>;
-  }
+  },
+  securityAudit: { resolved: ResolvedSecurityAuditStart; roster: SecurityAuditRosterEntry[] } | null = null
 ): Promise<void> {
   let workflowResponseSaved = false;
   const failures: string[] = [];
@@ -1193,15 +1475,17 @@ async function executeRun(
   let cloudArbiterOutput: string | null = null;
 
   try {
-    const openCodeAgents = activeAgents.some((agent) => agent.engine === "opencode");
-    const needsClaude = activeAgents.some((agent) => agent.engine === "claude");
+    const openCodeAgents = activeAgents.some((agent) => agent.engine === "opencode") ||
+      (securityAudit?.roster.some((entry) => entry.engine === "opencode") ?? false);
+    const needsClaude = activeAgents.some((agent) => agent.engine === "claude") ||
+      (securityAudit?.roster.some((entry) => entry.engine === "claude") ?? false);
     let openCodeReady = !openCodeAgents;
     let claudeReady = !needsClaude;
     let claudeSkillsPlugin: ClaudeFactorySkillsPlugin | null = null;
 
     if (openCodeAgents) {
       try {
-        state.openCode = await startOpenCodeRuntime(projectPath, factoryRoot, state.runId);
+        state.openCode = await startOpenCodeRuntime(projectPath, factoryRoot, state.runId, Boolean(securityAudit));
         openCodeReady = true;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1485,8 +1769,82 @@ async function executeRun(
     // Each wave consumes only completed handoffs from earlier waves. In particular,
     // Reviewer must start after Tester so it can independently verify the real test result.
     // Discovery remains parallel across engines; OpenCode agents stay sequential.
-    for (const wave of EXECUTION_WAVES) {
-      await runWave(wave.id, [...wave.agentIds]);
+    let securityAuditOutcome: SecurityAuditOutcome | null = null;
+    if (securityAudit) {
+      // Rama explícita de auditoría: mismos motores, cancelación, decisiones,
+      // logs y redacción, pero sin olas tradicionales.
+      state.securityAuditRunId = securityAudit.resolved.resumeRunId ?? state.runId;
+      const invoker = createSecurityAuditInvoker({
+        state,
+        projectPath,
+        factoryRoot,
+        roleInstructions: workflow.roleInstructions,
+        claudeSkillsPlugin,
+        auditRunId: securityAudit.resolved.resumeRunId ?? state.runId
+      });
+      const orchestratorConfig: SecurityAuditOrchestratorConfig = {
+        runId: state.runId,
+        projectPath,
+        profile: securityAudit.resolved.profile,
+        intent: "full_audit",
+        scope: securityAudit.resolved.scope,
+        budget: securityAudit.resolved.budget,
+        // F10: la procedencia del origen es del SERVIDOR. El orquestador
+        // resuelve sourceRef/sourceDirty reales (git) y NUNCA hereda valores
+        // declarados; estos campos del config quedan de compatibilidad.
+        sourceRef: null,
+        sourceDirty: false,
+        roster: securityAudit.roster,
+        executionPolicy: securityAudit.resolved.executionPolicy,
+        sandboxAuthorization: securityAudit.resolved.sandboxAuthorization,
+        resumeRunId: securityAudit.resolved.resumeRunId
+      };
+      const outcome = await runSecurityAuditOrchestrator(
+        {
+          db: getFactoryDatabase(),
+          invoker,
+          log: (entry) => addLog(state.runId, entry.area, entry.kind, entry.message, entry.agentRunId ?? null),
+          isCancelled: () => state.cancelled,
+          // Vencimiento del presupuesto de duración: aborto real de las
+          // instancias activas sin cancelar la ejecución por el usuario.
+          onDeadline: () => abortActiveSecurityAuditInvocations(state)
+        },
+        orchestratorConfig
+      );
+      securityAuditOutcome = outcome;
+      for (const result of outcome.results) {
+        allResults.push({
+          agentRunId: result.agentRunId,
+          agentId: result.agentId,
+          engine: result.engine,
+          modelId: result.modelId,
+          sessionId: result.sessionId,
+          status: result.status,
+          startedAt: result.startedAt,
+          finishedAt: result.finishedAt,
+          handoffId: result.handoffId,
+          output: result.output
+        });
+        if (result.status === "failed") failures.push(result.agentId);
+      }
+      addLog(state.runId, "SECURITY-AUDIT",
+        outcome.status === "complete" ? "success" : "warning",
+        JSON.stringify({
+          runId: outcome.runId,
+          status: outcome.status,
+          incompleteReason: outcome.incompleteReason,
+          phasesComplete: outcome.phasesComplete,
+          pendingUnits: outcome.pendingUnits,
+          unvalidatedFingerprints: outcome.unvalidatedFingerprints,
+          deferredUnits: outcome.deferredUnits,
+          ledgerValidator: outcome.ledgerValidator,
+          findingsValidator: outcome.findingsValidator,
+          completion: outcome.completion
+        }));
+    } else {
+      for (const wave of EXECUTION_WAVES) {
+        await runWave(wave.id, [...wave.agentIds]);
+      }
     }
 
     const snapshot = getExecutionSnapshot(state.runId);
@@ -1494,7 +1852,8 @@ async function executeRun(
     const agentIdByRunId = new Map(snapshot.agents.map((agent) => [agent.id, agent.agentId]));
     const summary = buildExecutionSummary({
       instructions,
-      agents: snapshot.agents,
+      agents: securityAudit ? snapshot.agents.filter((agent) =>
+        !agents.some((base) => base.id === agent.id && !base.enabled)) : snapshot.agents,
       results: allResults,
       cloudArbiterOutput,
       decisions: snapshot.decisionHistory.map((decision) => ({
@@ -1514,7 +1873,15 @@ async function executeRun(
         message: event.message,
         createdAt: event.createdAt,
         agentRunId: event.agentRunId
-      }))
+      })),
+      // Outcome real de la auditoría: un run incomplete/cancelado nunca
+      // produce un resumen ejecutivo de éxito.
+      securityAudit: securityAuditOutcome
+        ? {
+            status: securityAuditOutcome.status,
+            incompleteReason: securityAuditOutcome.incompleteReason
+          }
+        : undefined
     });
     const operationalFindings = inspectAuditorShellReceipts(getExecutionShellToolEvents(state.runId));
     const auditedSummary = appendAuditorOperationalFindings(summary, operationalFindings);
@@ -1527,7 +1894,10 @@ async function executeRun(
       auditedSummary.verdict === "failed" || operationalFindings.length > 0 ? "warning" : "success",
       JSON.stringify(auditedSummary));
 
-    const hasFailed = snapshot.agents.some((agent) => agent.status === "failed") || failures.length > 0;
+    const hasFailed = snapshot.agents.some((agent) => agent.status === "failed") || failures.length > 0 ||
+      // Un outcome de auditoría no complete (incluido cancelado) nunca deja la
+      // ejecución como succeeded; la cancelación conserva `cancelled`.
+      (securityAuditOutcome !== null && securityAuditOutcome.status !== "complete");
     const terminalStatus: ExecutionStatus = state.cancelled ? "cancelled" : hasFailed ? "failed" : "succeeded";
     if (workflow.threadId) {
       const finalStatus = state.cancelled || hasFailed ? "failed" : "completed";
@@ -1548,6 +1918,40 @@ async function executeRun(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     addLog(state.runId, "ORCHESTRATOR", "warning", "Ejecución interrumpida: " + message);
+    // Reconciliación inmediata: si la auditoría quedó `in_progress` en la base
+    // tras una excepción del orquestador, se cierra terminal con motivo
+    // operativo y se publican los informes parciales (nunca `in_progress`).
+    if (securityAudit) {
+      try {
+        finalizeSecurityAuditInterrupted(
+          getFactoryDatabase(),
+          securityAudit.resolved.resumeRunId ?? state.runId,
+          {
+            reason: state.cancelled ? "cancelled_by_user" : "execution_interrupted",
+            error: message,
+            log: (entry) => addLog(state.runId, "SECURITY-AUDIT", "warning", entry)
+          }
+        );
+      } catch (finalizeError) {
+        addLog(state.runId, "SECURITY-AUDIT", "warning",
+          "No se pudo reconciliar el run de auditoría tras la interrupción: " +
+          (finalizeError instanceof Error ? finalizeError.message : String(finalizeError)));
+      }
+      try {
+        const snapshot = getExecutionSnapshot(state.runId);
+        const summary = buildExecutionSummary({ instructions,
+          agents: (snapshot?.agents ?? []).filter((agent) => !agents.some((base) => base.id === agent.id && !base.enabled)),
+          results: allResults, cloudArbiterOutput,
+          securityAudit: { status: state.cancelled ? "cancelled" : "incomplete",
+            incompleteReason: state.cancelled ? "cancelled_by_user" : "execution_interrupted" }
+        });
+        const auditedSummary = appendAuditorOperationalFindings(summary, inspectAuditorShellReceipts(getExecutionShellToolEvents(state.runId)));
+        updateExecutionSummary(state.runId, auditedSummary);
+        addLog(state.runId, "EXECUTIVE-SUMMARY", "warning", JSON.stringify(auditedSummary));
+      } catch (summaryError) {
+        addLog(state.runId, "SECURITY-AUDIT", "warning", "No se pudo guardar el resumen parcial: " + sanitizeText(String(summaryError)));
+      }
+    }
     if (workflow.threadId && !workflowResponseSaved) {
       addWorkMessage(workflow.threadId, state.runId, workflow.roundNumber, "assistant",
         "Ronda " + workflow.roundNumber + " fallida: " + sanitizeText(message), "round-error");
@@ -1571,6 +1975,13 @@ async function executeRun(
   }
 }
 
+export interface SecurityAuditRemediationLink {
+  /** Run de auditoría de origen cuyo hallazgo `confirmed` se remedia. */
+  auditRunId: string;
+  /** Fingerprints confirmados que motivan la ejecución independiente. */
+  fingerprints: string[];
+}
+
 export interface StartExecutionOptions {
   auditorScope?: string;
   threadId?: string | null;
@@ -1579,6 +1990,14 @@ export interface StartExecutionOptions {
   instructionFileContext?: string;
   instructionFilePlanningText?: string;
   instructionFileMetadata?: Array<{ id: string; name: string; sha256: string; byteLength: number }>;
+  /** Modalidad security-audit: valida con contratos antes de crear registros. */
+  securityAudit?: SecurityAuditExecutionOptions;
+  /**
+   * Remediación explícita de hallazgos confirmados: desactiva la clasificación
+   * security del planificador para que el flujo use su plan normal de
+   * implementación (Implementer/Reviewer/QA con permisos y decisiones normales).
+   */
+  securityRemediation?: SecurityAuditRemediationLink;
 }
 
 export async function startExecution(
@@ -1605,12 +2024,33 @@ export async function startExecution(
     const instructionLimitError = workInstructionLimitError(instructions);
     if (instructionLimitError) throw new RangeError(instructionLimitError);
     const assignments = listAssignments();
+    // Modalidad security-audit: opciones explícitas validadas con los contratos
+    // (scope, presupuesto, política) antes de crear cualquier registro.
+    const securityAudit = options.securityAudit
+      ? validateSecurityAuditStartOptions(options.securityAudit)
+      : null;
+    if (options.securityRemediation) {
+      if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(options.securityRemediation.auditRunId)) {
+        throw new Error("Identificador de auditoría inválido para la remediación.");
+      }
+      if (!options.securityRemediation.fingerprints.length) {
+        throw new Error("La remediación requiere al menos un fingerprint confirmado.");
+      }
+    }
     const taskPlan = planTask(
       instructions + (options.instructionFilePlanningText ? "\n" + options.instructionFilePlanningText : ""),
-      depthOverride
+      depthOverride,
+      { securityRemediation: Boolean(options.securityRemediation) }
     );
-    const selection = selectAgentsForTask(assignments, taskPlan);
-    if (selection.unavailableRequiredAgentIds.length > 0) {
+    const selection = securityAudit
+      ? {
+          selectedAgentIds: [] as string[],
+          skippedAgentIds: assignments.filter((item) => !item.enabled).map((item) => item.agentId),
+          mandatoryAgentIds: [] as string[],
+          unavailableRequiredAgentIds: [] as string[]
+        }
+      : selectAgentsForTask(assignments, taskPlan);
+    if (!securityAudit && selection.unavailableRequiredAgentIds.length > 0) {
       const required = selection.unavailableRequiredAgentIds.join(", ");
       const disabled = selection.unavailableRequiredAgentIds.filter((agentId) =>
         assignments.some((assignment) => assignment.agentId === agentId)
@@ -1628,14 +2068,48 @@ export async function startExecution(
       );
     }
     const selectedAgentIds = new Set(selection.selectedAgentIds);
-    const activeAssignments = assignments.filter((item) => item.enabled && selectedAgentIds.has(item.agentId));
-    if (!activeAssignments.length) throw new Error("El plan no tiene agentes habilitados para esta tarea.");
-    if (activeAssignments.some((item) => item.engine === "opencode") && !(await stat(opencodeBinary).catch(() => null))) {
+    // Roster de la modalidad security-audit: agentes habilitados del equipo,
+    // con su motor y modelo ya configurados (no se elige ni se impone modelos).
+    const auditRoster: SecurityAuditRosterEntry[] = securityAudit
+      ? assignments
+          .filter((item) => item.enabled && SECURITY_AUDIT_AGENT_IDS.includes(item.agentId))
+          .map((item) => ({
+            agentId: item.agentId as SecurityAuditRosterEntry["agentId"],
+            engine: item.engine,
+            modelId: item.modelId
+          }))
+      : [];
+    const activeAssignments = securityAudit
+      ? []
+      : assignments.filter((item) => item.enabled && selectedAgentIds.has(item.agentId));
+    if (!securityAudit && !activeAssignments.length) {
+      throw new Error("El plan no tiene agentes habilitados para esta tarea.");
+    }
+    const auditRosterEngines = new Set(auditRoster.map((entry) => entry.engine));
+    const needsOpenCodeBinary = securityAudit
+      ? auditRosterEngines.has("opencode")
+      : activeAssignments.some((item) => item.engine === "opencode");
+    if (needsOpenCodeBinary && !(await stat(opencodeBinary).catch(() => null))) {
       throw new Error("No se encontró OpenCode en ~/.opencode/bin/opencode.");
     }
     const id = randomUUID();
     const now = new Date().toISOString();
     const agents: AgentInput[] = assignments.map((assignment) => {
+      if (securityAudit) {
+        // Modalidad security-audit: las 7 filas base quedan como registro del
+        // equipo; las instancias reales se crean por fase (solo lectura).
+        return {
+          id: randomUUID(), runId: id, agentId: assignment.agentId,
+          engine: assignment.engine, modelId: assignment.modelId,
+          permissionProfile: "read-only",
+          permissionMode: assignment.permissionMode,
+          permissionReason:
+            "Modalidad security-audit: todas las instancias son de solo lectura en ambos motores.",
+          enabled: false,
+          skipReason:
+            "Modalidad security-audit: sin olas tradicionales; las instancias reales se registran por fase en security_audit_invocations."
+        };
+      }
       const selected = assignment.enabled && selectedAgentIds.has(assignment.agentId);
       const permission = resolveAgentPermissionProfile(
         assignment.agentId, taskPlan, assignment.permissionMode, assignment.permissionProfile
@@ -1656,9 +2130,12 @@ export async function startExecution(
     });
     const roundNumber = Math.max(1, Math.floor(options.roundNumber ?? 1));
     const continuityContext = (options.continuityContext ?? "").slice(0, 28000);
-    const roleEntries = await Promise.all(activeAssignments.map(async (assignment) => {
-      const roleText = await loadRoleInstructions(factoryRoot, assignment.agentId);
-      return [assignment.agentId, roleText, createHash("sha256").update(roleText).digest("hex")] as const;
+    const roleAgentIds = securityAudit
+      ? [...new Set(auditRoster.map((entry) => entry.agentId))]
+      : activeAssignments.map((assignment) => assignment.agentId);
+    const roleEntries = await Promise.all(roleAgentIds.map(async (agentId) => {
+      const roleText = await loadRoleInstructions(factoryRoot, agentId);
+      return [agentId, roleText, createHash("sha256").update(roleText).digest("hex")] as const;
     }));
     const roleInstructions = Object.fromEntries(roleEntries.map(([agentId, roleText]) => [agentId, roleText]));
     const roleDigests = Object.fromEntries(roleEntries.map(([agentId, _roleText, digest]) => [agentId, digest]));
@@ -1679,6 +2156,22 @@ export async function startExecution(
         favorites: listFavoriteModels(),
         assignments: assignments.map((item) => ({ ...item })),
         taskPlan,
+        securityAudit: securityAudit
+          ? {
+              profile: securityAudit.profile,
+              scope: securityAudit.scope,
+              budget: securityAudit.budget,
+              executionPolicy: securityAudit.executionPolicy,
+              resumeRunId: securityAudit.resumeRunId,
+              roster: auditRoster
+            }
+          : undefined,
+        securityRemediation: options.securityRemediation
+          ? {
+              auditRunId: options.securityRemediation.auditRunId,
+              fingerprints: [...options.securityRemediation.fingerprints]
+            }
+          : undefined,
         permissionResolution: agents.filter((agent) => agent.enabled).map((agent) => ({
           agentId: agent.agentId,
           configuredMode: agent.permissionMode,
@@ -1734,12 +2227,21 @@ export async function startExecution(
       + ", metadatos=" + auditorAuthority.scope.metadata.length + ", configuraciones=" + auditorAuthority.scope.configs.length
       + ". Escrituras externas y operaciones destructivas requieren revisión específica. Autorreparación desactivada.");
     runtimeByRun.set(id, state);
+    if (securityAudit) {
+      addLog(id, "SECURITY-AUDIT", "success",
+        "Modalidad security-audit activa: perfil " + securityAudit.profile +
+        "; alcance " + JSON.stringify(securityAudit.scope) +
+        "; política de ejecución " + securityAudit.executionPolicy +
+        "; roster: " + auditRoster.map((entry) =>
+          entry.agentId + "[" + entry.engine + "/" + entry.modelId + "]").join(", ") +
+        ". Las 7 filas base quedan skipped; las instancias reales se crean por fase en solo lectura.");
+    }
     void executeRun(state, resolvedProjectPath, instructions.trim(), factoryRoot, agents, taskPlan, {
       threadId: options.threadId ?? null, roundNumber, continuityContext,
       skillContent: workflowSkillSource,
       instructionFileContext: options.instructionFileContext ?? "",
       roleInstructions
-    });
+    }, securityAudit ? { resolved: securityAudit, roster: auditRoster } : null);
     return { runId: id };
   } finally {
     releaseStartReservation();
@@ -1755,6 +2257,52 @@ export function getExecution(runId: string): ExecutionSnapshot | null {
 }
 export function recoverExecutionState(): void {
   markUnfinishedExecutionsInterrupted();
+  reconcileSecurityAuditRunsAfterRecovery();
+}
+
+/**
+ * Reconciliación post-recovery: un run de auditoría `in_progress` cuya
+ * ejecución asociada quedó `failed`/`interrupted` (o `cancelled`) se cierra
+ * terminal con el motivo operativo correspondiente y se publican los informes
+ * parciales. El ledger, findings y artefactos previos no se tocan: una
+ * reanudación posterior los conserva y crea sesiones nuevas. Los servicios no
+ * se reinician desde aquí.
+ */
+function reconcileSecurityAuditRunsAfterRecovery(): void {
+  const db = getFactoryDatabase();
+  for (const run of listSecurityAuditRuns(db)) {
+    if (run.runStatus !== "in_progress") continue;
+    let executionIds: string[] = [];
+    try {
+      executionIds = listSecurityAuditExecutionRunIds(run.runId);
+    } catch {
+      continue;
+    }
+    const statuses = executionIds
+      .map((id) => getExecutionRunStatus(id))
+      .filter((status): status is ExecutionStatus => status !== null);
+    if (statuses.length === 0) continue;
+    const cancelled = statuses.includes("cancelled");
+    const interrupted = statuses.some((status) => status === "failed" || status === "interrupted");
+    if (!cancelled && !interrupted) continue;
+    try {
+      finalizeSecurityAuditInterrupted(db, run.runId, {
+        reason: cancelled ? "cancelled_by_user" : "execution_interrupted",
+        error: cancelled
+          ? "La ejecución asociada fue cancelada por el usuario."
+          : "La ejecución asociada terminó fallida o interrumpida.",
+        log: (entry) => {
+          try {
+            addLog(run.runId, "SECURITY-AUDIT", "warning", entry);
+          } catch {
+            /* el log de reconciliación nunca rompe el arranque */
+          }
+        }
+      });
+    } catch {
+      // La reconciliación jamás rompe la recuperación del servicio.
+    }
+  }
 }
 
 export async function cancelExecution(runId: string): Promise<void> {
@@ -1798,6 +2346,9 @@ export async function respondExecutionDecision(
     throw new Error("Las solicitudes de aclaración requieren una respuesta escrita; no admiten permisos persistentes.");
   }
 
+  if (decision.kind === "permission" && state.securityAuditRunId && response.action !== "deny") {
+    throw new Error("La auditoría source-only no permite ampliar permisos; rechaza la solicitud.");
+  }
   const openCodeRuntime = decision.engine === "opencode" ? state.openCode : undefined;
   if (decision.engine === "opencode" && (!openCodeRuntime || !decision.engineSessionId || !decision.engineRequestId)) {
     throw new Error("No se encontró la sesión OpenCode asociada a esta solicitud.");

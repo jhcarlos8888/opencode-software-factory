@@ -1,6 +1,6 @@
 {
   "$schema": "https://opencode.ai/config.json",
-  "model": "opencode-go/mimo-v2.6-flash",
+  "model": "opencode-go/kimi-k3.1-pro",
   "default_agent": "build",
   "compaction": {
     "auto": true,
@@ -185,10 +185,11 @@
         "type": "local",
         "command": [
           "node",
-          "{env:FACTORY_FILESYSTEM_MCP_ENTRYPOINT}"
+          "-e",
+          "const p=require(\"node:path\"),u=require(\"node:url\");const e=p.resolve(process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT||\".opencode/mcp/factory-filesystem.mjs\");process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT=e;import(u.pathToFileURL(e).href).catch(function(err){console.error(\"[factory-filesystem] \"+String(err&&err.message?err.message:err));process.exit(1);});"
         ],
         "enabled": true,
-        "codemode": false,
+        "codemode": true,
         "timeout": {
           "startup": 10000,
           "execution": 30000

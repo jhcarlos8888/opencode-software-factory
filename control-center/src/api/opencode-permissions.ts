@@ -15,7 +15,7 @@ export interface OpenCodePermissionRule {
  * V2 authorizes Glob by pattern and Grep by regex rather than by search path.
  */
 export function buildOpenCodePermissionRules(
-  profile: OpenCodePermissionProfile
+  profile: OpenCodePermissionProfile, sourceOnly = false
 ): OpenCodePermissionRule[] {
   const rules: OpenCodePermissionRule[] = [
     { action: "*", resource: "*", effect: "ask" },
@@ -50,5 +50,15 @@ export function buildOpenCodePermissionRules(
     }
   }
 
+  if (sourceOnly) {
+    // The audit has no authority for arbitrary tools, external MCP resources,
+    // web calls, process execution or mutation. The factory MCP itself checks paths.
+    return [
+      { action: "*", resource: "*", effect: "deny" },
+      { action: "skill", resource: "*", effect: "allow" },
+      ...["list_files", "read_file", "search_text", "summarize_junit"].map(
+        name => ({ action: "factory_filesystem_" + name, resource: "*", effect: "allow" as const })),
+    ];
+  }
   return rules;
 }

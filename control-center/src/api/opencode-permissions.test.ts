@@ -50,3 +50,16 @@ test("approval-required profile asks before edits and shell commands", () => {
   assert.equal(finalRule("approval-required", "shell"), "ask");
   assert.equal(finalRule("approval-required", "subagent"), "ask");
 });
+
+test("source-only audit uses a closed allowlist instead of asking about external MCP resources", () => {
+  const rules = buildOpenCodePermissionRules("read-only", true);
+  assert.equal(rules[0]?.effect, "deny");
+  const allowed = rules.filter(r => r.effect === "allow").map(r => r.action);
+  assert.deepEqual(allowed, ["skill", "factory_filesystem_list_files", "factory_filesystem_read_file",
+    "factory_filesystem_search_text", "factory_filesystem_summarize_junit"]);
+  assert.equal(rules.some(r => r.effect === "ask"), false);
+  for (const action of ["shell", "write", "subagent", "opencode_list_mcp_resources",
+    "opencode_read_mcp_resource", "webfetch", "rea_query", "playwright_browser_click", "execute"]) {
+    assert.equal(allowed.includes(action), false, action);
+  }
+});
