@@ -115,6 +115,21 @@ OpenCode como de Claude Code y registra sus decisiones en los eventos
   acciones de navegador local (navegar a inicio/salud, redimensionar,
   consola, capturas confinadas). Cada permiso se concede **una sola vez**,
   con el perfil `workspace-write` y durante la ronda activa.
+- **Tester automático:** excepción limitada al perfil efectivo approval-required
+  en una ronda tradicional con petición explícita de ejecutar pruebas. Se
+  permite una vez npm test, node --test o node --test --experimental-test-coverage,
+  con directorio de trabajo canónico, package.json regular cuyo script test es
+  exactamente node --test, sin pre/post hooks, workspaces ni .npmrc local.
+  OpenCode exige coincidencia íntegra con la llamada nativa; Claude exige el
+  contexto Bash vinculado. El modo manual y source-only no reciben esta
+  capacidad. Se ejecuta código del proyecto: solo workspaces confiables.
+  Otros comandos, archivos, argumentos y permisos siguen sujetos a revisión.
+- **Rechazo y recuperación:** si OpenCode aborta un turno después de una
+  autorización rechazada, la fase permanece fallida, conserva la decisión y
+  no emite handoff sintético. La interfaz ofrece preparar una continuación
+  acotada en el hilo existente; el usuario revisa y envía esa nueva
+  instrucción explícitamente. No hay repetición automática ni ampliación
+  del permiso rechazado.
 - **Gradle:** desde la raíz canónica del proyecto, wrapper regular sin symlink,
   tareas test/build/check o tests de módulos, con flags explícitos
   (--console=plain, --rerun-tasks, --offline, --no-daemon) y formato
@@ -314,7 +329,7 @@ OpenCode verifica el comando nativo de estas consultas. Claude vincula el
 directorio de trabajo comunicado por PreToolUse al identificador del uso de
 Bash y valida todos los segmentos de una cadena, incluidos separadores fijos,
 timeout acotado de ls-remote, redirección 2>&1 y head acotado.
-No se amplían perfiles read-only o approval-required ni se conceden comodines.
+No se amplían perfiles read-only ni se conceden comodines. El perfil approval-required conserva la revisión humana de Git y de todas las operaciones que no cumplan la excepción de pruebas locales del Tester automático.
 Gradle admite tail acotado; sin PIPESTATUS[0] se registra que el exit del
 filtro no prueba el resultado de Gradle. Se deben contrastar salida e informes
 JUnit. No se autorizan scripts arbitrarios, cambios de remoto o publicaciones

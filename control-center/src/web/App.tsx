@@ -802,7 +802,9 @@ export default function App() {
       setDecisionAnswers((current) => ({ ...current, [decisionId]: "" }));
       setNotice(action === "allow-run"
         ? "Aprobación temporal guardada. Se aplicará solo durante esta ejecución y se eliminará al finalizar."
-        : "Respuesta enviada al agente. La ejecución continuará según la decisión.");
+        : action === "deny"
+          ? "Operación rechazada y registrada. No se reenviará automáticamente el turno. OpenCode puede interrumpirlo; si ocurre, continúa el hilo con una instrucción acotada."
+          : "Respuesta enviada al agente. La ejecución continuará según la decisión.");
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause));
       // Refresh the run even on a 404/409: the engine may already have consumed
@@ -858,6 +860,11 @@ export default function App() {
   const claude = engines.find((item) => item.id === "claude");
   const configuredCount = Object.values(assignments).filter((item) => item?.enabled).length;
   const activeExecution = Boolean(execution && ["queued", "running", "waiting"].includes(execution.run.status));
+  const recoverableDeniedRoles = execution && execution.run.status === "failed" && !execution.run.configurationSnapshot?.securityAudit
+    ? execution.agents.filter(agent => agent.status === "failed" && agent.engine === "opencode" &&
+      execution.decisionHistory.some(decision => decision.agentRunId === agent.id && decision.kind === "permission" &&
+        decision.engineSessionId === agent.sessionId && decision.status === "rejected"))
+    : [];
   const canStartExecution = Boolean(
     apiReady && analysis && ["accepted", "manual"].includes(recommendationStatus ?? "") &&
     teamSaved && projectPath.trim() && configuredCount > 0 &&
@@ -1758,6 +1765,19 @@ export default function App() {
                   {workThread && execution.run.threadId === workThread.thread.id && (
                     <form className="conversation-composer" onSubmit={(event) => void submitWorkInstruction(event)}>
                       <label htmlFor="continuation-instructions">¿Qué hacemos a continuación?</label>
+                      {recoverableDeniedRoles.length > 0 && (
+                        <div className="notice">
+                          <strong>Continuación segura disponible</strong>
+                          <span>Una operación rechazada coincidió con una fase fallida. El historial se conserva; no se reintentará automáticamente ni se ampliarán permisos.</span>
+                          <button type="button" className="secondary-button"
+                            disabled={Boolean(continuationText.trim()) || activeExecution || continuationBusy}
+                            onClick={() => setContinuationText(
+                              "Revisa las evidencias y handoffs válidos de la ronda anterior. Completa únicamente el informe pendiente de " +
+                              recoverableDeniedRoles.map(agent => roleNames[agent.agentId] ?? agent.agentId).join(", ") +
+                              " con los datos ya disponibles dentro del proyecto. No repitas las operaciones rechazadas, no amplíes permisos y no modifiques código. Si falta evidencia, explica la limitación sin inventar resultados."
+                            )}>Preparar continuación acotada</button>
+                        </div>
+                      )}
                       <textarea
                         id="continuation-instructions"
                         value={continuationText}

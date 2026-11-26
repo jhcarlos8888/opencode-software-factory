@@ -51,7 +51,11 @@ export function planTask(
   // clauses out of the positive-action match, without suppressing later work:
   // "no cambies el Word, aumenta la letra en la web" is an implementation.
   const negativeActions = /\b(?:sin|no|nunca|evita|evitar|evites|prohibido|abstente de|no quiero(?: que)?|no necesito(?: que)?|no debes|no debe|no se debe)\s+(?:(?:que|hacer|realizar|se|los|las|el|la)\s+){0,3}(?:aument\w*|agrand\w*|increment\w*|ampli\w*|reduc\w*|disminu\w*|achic\w*|cambi\w*|ajust\w*|modific\w*|implement\w*|crea\w*|agreg\w*|corrig\w*|correg\w*|escrib\w*|arranc\w*|levant\w*|despleg\w*|realizar cambios|hacer cambios|commit|push)\b/g;
-  const actionableText = text.replace(negativeActions, "");
+  // Coordinated prohibitions must not turn "no realices commit, push ni
+  // despliegue" into a positive push/deploy request. Stop at the list end,
+  // preserving independent positive clauses ("no hagas commit, aumenta...").
+  const negativeOperationLists = /\b(?:no|sin|nunca|evita|prohibido)\s+(?:(?:que|hacer|hagas?|realizar|realices?|ejecutar|ejecutes?|el|un|git)\s+){0,5}(?:commit|commitear|push|despliegue|desplegar|despliegues?|deploy)(?:(?:\s*,\s*|\s+(?:ni|y|e|o)\s+)(?:git\s+)?(?:commit|commitear|push|despliegue|desplegar|despliegues?|deploy)\b)*/g;
+  const actionableText = text.replace(negativeOperationLists, "").replace(negativeActions, "");
   // Questions about *how* to change something ask for an explanation, not
   // for permission to change the repository. A subsequent explicit order
   // ("y hazlo") must still trigger implementation.
@@ -103,6 +107,11 @@ export function planTask(
       : "La instruccion solicita cambios en el codigo.");
   } else if (asksForTests) {
     kind = "testing"; agents = ["tester", "build"]; depth = "focused"; complexity = "medium";
+    if (broadScope && (asksArchitectureReview || /\barquitectura\b/.test(text))) {
+      agents = ["architect", "build", "tester", "reviewer", "cloud-arbiter"];
+      depth = "deep"; complexity = "high";
+      reasons.push("La validacion integral necesita revision arquitectonica y arbitraje, sin cambios de codigo.");
+    }
     reasons.push("La instruccion solicita validacion o pruebas.");
   } else if (asksForDiagnosis) {
     kind = "diagnosis"; agents = ["architect", "reviewer"];
@@ -242,7 +251,7 @@ export function resolveAgentPermissionProfile(
   if (agentId === "tester" && (taskPlan.kind === "testing" || taskPlan.changesExpected)) {
     return {
       permissionProfile: "approval-required",
-      reason: "Tester conserva aprobación humana para ejecutar comandos y operaciones protegidas."
+      reason: "Tester conserva aprobación humana, salvo verificaciones locales concretas autorizadas y comprobadas por el Auditor en modo automático."
     };
   }
 

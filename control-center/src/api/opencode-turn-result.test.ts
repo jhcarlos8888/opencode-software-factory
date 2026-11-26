@@ -36,3 +36,15 @@ test("empty turn and explicit rejection still fail", () => {
   assert.throws(() => validateOpenCodeTurnResult("", { data: [] }), /sin producir una respuesta/);
   assert.throws(() => validateOpenCodeTurnResult("AI.Error.Authentication", { data: [finalMessage] }), /rechazó la solicitud/);
 });
+
+test("native terminal denial plus persisted rejection is explained without replay or success", () => {
+  const terminal = {info:{role:"assistant",finish:"error",error:{type:"aborted",message:"Step interrupted"}},parts:[
+    {type:"tool",state:{status:"error",error:{type:"aborted",message:"The user declined this tool call"}}}
+  ]};
+  assert.throws(() => validateOpenCodeTurnResult("",{data:[terminal]},{rejectedPermission:true}), /rechazarse una operación.*no se repetirá automáticamente/);
+  assert.throws(() => validateOpenCodeTurnResult("",{data:[terminal]},{rejectedPermission:false}), /error de proveedor/);
+  assert.throws(() => validateOpenCodeTurnResult(handoff,{data:[finalMessage,terminal]},{rejectedPermission:true}), /ni se publicará un handoff incompleto/);
+  assert.doesNotThrow(() => validateOpenCodeTurnResult(handoff,{data:[terminal,finalMessage]},{rejectedPermission:true}));
+  assert.throws(() => validateOpenCodeTurnResult("",{data:[]},{rejectedPermission:true}), /después de una operación rechazada/);
+  assert.throws(() => validateOpenCodeTurnResult("",{data:[{info:{role:"assistant",finish:"error",error:{type:"rate_limit",message:"429"}}}]},{rejectedPermission:true}), /error de proveedor/);
+});

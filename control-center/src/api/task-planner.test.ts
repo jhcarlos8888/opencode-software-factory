@@ -226,3 +226,15 @@ test("follow-up desired API response contract is implementation rather than diag
     assert.notEqual(planTask(request).kind, "implementation", request);
   }
 });
+
+test("phase G instruction forbidding commit, push and deploy does not grant write authority", () => {
+  const instructions = "Analiza integralmente este proyecto de demostración. Identifica su arquitectura, reglas de negocio, controles de autorización y carencias de pruebas. Coordina a los especialistas necesarios para producir un diagnóstico técnico sustentado en evidencia. Ejecuta las pruebas existentes cuando el perfil lo permita. El revisor debe contrastar los resultados y el árbitro técnico debe consolidar las conclusiones. No modifiques el código fuente todavía, no accedas a otros proyectos y no realices commit, push ni despliegue.";
+  const plan = planTask(instructions);
+  assert.equal(plan.kind,"testing");
+  assert.equal(plan.changesExpected,false);
+  assert.equal(plan.recommendedAgents.includes("implementer"),false);
+  for (const agent of ["architect","build","tester","reviewer","cloud-arbiter"]) assert(plan.recommendedAgents.includes(agent),agent);
+  assert.equal(resolveAgentPermissionProfile("implementer",plan,"automatic","workspace-write").permissionProfile,"read-only");
+  assert.equal(planTask("No hagas commit ni push, aumenta la letra en la web.").changesExpected,true);
+  assert.equal(planTask("No realices commit, push ni despliegue.").changesExpected,false);
+});

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assessAuditorTool, assessOpenCodePermission, isBoundedTestOutputPipeline, isProtectedShellCommand } from "./auditor-policy.js";
+import { assessAuditorTool, assessOpenCodePermission, hasExplicitTesterExecutionRequest, isBoundedTestOutputPipeline, isProtectedShellCommand } from "./auditor-policy.js";
 
 const projectPath = "/home/user/projects/aula";
 function claude(toolName: string, input: Record<string, unknown>, permissionProfile: "read-only" | "workspace-write" | "approval-required" = "workspace-write") {
@@ -330,4 +330,44 @@ test("native ordinary npm test is automatically approved only for a verified pro
     writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test",pretest:"echo unexpected"}}));
     assert.notEqual(assessOpenCodePermission(req,root,"workspace-write",authority,native).verdict,"auto");
   } finally { rmSync(root,{recursive:true,force:true}); }
+});
+
+test("automatic Tester runs exact local node tests with native evidence but does not gain workspace-write", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "tester-capability-")));
+  try {
+    writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test"}}));
+    const authority = {instructions:"Ejecuta las pruebas existentes.",agentId:"tester",requireNativeShellEvidence:true,automaticTesterVerification:true};
+    const check = (command:string, overrides:Record<string,unknown>={}, resources=[command], auth=authority) =>
+      assessOpenCodePermission({action:"shell",resources,metadata:{input:{command}}},root,"approval-required",auth,{command,workdir:root,...overrides});
+    for (const command of ["npm test","node --test","node --test --experimental-test-coverage","npm test 2>&1"]) {
+      assert.equal(check(command).verdict,"auto",command);
+    }
+    for (const command of ["npm install","npm run verify","node --test /tmp/foreign.test.js","node -e 'process.exit(0)'","npm test; ls /tmp/opencode","npm test && git push","git status","npm test > result.txt"]) {
+      assert.notEqual(check(command).verdict,"auto",command);
+    }
+    assert.notEqual(check("npm test",{workdir:"/tmp"}).verdict,"auto");
+    assert.notEqual(check("npm test",{cwd:"/tmp"}).verdict,"auto");
+    assert.notEqual(check("npm test",{env:{NODE_OPTIONS:"--require=/tmp/x"}}).verdict,"auto");
+    assert.notEqual(check("npm test",{},["*"]).verdict,"auto");
+    assert.notEqual(check("npm test",{},["npm test"],{...authority,automaticTesterVerification:false}).verdict,"auto");
+    assert.notEqual(check("npm test",{},["npm test"],{...authority,agentId:"implementer"}).verdict,"auto");
+    assert.notEqual(assessOpenCodePermission({action:"shell",resources:["npm test"]},root,"approval-required",authority,null).verdict,"auto");
+    assert.equal(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command:"npm test",workdir:root},projectPath:root,permissionProfile:"approval-required",automaticTesterVerification:true}).verdict,"auto");
+    assert.notEqual(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command:"npm test"},projectPath:root,permissionProfile:"approval-required",automaticTesterVerification:true}).verdict,"auto");
+    writeFileSync(join(root,".npmrc"),"script-shell=/bin/sh");
+    assert.notEqual(check("npm test").verdict,"auto");
+    rmSync(join(root,".npmrc"));
+    writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node --test",pretest:"echo unexpected"}}));
+    assert.notEqual(check("npm test").verdict,"auto");
+    writeFileSync(join(root,"package.json"),JSON.stringify({scripts:{test:"node custom.js"}}));
+    assert.notEqual(check("npm test").verdict,"auto");
+  } finally { rmSync(root,{recursive:true,force:true}); }
+});
+
+test("automatic tester authority requires an explicit positive request, not a question or negation", () => {
+  assert.equal(hasExplicitTesterExecutionRequest("Ejecuta las pruebas existentes. No modifiques el código."),true);
+  assert.equal(hasExplicitTesterExecutionRequest("Analiza el proyecto. Ejecuta las pruebas existentes cuando el perfil lo permita."),true);
+  for (const text of ["¿Cómo ejecutar las pruebas?", "No ejecutes las pruebas.", "No quiero que ejecutes pruebas.", "Ejecuta las pruebas. No debes ejecutar pruebas.", "Ejemplo: ejecuta las pruebas.", "Explica cómo ejecutar pruebas.", "Simula ejecutar las pruebas."]) {
+    assert.equal(hasExplicitTesterExecutionRequest(text),false,text);
+  }
 });

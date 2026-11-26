@@ -6,7 +6,7 @@
  * Unknown operations and user questions must reach the human queue.
  */
 import { isAbsolute, relative, resolve } from "node:path";
-import { lstatSync, realpathSync } from "node:fs";
+import { lstatSync, realpathSync, readFileSync } from "node:fs";
 import { assessCapabilityCommand, assessScopedTestCommand, nativeSegmentResources } from "./auditor-capabilities.js";
 import { assessDiagnosticCommand, assessIndependentDiagnostic, matchDiagnosticResources } from "./diagnostic-policy.js";
 import { assessAuthorizedGitWorkflow, isGitWorkflowInspection, isContextualGitInspection, nativeGitCommandMatches, type GitRoundAuthority } from "./git-workflow-policy.js";
@@ -25,6 +25,7 @@ export interface AuditorToolRequest {
   projectPath: string;
   roundInstructions?: string;
   capabilityScope?: string;
+  automaticTesterVerification?: boolean;
   permissionProfile: "read-only" | "workspace-write" | "approval-required";
 }
 
@@ -235,6 +236,38 @@ function checkBrowserAction(name: string, input: Record<string, unknown>, projec
 }
 
 /**
+ * A narrowly scoped exception to approval-required, only when the runtime
+ * establishes that an enabled automatic Tester was asked to execute tests.
+ * Tests run trusted project code: this is NOT an OS sandbox. No arbitrary
+ * package scripts, lifecycle hooks, external test roots or shell programs.
+ */
+export function hasExplicitTesterExecutionRequest(instructions: string): boolean {
+  const text = instructions.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase();
+  // Questions, quoted examples, conditionals and negated execution are not
+  // authority. A standalone positive imperative is required.
+  if (/[?¿]/.test(text) || /\b(?:ejemplo|simula|simular|hipotetic|no ejec|sin ejec|no quiero que|no debes?|nunca|evita)\b/.test(text)) return false;
+  if (/(?:^|[.!;\n])[^.!;\n]{0,150}\b(?:no|sin|prohibido|abstente|evita)\b[^.!;\n]{0,100}\b(?:ejecut\w*|corr\w*|lanz\w*|realiz\w*|hag\w*|hac\w*)\b[^.!;\n]{0,40}\b(?:pruebas?|tests?)\b/.test(text)) return false;
+  return /(?:^|[.!;\n])\s*(?:por favor[, ]+)?(?:ejecuta|ejecute|corre|corra|realiza|realice|lanza|lance|haz|haga)\s+(?:(?:las|los|todas|todos|nuestras|nuestros)\s+){0,3}(?:pruebas?|tests?)\b/.test(text);
+}
+
+function assessAutomaticTesterVerification(command: string, input: Record<string, unknown>, root: string): AuditorAssessment | null {
+  if (input.workdir !== root || (input.cwd !== undefined && input.cwd !== root) ||
+      input.env !== undefined || input.environment !== undefined || requestsSandboxBypass(input)) return null;
+  if (!/^(?:npm test|node --test(?: --experimental-test-coverage)?)(?: 2>&1)?$/.test(command)) return null;
+  if (!assessScopedTestCommand("npm test", root, root, "")) return null;
+  try {
+    const manifest = resolve(root, "package.json");
+    const info = lstatSync(manifest);
+    if (!info.isFile() || info.isSymbolicLink() || realpathSync(manifest) !== manifest || info.size > 256 * 1024) return null;
+    const pkg = JSON.parse(readFileSync(manifest, "utf8"));
+    if (pkg.scripts?.test !== "node --test" || pkg.scripts?.pretest || pkg.scripts?.posttest || pkg.workspaces) return null;
+    try { lstatSync(resolve(root, ".npmrc")); return null; }
+    catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") return null; }
+  } catch { return null; }
+  return { verdict: "auto", category: "test", reason: "Prueba local del Tester automático: comando nativo exacto, raíz canónica y script node --test comprobados. Solo esta operación." };
+}
+
+/**
  * Called for every permission request, using the engine's *actual* tool input.
  * Do not treat provider-suggested wildcard resources/save globs as authorization.
  */
@@ -252,6 +285,10 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
   if (requestsSandboxBypass(input)) {
     return { verdict: "block", category: "high-risk",
       reason: "La solicitud intenta desactivar el sandbox. Repite la operación sin dangerouslyDisableSandbox; el Auditor no autoriza esta excepción." };
+  }
+  if (request.permissionProfile === "approval-required" && request.automaticTesterVerification && shell !== null) {
+    const verified = assessAutomaticTesterVerification(shell, input, request.projectPath);
+    if (verified) return verified;
   }
   if (request.permissionProfile !== "workspace-write") {
     return { verdict: "human", category: "unknown",
@@ -295,6 +332,18 @@ export function assessOpenCodePermission(
   const input = object(metadata.input);
   if (requestsSandboxBypass(input) || requestsSandboxBypass(metadata) || requestsSandboxBypass(request) || requestsSandboxBypass(nativeInput)) {
     return { verdict: "block", category: "high-risk", reason: "No se autoriza desactivar el sandbox." };
+  }
+  if (tool === "shell" && permissionProfile === "approval-required" &&
+      authority?.agentId === "tester" && authority.automaticTesterVerification === true &&
+      authority.requireNativeShellEvidence === true && nativeInput && typeof nativeInput.command === "string" &&
+      !isProtectedShellCommand(nativeInput.command) &&
+      (typeof input.command !== "string" || input.command === nativeInput.command)) {
+    const resources = Array.isArray(request.resources) && request.resources.every((r): r is string => typeof r === "string") ? request.resources : [];
+    const expected = nativeSegmentResources(nativeInput.command);
+    if (expected && matchDiagnosticResources(resources, expected)) {
+      const verified = assessAutomaticTesterVerification(nativeInput.command, nativeInput, projectPath);
+      if (verified) return verified;
+    }
   }
   if (tool === "shell" && permissionProfile === "workspace-write" &&
       Array.isArray(request.resources) && request.resources.every((r): r is string => typeof r === "string") &&
