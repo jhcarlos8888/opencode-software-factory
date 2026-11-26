@@ -62,7 +62,13 @@ export interface SecurityAuditReportInput {
   scopePaths?: readonly string[];
   domains?: readonly string[];
   runStatus: "complete" | "incomplete";
+  /** Motivo oficial principal del cierre incomplete (compatibilidad). */
   incompleteReason?: string | null;
+  /**
+   * Paquete 6: TODOS los motivos oficiales del cierre (opcional,
+   * retrocompatible). El primario sigue siendo `incompleteReason`.
+   */
+  incompleteReasons?: readonly string[];
   sourceRef?: string | null;
   sourceDirty?: boolean;
   executionPolicy: string;
@@ -183,10 +189,22 @@ export function buildSecurityAuditReports(
 
   const reportLines: string[] = [];
   reportLines.push(`# Informe de auditoría de seguridad — ${input.runId}`, "");
+  // Paquete 6: motivo primario primero; el resto de motivos oficiales se
+  // listan además (nunca se pierde un motivo registrado ni se sustituye uno
+  // por otro: el primario queda explícito como "motivo oficial principal").
+  const allReasons = [...new Set([
+    ...(input.incompleteReason ? [input.incompleteReason] : []),
+    ...(input.incompleteReasons ?? []),
+  ])].filter((reason): reason is string => typeof reason === "string" && reason.length > 0);
+  const primaryReason = input.incompleteReason ?? allReasons[0] ?? null;
+  const additionalReasons = allReasons.filter((reason) => reason !== primaryReason);
   if (input.runStatus === "incomplete") {
     reportLines.push(
       "> **ESTADO: INCOMPLETO**" +
-        (input.incompleteReason ? ` — motivo oficial \`${input.incompleteReason}\`` : "") +
+        (primaryReason ? ` — motivo oficial principal \`${primaryReason}\`` : "") +
+        (additionalReasons.length > 0
+          ? `; motivos oficiales adicionales: ${additionalReasons.map((reason) => `\`${reason}\``).join(", ")}`
+          : "") +
         ". Esta pasada NO cubre el alcance completo.",
       "",
     );
@@ -244,8 +262,14 @@ export function buildSecurityAuditReports(
       ...pending.map((fingerprint) => `- \`${fingerprint}\``),
       "",
     );
-    if (input.incompleteReason) {
-      reportLines.push(`Motivo oficial: \`${input.incompleteReason}\`.`, "");
+    if (primaryReason) {
+      reportLines.push(
+        `Motivo oficial principal: \`${primaryReason}\`.` +
+          (additionalReasons.length > 0
+            ? ` Motivos oficiales adicionales: ${additionalReasons.map((reason) => `\`${reason}\``).join(", ")}.`
+            : ""),
+        "",
+      );
     }
   }
 

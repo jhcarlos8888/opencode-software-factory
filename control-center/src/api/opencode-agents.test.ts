@@ -96,7 +96,7 @@ test("audit runtime disables extra MCP servers without altering the provider con
   }}};
   const output = sourceOnlyOpenCodeConfig(original, "/test/project with spaces") as typeof original;
   assert.equal(output.model, original.model);
-  assert.equal(output.mcp.servers.factory_filesystem.codemode, true);
+  assert.equal(output.mcp.servers.factory_filesystem.codemode, false);
   assert.deepEqual(Object.keys(output.mcp.servers), ["factory_filesystem"]);
   assert.equal((output.mcp.servers.factory_filesystem as unknown as {command:string[]}).command.at(-1), "/test/project with spaces");
   assert.equal(original.mcp.servers.context7.enabled, true);
@@ -109,4 +109,33 @@ test("audit runtime disables extra MCP servers without altering the provider con
     {name:"unknown",status:{status:"connected"}}
   ]}),["unknown"]);
   assert.throws(() => sourceOnlyOpenCodeConfig({}, "/test"), /MCP interno/);
+});
+
+test("source-only runtime forces codemode:false without mutating the provider configuration", async () => {
+  const { sourceOnlyOpenCodeConfig } = await import("./opencode-agents.js");
+  const original = { model: "opencode-go/glm", mcp: { servers: {
+    factory_filesystem: {
+      type: "local", enabled: true, codemode: true, timeout: 5000,
+      environment: { FACTORY_FILESYSTEM_MCP_ENTRYPOINT: "/tmp/mcp/entrypoint.js" }
+    },
+    playwright: { type: "local", enabled: true }
+  }}};
+  const output = sourceOnlyOpenCodeConfig(original, "/test/project with spaces") as typeof original;
+  assert.deepEqual(Object.keys(output.mcp.servers), ["factory_filesystem"]);
+  assert.equal(output.mcp.servers.factory_filesystem.codemode, false);
+  assert.equal(original.mcp.servers.factory_filesystem.codemode, true);
+  assert.deepEqual(Object.keys(original.mcp.servers), ["factory_filesystem", "playwright"]);
+  const command = (output.mcp.servers.factory_filesystem as unknown as {command:string[]}).command;
+  assert.equal(command.length, 4);
+  assert.equal(command[0], "node");
+  assert.equal(command[1], "-e");
+  assert.match(command[2] ?? "", /FACTORY_FILESYSTEM_MCP_ENTRYPOINT/);
+  assert.equal(command.at(-1), "/test/project with spaces");
+  assert.equal(output.mcp.servers.factory_filesystem.type, "local");
+  assert.equal(output.mcp.servers.factory_filesystem.enabled, true);
+  assert.equal(output.mcp.servers.factory_filesystem.timeout, 5000);
+  assert.deepEqual(
+    output.mcp.servers.factory_filesystem.environment,
+    { FACTORY_FILESYSTEM_MCP_ENTRYPOINT: "/tmp/mcp/entrypoint.js" }
+  );
 });

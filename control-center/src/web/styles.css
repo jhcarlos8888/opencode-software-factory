@@ -2592,6 +2592,15 @@ textarea::placeholder { color: #777f8b; }
 .security-ops-phase.state-complete .security-ops-phase-state { color: #7fe0b6; }
 .security-ops-phase.state-in_progress { border-color: #b78a3c; }
 .security-ops-phase.state-in_progress .security-ops-phase-state { color: #ffd9a8; }
+/* Paquete 6: estados reales por fase, con colores distintos de "Completada". */
+.security-ops-phase.state-partial { border-color: #b06a2a; }
+.security-ops-phase.state-partial .security-ops-phase-state { color: #ffc78a; }
+.security-ops-phase.state-blocked { border-color: #a04340; }
+.security-ops-phase.state-blocked .security-ops-phase-state { color: #ff9d96; }
+.security-ops-phase.state-not_applicable { border-color: #3a4656; }
+.security-ops-phase.state-not_applicable .security-ops-phase-state { color: #7d8ea6; }
+.security-ops-phase.state-pending .security-ops-phase-state { color: #6d7f95; }
+.security-ops-phase-reason { font-size: 10.5px; color: #93a3b8; overflow-wrap: anywhere; }
 .security-ops-progress { color: #9fb6d4; font-size: 13px; margin-top: 10px; }
 .security-ops-columns { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px; margin-top: 8px; }
 .security-ops ul { margin: 4px 0 0 16px; padding: 0; font-size: 12.5px; color: #c9d6e6; }

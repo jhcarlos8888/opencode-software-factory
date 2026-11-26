@@ -11,14 +11,18 @@ import {
   formatSecurityAuditTime,
   securityAuditIncompleteReasonLabel,
   securityAuditOutcomeLabel,
+  securityAuditPhaseBreakdown,
   securityAuditPhaseLabel,
   securityAuditProgress,
+  securityAuditProgressSummary,
   securityAuditReportUrl,
   securityAuditRunStatusLabel,
   securityAuditScopeRequiresPaths,
   securityAuditScopeRequiresRefs,
   securityAuditSeverityLabel,
   shouldPollSecurityAudit,
+  securityAuditStatusIncompleteReasons,
+  splitSecurityAuditIncompleteReasons,
 } from "../web/security-operations.js";
 
 test("UI domain list matches the official companion domains", () => {
@@ -45,6 +49,10 @@ test("phase and status labels are Spanish and cover the official states", () => 
   assert.equal(securityAuditPhaseLabel("in_progress"), "En curso");
   assert.equal(securityAuditPhaseLabel("complete"), "Completada");
   assert.equal(securityAuditPhaseLabel("skipped"), "Omitida");
+  // Paquete 6: una fase parcial o bloqueada nunca se rotula "Completada".
+  assert.equal(securityAuditPhaseLabel("partial"), "Parcial");
+  assert.equal(securityAuditPhaseLabel("blocked"), "Bloqueada");
+  assert.equal(securityAuditPhaseLabel("not_applicable"), "No aplicable");
   assert.equal(securityAuditRunStatusLabel("in_progress"), "En curso");
   assert.equal(securityAuditRunStatusLabel("incomplete"), "Incompleta");
   assert.equal(securityAuditOutcomeLabel("failed"), "Fallida");
@@ -64,6 +72,117 @@ test("progress counts completed phases out of six", () => {
   );
   assert.equal(securityAuditProgress([]).percent, 0);
   assert.equal(securityAuditProgress(["complete", "complete", "complete", "complete", "complete", "complete"]).percent, 100);
+});
+
+test("Paquete 6: phase breakdown counts every real state and reasons split primary/additional", () => {
+  const breakdown = securityAuditPhaseBreakdown([
+    { state: "completed" },
+    { state: "partial" },
+    { state: "blocked" },
+    { state: "not_applicable" },
+    { state: "pending" },
+    { state: "pending" },
+  ]);
+  assert.deepEqual(breakdown, {
+    completed: 1, partial: 1, blocked: 1, notApplicable: 1, pending: 2,
+  });
+  // Sin desglose de la API el componente degrada a ceros (no inventa estados).
+  assert.deepEqual(securityAuditPhaseBreakdown([]), {
+    completed: 0, partial: 0, blocked: 0, notApplicable: 0, pending: 0,
+  });
+
+  const split = splitSecurityAuditIncompleteReasons("validation_budget_exhausted", [
+    "validation_budget_exhausted",
+    "orchestrator_failed",
+  ]);
+  assert.equal(split.primary, "validation_budget_exhausted");
+  assert.deepEqual(split.additional, ["orchestrator_failed"]);
+
+  // API antigua (sin lista): el primario sigue y no hay adicionales.
+  const legacy = splitSecurityAuditIncompleteReasons("deadline_exceeded", undefined);
+  assert.equal(legacy.primary, "deadline_exceeded");
+  assert.deepEqual(legacy.additional, []);
+  // Sin primario explícito: se toma el primero de la lista.
+  const fallback = splitSecurityAuditIncompleteReasons(null, ["a", "b"]);
+  assert.equal(fallback.primary, "a");
+  assert.deepEqual(fallback.additional, ["b"]);
+});
+
+test("Paquete 6: 100% solo en runs complete y mapeo real de etiquetas por fase", () => {
+  // Run completo: comportamiento previo intacto.
+  assert.equal(
+    securityAuditProgressSummary(
+      "complete",
+      ["complete", "complete", "complete", "complete", "complete", "complete"],
+    ),
+    "Progreso 6/6 fases (100%)",
+  );
+  // Run INCOMPLETO que recorrió 6/6 con solo 3 fases realmente completadas:
+  // sin "Progreso" ni "100%"; recorridas ≠ completadas.
+  const line = securityAuditProgressSummary(
+    "incomplete",
+    ["complete", "complete", "complete", "complete", "complete", "complete"],
+    3,
+  );
+  assert.equal(line, "Fases recorridas: 6/6 · Completadas: 3/6");
+  assert.equal(line.includes("100%"), false, "un run no complete jamás muestra 100%");
+  assert.equal(line.includes("Progreso"), false);
+  // Con fases pendientes el recorrido refleja lo abierto (checkpoint).
+  assert.equal(
+    securityAuditProgressSummary(
+      "in_progress",
+      ["complete", "in_progress", "pending", "pending", "pending", "pending"],
+      1,
+    ),
+    "Fases recorridas: 2/6 · Completadas: 1/6",
+  );
+  // Sin desglose (API antigua): el checkpoint es el único dato disponible.
+  assert.equal(
+    securityAuditProgressSummary(
+      "incomplete",
+      ["complete", "complete", "pending", "pending", "pending", "pending"],
+    ),
+    "Fases recorridas: 2/6 · Completadas: 2/6",
+  );
+  // Mapeo estado de fase → etiqueta real que usan las tarjetas: el desglose
+  // usa "completed" (distinto del checkpoint "complete") y ambas son
+  // "Completada"; parcial/bloqueada jamás dicen "Completada".
+  assert.equal(securityAuditPhaseLabel("completed"), "Completada");
+  assert.equal(securityAuditPhaseLabel("partial"), "Parcial");
+  assert.equal(securityAuditPhaseLabel("blocked"), "Bloqueada");
+  assert.equal(securityAuditPhaseLabel("not_applicable"), "No aplicable");
+  assert.equal(securityAuditPhaseLabel("pending"), "Pendiente");
+  assert.notEqual(securityAuditPhaseLabel("partial"), securityAuditPhaseLabel("completed"));
+});
+
+test("Paquete 6: incompleteReasons se lee de la RAÍZ del payload real (y del run antiguo)", () => {
+  // Forma REAL de la API: la lista completa vive en la raíz del payload de
+  // estado; `run` solo lleva el primario. Primary + adicionales correctos.
+  const rootPayload = securityAuditStatusIncompleteReasons({
+    incompleteReasons: ["validation_budget_exhausted", "orchestrator_failed"],
+    run: { incompleteReason: "validation_budget_exhausted" },
+  });
+  const real = splitSecurityAuditIncompleteReasons("validation_budget_exhausted", rootPayload);
+  assert.equal(real.primary, "validation_budget_exhausted");
+  assert.deepEqual(real.additional, ["orchestrator_failed"]);
+  // Forma antigua: lista anidada dentro de `run` sigue funcionando.
+  assert.deepEqual(
+    securityAuditStatusIncompleteReasons({
+      run: { incompleteReasons: ["deadline_exceeded"] },
+    }),
+    ["deadline_exceeded"],
+  );
+  // La raíz manda sobre la forma antigua si ambas existieran.
+  assert.deepEqual(
+    securityAuditStatusIncompleteReasons({
+      incompleteReasons: ["validator_failed"],
+      run: { incompleteReasons: ["deadline_exceeded"] },
+    }),
+    ["validator_failed"],
+  );
+  // Sin listas en ningún nivel → undefined (el primario persistido sigue).
+  assert.equal(securityAuditStatusIncompleteReasons({ run: {} }), undefined);
+  assert.equal(securityAuditStatusIncompleteReasons(null), undefined);
 });
 
 test("polling continues through a cancellation request until a terminal state", () => {
@@ -172,6 +291,61 @@ test("M5: the UI start payload matches the API contract exactly", () => {
   });
   assert.equal(quick.preflightDepth, "quick");
   assert.equal((quick.budget as { maxInvocations: number | null }).maxInvocations, null);
+});
+
+test("Paquete 7: the UI start payload carries trimmed instructions and omits empty ones", () => {
+  const withText = buildSecurityAuditStartPayload({
+    projectPath: "/srv/example",
+    researchDepth: "deep",
+    profile: "standard",
+    scope: { kind: "project" },
+    budget: { maxInvocations: 20, maxConcurrency: 2, maxDurationMs: 600000 },
+    instructions: "  Prioriza la superficie de autenticación.  ",
+  });
+  assert.equal(withText.instructions, "Prioriza la superficie de autenticación.");
+
+  // Sin instrucción (o solo espacios): la clave se OMITE para que la API use
+  // su texto por defecto.
+  const withoutText = buildSecurityAuditStartPayload({
+    projectPath: "/srv/example",
+    researchDepth: "deep",
+    profile: "standard",
+    scope: { kind: "project" },
+    budget: { maxInvocations: 20, maxConcurrency: 2, maxDurationMs: 600000 },
+  });
+  assert.equal("instructions" in withoutText, false);
+  assert.deepEqual(Object.keys(withoutText).sort(), [
+    "budget", "path", "preflightDepth", "profile", "scope",
+  ]);
+
+  const whitespaceOnly = buildSecurityAuditStartPayload({
+    projectPath: "/srv/example",
+    researchDepth: "deep",
+    profile: "standard",
+    scope: { kind: "project" },
+    budget: { maxInvocations: 20, maxConcurrency: 2, maxDurationMs: 600000 },
+    instructions: "   \n  ",
+  });
+  assert.equal("instructions" in whitespaceOnly, false);
+});
+
+test("Paquete 7 (revisión): a 9000-char instruction is capped to exactly 8000 preserving the prefix", () => {
+  const long = "prefijo relevante de la instrucción " + "y".repeat(9000);
+  const payload = buildSecurityAuditStartPayload({
+    projectPath: "/srv/example",
+    researchDepth: "deep",
+    profile: "standard",
+    scope: { kind: "project" },
+    budget: { maxInvocations: 20, maxConcurrency: 2, maxDurationMs: 600000 },
+    instructions: long,
+  });
+  const instructions = payload.instructions;
+  assert.equal(typeof instructions, "string");
+  assert.equal((instructions as string).length, 8000, "el payload lleva exactamente 8000");
+  assert.ok(
+    (instructions as string).startsWith("prefijo relevante de la instrucción"),
+    "el texto conserva el prefijo (el exceso se descarta por el final)",
+  );
 });
 
 test("M5: the UI remediation payload carries approved, path and the real depth", () => {

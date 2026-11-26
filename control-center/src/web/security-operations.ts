@@ -50,6 +50,13 @@ const PHASE_STATE_LABELS: Record<string, string> = {
   in_progress: "En curso",
   complete: "Completada",
   skipped: "Omitida",
+  // Paquete 6: estados reales del desglose por fase. Una fase parcial o
+  // bloqueada JAMÁS se rotula como "Completada". "completed" es el estado del
+  // desglose por fase (`phaseStates`); "complete", el del checkpoint.
+  completed: "Completada",
+  partial: "Parcial",
+  blocked: "Bloqueada",
+  not_applicable: "No aplicable",
 };
 
 const RUN_STATUS_LABELS: Record<string, string> = {
@@ -121,12 +128,123 @@ export function securityAuditProgress(phases: readonly string[]): {
   return { completed, total, percent: Math.round((completed / total) * 100) };
 }
 
+/**
+ * Paquete 6 (refinamiento): primera parte de la línea de progreso.
+ * - Run `complete`: se mantiene "Progreso N/6 fases (P%)".
+ * - Run NO complete: recorrer las fases NO es completarlas; JAMÁS se muestra
+ *   "100%" como progreso efectivo. "Recorridas" = fases que la corrida abrió
+ *   (checkpoint distinto de pending); "Completadas" = estado REAL del
+ *   desglose por fase (`realCompleted`); sin desglose (API antigua) se usa el
+ *   checkpoint como único dato disponible.
+ */
+export function securityAuditProgressSummary(
+  runStatus: string,
+  phases: readonly string[],
+  realCompleted?: number,
+): string {
+  const total = SECURITY_AUDIT_PHASES.length;
+  if (runStatus === "complete") {
+    const completed = phases.filter((state) => state === "complete").length;
+    return `Progreso ${completed}/${total} fases (${Math.round((completed / total) * 100)}%)`;
+  }
+  const visited = phases.filter((state) => state !== "pending").length;
+  const completed = Math.min(
+    Math.max(realCompleted ?? phases.filter((state) => state === "complete").length, 0),
+    total,
+  );
+  return `Fases recorridas: ${visited}/${total} · Completadas: ${completed}/${total}`;
+}
+
+export interface SecurityAuditPhaseBreakdown {
+  completed: number;
+  partial: number;
+  blocked: number;
+  notApplicable: number;
+  pending: number;
+}
+
+/**
+ * Paquete 6: desglose por estado real de las fases (estados distintos de
+ * `complete`/`pending` que no existen en el checkpoint se cuentan como
+ * pendientes). Recorrer las fases no equivale a completarlas.
+ */
+export function securityAuditPhaseBreakdown(
+  phaseStates: ReadonlyArray<{ state: string }>,
+): SecurityAuditPhaseBreakdown {
+  const breakdown: SecurityAuditPhaseBreakdown = {
+    completed: 0, partial: 0, blocked: 0, notApplicable: 0, pending: 0,
+  };
+  for (const entry of phaseStates) {
+    if (entry.state === "completed") breakdown.completed += 1;
+    else if (entry.state === "partial") breakdown.partial += 1;
+    else if (entry.state === "blocked") breakdown.blocked += 1;
+    else if (entry.state === "not_applicable") breakdown.notApplicable += 1;
+    else breakdown.pending += 1;
+  }
+  return breakdown;
+}
+
+/**
+ * Paquete 6: separa el motivo primario del resto. Con API antigua (sin
+ * `incompleteReasons`) la lista adicional queda vacía; sin primario explícito
+ * se usa el primero de la lista.
+ */
+export function splitSecurityAuditIncompleteReasons(
+  primary: string | null | undefined,
+  reasons: readonly string[] | undefined,
+): { primary: string | null; additional: string[] } {
+  const valid = (reasons ?? []).filter((reason): reason is string =>
+    typeof reason === "string" && reason.length > 0);
+  const main = primary && primary.length > 0 ? primary : valid[0] ?? null;
+  return { primary: main, additional: valid.filter((reason) => reason !== main) };
+}
+
+/**
+ * Paquete 6: `incompleteReasons` se expone en la RAÍZ del payload de estado
+ * (`status.incompleteReasons`); `run.incompleteReasons` se acepta solo por
+ * compatibilidad con payloads antiguos.
+ */
+export function securityAuditStatusIncompleteReasons(
+  status: {
+    incompleteReasons?: readonly string[];
+    run?: { incompleteReason?: string | null; incompleteReasons?: readonly string[] };
+  } | null | undefined,
+): readonly string[] | undefined {
+  return status?.incompleteReasons ?? status?.run?.incompleteReasons;
+}
+
 /** Sondear hasta el estado terminal, incluso durante una cancelación solicitada. */
 export function shouldPollSecurityAudit(
   run: { runStatus?: string; cancelRequested?: boolean } | null | undefined,
 ): boolean {
   if (!run) return false;
   return run.runStatus === "in_progress";
+}
+
+/** Paquete 8: resultado clasificado de un sondeo de estado de auditoría. */
+export type SecurityAuditPollOutcome = "ready" | "preparing" | "missing" | "stale";
+
+/**
+ * Paquete 8: helper PURO que clasifica la respuesta de un sondeo de
+ * `GET /api/security-audit/runs/:runId` sin efectos ni estados inventados:
+ * - `"stale"`: la respuesta pertenece a una generación anterior (otro run
+ *   seleccionado u otra petición) y DEBE descartarse sin tocar el estado.
+ * - `"preparing"`: el `202` con `preparing: true` de la API (la fila del run
+ *   aún no existe; el orquestador la creará de forma asíncrona).
+ * - `"ready"`: estado completo (`200`).
+ * - `"missing"`: 404 real (identificador no existente y sin preparación).
+ */
+export function resolveSecurityAuditPollOutcome(
+  status: number,
+  body: unknown,
+  isCurrent: boolean,
+): SecurityAuditPollOutcome {
+  if (!isCurrent) return "stale";
+  if (typeof body === "object" && body !== null
+      && (body as { preparing?: unknown }).preparing === true) {
+    return "preparing";
+  }
+  return status === 200 ? "ready" : "missing";
 }
 
 export function securityAuditReportUrl(runId: string, artifact: string): string {
@@ -168,21 +286,35 @@ export interface SecurityAuditStartPayloadInput {
   profile: SecurityAuditProfile;
   scope: Record<string, unknown>;
   budget: { maxInvocations: number | null; maxConcurrency: number; maxDurationMs: number };
+  /** Paquete 7: instrucción del operador (opcional; se recorta, se acota a 8000 y se omite si queda vacía). */
+  instructions?: string;
 }
+
+/** Paquete 7: mismo límite que valida la API para las instrucciones. */
+export const SECURITY_AUDIT_INSTRUCTIONS_MAX_CHARS = 8000;
 
 /**
  * Payload exacto que la UI envía a `POST /api/security-audit/runs`.
  * `preflightDepth` debe coincidir con la preconsulta real del proyecto.
+ * Paquete 7: `instructions` se recorta (trim) y se ACOTA al límite de 8000
+ * caracteres conservando el PREFIJO, de modo que el payload nunca excede lo
+ * que la API acepta. SOLO se incluye si queda texto (vacío -> se omite para
+ * que la API use su texto por defecto).
  */
 export function buildSecurityAuditStartPayload(
   input: SecurityAuditStartPayloadInput,
 ): Record<string, unknown> {
+  const trimmed = typeof input.instructions === "string" ? input.instructions.trim() : "";
+  // Paquete 7 (revisión): el trim NO basta; el texto se acota al límite con
+  // slice conservando el prefijo (nunca lanza: el exceso se pierde y punto).
+  const instructions = trimmed.slice(0, SECURITY_AUDIT_INSTRUCTIONS_MAX_CHARS);
   return {
     path: input.projectPath,
     profile: input.profile,
     scope: input.scope,
     budget: input.budget,
     preflightDepth: input.researchDepth,
+    ...(instructions ? { instructions } : {}),
   };
 }
 

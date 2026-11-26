@@ -31,13 +31,18 @@ import type { StartExecutionOptions } from "./execution.js";
 import { detectSecurityAuditIntent } from "./security-audit-intent.js";
 import { planForSecurityAuditIntent } from "./security-audit-contracts.js";
 import {
+  sortSecurityAuditIncompleteReasons,
   validateSecurityAuditTeam,
   type SecurityAuditRosterEntry,
 } from "./security-audit-orchestrator.js";
+import { auditInvocationUsage } from "./security-audit-usage.js";
+import { computeSecurityAuditPhaseStates } from "./security-audit-phase-status.js";
 import { validateSecurityAuditStartOptions } from "./security-audit-start.js";
 import {
   createSecurityAuditRemediation,
   getSecurityAuditRun,
+  // Paquete 2: historial de consolidaciones expuesto en el estado del run.
+  loadSecurityAuditWorkState,
   listSecurityAuditFindings,
   listSecurityAuditInvocations,
   listSecurityAuditRemediations,
@@ -105,6 +110,115 @@ const ARTIFACT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const FINGERPRINT_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:/@+-]{0,199}$/;
 const DEPTH_VALUES: readonly string[] = ["quick", "focused", "deep"];
 const PROFILE_VALUES: readonly string[] = ["quick", "standard", "deep"];
+
+/** Paquete 7: mismo límite que la clasificación de intención (8000). */
+export const SECURITY_AUDIT_INSTRUCTIONS_MAX_CHARS = 8000;
+/** Paquete 7: texto por defecto cuando el operador no escribe instrucción. */
+export const SECURITY_AUDIT_DEFAULT_INSTRUCTIONS =
+  "Auditoría de seguridad completa solicitada desde Security Operations.";
+
+/**
+ * Paquete 8: registro en memoria acotado de runs cuya FILA de auditoría aún no
+ * existe en la BD (el `202` de `POST /runs` puede preceder a la inserción que
+ * hace el orquestador de forma asíncrona). Es SOLO un puente anti-404 prematuro:
+ * la BD sigue siendo la única fuente de verdad y las entradas caducan (TTL) o
+ * se acotan (máximo de entradas), así que nunca se inventa un run.
+ */
+export const SECURITY_AUDIT_PREPARING_TTL_MS = 60_000;
+const SECURITY_AUDIT_PREPARING_MAX_ENTRIES = 64;
+const preparingAuditRuns = new Map<string, { startedAt: number }>();
+
+function pruneSecurityAuditPreparing(now: number): void {
+  for (const [runId, entry] of preparingAuditRuns) {
+    if (now - entry.startedAt > SECURITY_AUDIT_PREPARING_TTL_MS) {
+      preparingAuditRuns.delete(runId);
+    }
+  }
+}
+
+/** Marca un runId como "en preparación" (id conocido y fila aún no creada). */
+export function markSecurityAuditPreparing(runId: string, startedAt: number = Date.now()): void {
+  pruneSecurityAuditPreparing(startedAt);
+  if (!preparingAuditRuns.has(runId) && preparingAuditRuns.size >= SECURITY_AUDIT_PREPARING_MAX_ENTRIES) {
+    // Map conserva el orden de inserción: se expulsa la entrada más antigua.
+    const oldest = preparingAuditRuns.keys().next();
+    if (!oldest.done) preparingAuditRuns.delete(oldest.value);
+  }
+  preparingAuditRuns.set(runId, { startedAt });
+}
+
+/** true si el runId sigue en preparación (la entrada no ha caducado). */
+export function isSecurityAuditPreparing(runId: string, now: number = Date.now()): boolean {
+  pruneSecurityAuditPreparing(now);
+  return preparingAuditRuns.has(runId);
+}
+
+/** El run ya existe en la BD (o dejó de interesar): sale del registro. */
+export function clearSecurityAuditPreparing(runId: string): void {
+  preparingAuditRuns.delete(runId);
+}
+
+/**
+ * Paquete 8b: registro acotado (conjunto con política TTL 60 s y máx. 64) de
+ * cancelaciones solicitadas mientras el run estaba EN PREPARACIÓN y todavía no
+ * había nada que cancelar. Garantiza que la intención del operador se aplique
+ * DE VERDAD en cuanto la fila del run exista (y solo entonces): sin esto, el
+ * run aparecería `in_progress` con `cancelRequested:false` y consumiría
+ * agentes y presupuesto pese a la cancelación.
+ */
+export const SECURITY_AUDIT_PENDING_CANCEL_TTL_MS = 60_000;
+const SECURITY_AUDIT_PENDING_CANCEL_MAX_ENTRIES = 64;
+const pendingAuditCancels = new Map<string, { requestedAt: number }>();
+
+function prunePendingAuditCancels(now: number): void {
+  for (const [runId, entry] of pendingAuditCancels) {
+    if (now - entry.requestedAt > SECURITY_AUDIT_PENDING_CANCEL_TTL_MS) {
+      pendingAuditCancels.delete(runId);
+    }
+  }
+}
+
+/** Registra una cancelación pendiente para un run en preparación. */
+export function markSecurityAuditPendingCancel(runId: string, requestedAt: number = Date.now()): void {
+  prunePendingAuditCancels(requestedAt);
+  if (!pendingAuditCancels.has(runId) && pendingAuditCancels.size >= SECURITY_AUDIT_PENDING_CANCEL_MAX_ENTRIES) {
+    const oldest = pendingAuditCancels.keys().next();
+    if (!oldest.done) pendingAuditCancels.delete(oldest.value);
+  }
+  pendingAuditCancels.set(runId, { requestedAt });
+}
+
+/** true si hay una cancelación pendiente VIGENTE para el runId. */
+export function isSecurityAuditPendingCancel(runId: string, now: number = Date.now()): boolean {
+  prunePendingAuditCancels(now);
+  return pendingAuditCancels.has(runId);
+}
+
+/** Consume la entrada (una sola vez; las caducadas ya no cuentan). */
+export function takeSecurityAuditPendingCancel(runId: string): boolean {
+  prunePendingAuditCancels(Date.now());
+  return pendingAuditCancels.delete(runId);
+}
+
+/**
+ * Paquete 7: instrucción efectiva de un run de auditoría. FUENTE: el campo
+ * `instructions` del execution run de ORIGEN (el primero vinculado al run de
+ * auditoría, que conserva el texto original incluso tras reanudaciones).
+ * Devuelve cadena vacía si no hay ejecución asociada o sin texto: nunca se
+ * inventa una instrucción.
+ */
+function effectiveInstructionsForRun(
+  deps: SecurityAuditApiDeps,
+  runId: string,
+): string {
+  for (const executionId of deps.listSecurityAuditExecutionRunIds(runId)) {
+    const execution = deps.getExecution(executionId);
+    const text = execution?.run?.instructions;
+    if (typeof text === "string" && text.trim()) return text.trim();
+    break;
+  }
+  return "";
+}
 
 type FailResult = { ok: false; status: number; error: string };
 type HandlerResult =
@@ -242,6 +356,53 @@ function parseRunId(value: unknown): string | null {
   return typeof value === "string" && RUN_ID_PATTERN.test(value) ? value : null;
 }
 
+/**
+ * Paquete 8b: ejecución ACTIVA real de un run con la misma regla en la
+ * cancelación normal y en la cancelación durante la preparación.
+ */
+function activeAuditExecution(
+  deps: SecurityAuditApiDeps,
+  runId: string,
+): ExecutionSnapshot | null {
+  const executionIds = deps.listSecurityAuditExecutionRunIds(runId);
+  const activeId = executionIds.length > 0 ? executionIds[executionIds.length - 1] : null;
+  const execution = activeId ? deps.getExecution(activeId) : null;
+  if (!execution || !["queued", "running", "waiting"].includes(execution.run.status)) return null;
+  return execution;
+}
+
+/**
+ * Paquete 8b: vía ÚNICA de cancelación real (reutilizada por la cancelación
+ * normal y por la cancelación durante la preparación). El flag persistido es
+ * un UPDATE idempotente: si la fila aún no existe no muta nada y la
+ * persistencia queda a cargo de la cancelación pendiente.
+ */
+async function cancelAuditViaExecution(
+  deps: SecurityAuditApiDeps,
+  db: DatabaseSync,
+  runId: string,
+  execution: ExecutionSnapshot,
+): Promise<{ cancelled: true; runId: string; executionRunId: string }> {
+  requestSecurityAuditCancel(db, runId);
+  await deps.cancelExecution(execution.run.id);
+  return { cancelled: true, runId, executionRunId: execution.run.id };
+}
+
+/**
+ * Paquete 8b: aplica una cancelación pendiente en cuanto la fila del run
+ * exista (solo entonces). Consume la entrada UNA vez, no hace nada si la
+ * entrada caducó o la fila sigue ausente, y persiste el flag real
+ * (`cancel_requested`) que el orquestador consulta en sus compuertas.
+ */
+function applySecurityAuditPendingCancel(deps: SecurityAuditApiDeps, runId: string): boolean {
+  if (!isSecurityAuditPendingCancel(runId)) return false;
+  const db = deps.getFactoryDatabase();
+  if (!getSecurityAuditRun(db, runId)) return false;
+  takeSecurityAuditPendingCancel(runId);
+  requestSecurityAuditCancel(db, runId);
+  return true;
+}
+
 function mapRunSummary(row: SecurityAuditRunRow): Record<string, unknown> {
   return {
     runId: row.runId,
@@ -275,7 +436,13 @@ function buildStatusPayload(deps: SecurityAuditApiDeps, runId: string): HandlerR
   const units = listSecurityAuditUnits(db, runId);
   const findings = listSecurityAuditFindings(db, runId);
   const invocations = listSecurityAuditInvocations(db, runId);
+  const usageByInvocation = auditInvocationUsage(db, invocations);
   const remediations = listSecurityAuditRemediations(db, runId);
+  // Paquete 2: consolidaciones de candidatos duplicados aplicadas por el
+  // orquestador (historial persistido). `loadSecurityAuditWorkState` ya valida
+  // el JSON campo a campo; sin estado o corrupto → lista vacía (null honesto).
+  const workState = loadSecurityAuditWorkState(db, runId);
+  const consolidations = workState?.consolidations ?? [];
 
   const unitsByStatus: Record<string, number> = {};
   for (const unit of units) unitsByStatus[unit.status] = (unitsByStatus[unit.status] ?? 0) + 1;
@@ -283,6 +450,13 @@ function buildStatusPayload(deps: SecurityAuditApiDeps, runId: string): HandlerR
     .filter((unit) => unit.status === "planned" || unit.status === "candidate" || unit.status === "blocked" || unit.status === "in_progress")
     .map((unit) => unit.unitId);
   const deferredUnits = units.filter((unit) => unit.status === "deferred").map((unit) => unit.unitId);
+  // Defecto 3: separar cobertura pendiente de caza (`planned`/`in_progress`/
+  // `blocked`) de candidatos pendientes de validación (`candidate`); la forma
+  // pública de `coverage.pendingUnits` NO cambia.
+  const pendingCoverageUnits = units
+    .filter((unit) => unit.status === "planned" || unit.status === "in_progress" || unit.status === "blocked")
+    .length;
+  const pendingCandidateUnits = units.filter((unit) => unit.status === "candidate").length;
 
   const confirmed = findings.filter((finding) => finding.verdict === "confirmed");
   const bySeverity: Record<string, number> = {};
@@ -321,8 +495,43 @@ function buildStatusPayload(deps: SecurityAuditApiDeps, runId: string): HandlerR
   const spentTotal = ["recon", "hunters", "critics", "verifiers"]
     .reduce((total, key) => total + (typeof spent[key] === "number" ? spent[key] as number : 0), 0);
 
+  // Paquete 6: lista completa de motivos oficiales del run (no solo el
+  // primario). Defecto 4: el primario (`run.incompleteReason`, fijado también
+  // de forma explícita en el cierre) SIEMPRE está presente y primero, aunque
+  // el work_state tenga motivos que no lo incluyan; el resto se ordena con la
+  // precedencia oficial. Un run `complete` no lleva motivos.
+  const incompleteReasons = run.runStatus === "complete"
+    ? []
+    : run.incompleteReason
+      ? [
+          run.incompleteReason,
+          ...sortSecurityAuditIncompleteReasons(
+            (workState?.pendingReasons ?? []).filter((reason) => reason !== run.incompleteReason),
+          ),
+        ]
+      : sortSecurityAuditIncompleteReasons(workState?.pendingReasons ?? []);
+  // Paquete 6: desglose honesto por fase (recorrer las fases no equivale a
+  // completarlas). `run.phases`/`progress` se conservan intactos.
+  const phaseStates = computeSecurityAuditPhaseStates({
+    profile: run.profile,
+    phasesComplete: run.phases
+      .map((state, index) => (state === "complete" ? index + 1 : null))
+      .filter((phase): phase is number => phase !== null),
+    unvalidatedCandidates: workState?.unvalidated ?? [],
+    pendingUnits,
+    pendingCoverageUnits,
+    pendingCandidateUnits,
+    incompleteReasons,
+    consolidatedUnits: Object.keys(workState?.consolidatedUnitIds ?? {}).length,
+  });
+
   return ok(200, {
     run: mapRunSummary(run),
+    // Paquete 7: instrucción efectiva del operador. FUENTE: el execution run
+    // de ORIGEN vinculado al run de auditoría (`execution_runs.instructions`);
+    // cadena vacía si no hay ejecución asociada (nunca texto inventado).
+    instructions: effectiveInstructionsForRun(deps, runId),
+    incompleteReasons,
     scope: run.scope,
     budget: {
       maxInvocations: config.maxInvocations ?? null,
@@ -336,6 +545,9 @@ function buildStatusPayload(deps: SecurityAuditApiDeps, runId: string): HandlerR
       completedPhases: run.phases.filter((state) => state === "complete").length,
       phases: run.phases.map((state, index) => ({ phase: index + 1, state })),
     },
+    // Paquete 6: estado real por fase (completed/partial/blocked/not_applicable/
+    // pending) con el motivo de cada matiz; no sustituye a `run.phases`.
+    phaseStates,
     execution: execution
       ? {
           runId: execution.run.id,
@@ -354,6 +566,7 @@ function buildStatusPayload(deps: SecurityAuditApiDeps, runId: string): HandlerR
       : null,
     invocations: invocations.map((invocation) => ({
       instanceId: invocation.instanceId,
+      usage: usageByInvocation.get(invocation.instanceId) ?? null,
       phase: invocation.phase,
       role: invocation.role,
       agentId: invocation.agentId,
@@ -405,6 +618,15 @@ function buildStatusPayload(deps: SecurityAuditApiDeps, runId: string): HandlerR
       completedAt: remediation.completedAt,
     })),
     validators: { ledger: run.ledgerValidator, findings: run.findingsValidator },
+    // Paquete 2: historial de consolidación de candidatos duplicados (canónica,
+    // aliases con sus unitIds y razón, e identidad que justificó la fusión).
+    consolidations: consolidations.map((cluster) => ({
+      canonicalFingerprint: cluster.canonicalFingerprint,
+      canonicalUnitId: cluster.canonicalUnitId,
+      aliases: cluster.aliases,
+      rationale: cluster.rationale,
+      key: cluster.key,
+    })),
     blockers,
     cancelRequested: run.cancelRequested,
     sandbox: { status: run.sandboxStatus, blockers: run.sandboxBlockers },
@@ -518,7 +740,19 @@ export function registerSecurityAuditRoutes(
   }>("/api/security-audit/runs", async (request, reply) => {
     const body = bodyOf(request.body);
     const projectPath = typeof body.path === "string" ? body.path.trim() : "";
+    // Paquete 7: la instrucción es texto opcional acotado a 8000. Solo es un
+    // dato contextual del operador: presupuesto, alcance y permisos siguen
+    // viniendo EXCLUSIVAMENTE del formulario validado (scope/budget/policy).
+    if (body.instructions !== undefined && body.instructions !== null
+        && typeof body.instructions !== "string") {
+      return reply.code(400).send({ error: "Las instrucciones deben ser un texto." });
+    }
     const instructions = typeof body.instructions === "string" ? body.instructions.trim() : "";
+    if (instructions.length > SECURITY_AUDIT_INSTRUCTIONS_MAX_CHARS) {
+      return reply.code(400).send({
+        error: `Las instrucciones superan el límite de ${SECURITY_AUDIT_INSTRUCTIONS_MAX_CHARS} caracteres.`,
+      });
+    }
 
     const admission = admissionChecks(deps, {
       projectPath, preflightDepth: body.preflightDepth,
@@ -561,13 +795,22 @@ export function registerSecurityAuditRoutes(
     try {
       const result = await deps.startExecution(
         projectPath,
-        instructions || "Auditoría de seguridad completa solicitada desde Security Operations.",
+        instructions || SECURITY_AUDIT_DEFAULT_INSTRUCTIONS,
         deps.factoryRoot,
         undefined,
         { securityAudit: securityAuditOptions, auditorScope },
       );
+      // Paquete 8: el id se conoce al resolver startExecution; se marca ANTES
+      // de responder 202 (y antes de que el orquestador cree la fila) para que
+      // el primer sondeo del cliente nunca vea un 404 prematuro.
+      markSecurityAuditPreparing(result.runId);
+      // Paquete 8b: si una cancelación quedó pendiente para este id, se aplica
+      // en cuanto la ejecución exista y se registra el resultado real.
+      const pendingCancelApplied = applySecurityAuditPendingCancel(deps, result.runId);
       return reply.code(202).send({
         started: true,
+        preparing: true,
+        pendingCancelApplied,
         runId: result.runId,
         execution: deps.getExecution(result.runId),
         message: "Auditoría iniciada. Las seis fases avanzarán con instancias de solo lectura.",
@@ -594,8 +837,26 @@ export function registerSecurityAuditRoutes(
   app.get<{ Params: { runId: string } }>("/api/security-audit/runs/:runId", async (request, reply) => {
     const runId = parseRunId(request.params.runId);
     if (!runId) return reply.code(400).send({ error: "Identificador de auditoría inválido." });
+    // Paquete 8b: una cancelación pedida durante la preparación se aplica EN
+    // CUANTA la fila existe (el helper solo actúa si la fila ya está en la BD,
+    // consume la entrada una vez y persiste el flag real).
+    applySecurityAuditPendingCancel(deps, runId);
     const status = buildStatusPayload(deps, runId);
-    if (!status) return reply.code(404).send({ error: "Auditoría no encontrada." });
+    // Paquete 8: 404 de fila ausente. Si el id fue aceptado hace poco y su fila
+    // aún no existe (el orquestador la crea de forma asíncrona), se responde
+    // 202 "preparando" en vez de un 404 que la UI interpretaría como error.
+    if (!status || (!status.ok && status.status === 404)) {
+      if (isSecurityAuditPreparing(runId)) {
+        return reply.code(202).send({
+          preparing: true,
+          runId,
+          message: "La auditoría está en preparación.",
+        });
+      }
+      return reply.code(404).send({ error: "Auditoría no encontrada." });
+    }
+    // El run ya existe en la BD: sale del registro de preparación.
+    clearSecurityAuditPreparing(runId);
     if (!status.ok) return reply.code(status.status).send({ error: status.error });
     return status.payload;
   });
@@ -623,6 +884,11 @@ export function registerSecurityAuditRoutes(
       }
       try {
         const storedBudget = (run.budgetConfig ?? {}) as Record<string, unknown>;
+        // Paquete 7: la reanudación REUTILIZA la instrucción original del run
+        // (execution run de origen); sin ella, el texto por defecto. Nunca se
+        // inventa una instrucción nueva.
+        const originalInstructions =
+          effectiveInstructionsForRun(deps, runId) || SECURITY_AUDIT_DEFAULT_INSTRUCTIONS;
         const options = validateSecurityAuditStartOptions({
           profile: run.profile,
           scope: run.scope,
@@ -647,7 +913,7 @@ export function registerSecurityAuditRoutes(
         }) as StartExecutionOptions["securityAudit"];
         const result = await deps.startExecution(
           run.projectPath,
-          `Reanudación de la auditoría de seguridad ${runId}.`,
+          originalInstructions,
           deps.factoryRoot,
           undefined,
           { securityAudit: options, auditorScope },
@@ -671,19 +937,50 @@ export function registerSecurityAuditRoutes(
     if (!runId) return reply.code(400).send({ error: "Identificador de auditoría inválido." });
     const db = deps.getFactoryDatabase();
     const run = getSecurityAuditRun(db, runId);
-    if (!run) return reply.code(404).send({ error: "Auditoría no encontrada." });
-    const executionIds = deps.listSecurityAuditExecutionRunIds(runId);
-    const activeId = executionIds.length > 0 ? executionIds[executionIds.length - 1] : null;
-    const execution = activeId ? deps.getExecution(activeId) : null;
-    if (!execution || !["queued", "running", "waiting"].includes(execution.run.status)) {
+    if (!run) {
+      // Paquete 8b: cancelar mientras la fila del run aún no existe (run en
+      // preparación). Nunca se finge una cancelación efectiva.
+      if (!isSecurityAuditPreparing(runId)) {
+        return reply.code(404).send({ error: "Auditoría no encontrada." });
+      }
+      // Si la ejecución ya vive en el proceso, la cancelación es REAL por la
+      // MISMA vía que la cancelación normal (sin duplicar lógica).
+      const execution = activeAuditExecution(deps, runId);
+      if (execution) {
+        try {
+          const result = await cancelAuditViaExecution(deps, db, runId, execution);
+          // La fila de auditoría aún no existe: la persistencia de
+          // `cancel_requested` queda pendiente y el GET la aplicará.
+          markSecurityAuditPendingCancel(runId);
+          return reply.code(202).send({
+            ...result,
+            preparing: true,
+            cancelRequested: true,
+            pendingCancelApplied: false,
+          });
+        } catch (error) {
+          return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
+        }
+      }
+      // Sin ejecución todavía: la intención queda REGISTRADA y se aplicará en
+      // cuanto la fila exista.
+      markSecurityAuditPendingCancel(runId);
+      return reply.code(202).send({
+        preparing: true,
+        cancelRequested: true,
+        pendingCancelApplied: false,
+        runId,
+        message: "Cancelación registrada; se aplicará en cuanto la auditoría exista.",
+      });
+    }
+    const execution = activeAuditExecution(deps, runId);
+    if (!execution) {
       return reply.code(409).send({
         error: "La auditoría no tiene una ejecución activa en este proceso; no se puede cancelar.",
       });
     }
     try {
-      requestSecurityAuditCancel(db, runId);
-      await deps.cancelExecution(execution.run.id);
-      return { cancelled: true, runId, executionRunId: execution.run.id };
+      return await cancelAuditViaExecution(deps, db, runId, execution);
     } catch (error) {
       return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
     }

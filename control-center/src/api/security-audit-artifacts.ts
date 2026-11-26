@@ -341,6 +341,11 @@ export interface SecurityAuditRunMetadata {
   sandboxAuthorization?: SecurityAuditSandboxAuthorization | null;
   selectedCompanions: readonly string[];
   priorRunPaths: readonly string[];
+  /**
+   * Paquete 7: instrucción del operador del run (dato NO confiable; nunca
+   * amplía permisos, presupuesto ni alcance). Vacía si no se registró.
+   */
+  instructions?: string;
   createdAt: string;
 }
 
@@ -364,8 +369,11 @@ export function writeSecurityAuditRunMetadata(
   if (metadata.executionPolicy !== "source-only") {
     throw new Error(`execution_policy desconocida: ${String(metadata.executionPolicy)}`);
   }
-  const { executionPolicy, sandboxAuthorization: _authorization, ...rest } = metadata;
+  const { executionPolicy, sandboxAuthorization: _authorization, instructions, ...rest } = metadata;
   writeArtifactAtomic(layout.paths["run-metadata.json"], serialize({
+    // Paquete 7: instrucción efectiva del operador (texto; vacía si no llegó
+    // ninguna). Es un campo propio del run y no toca findings ni ledger.
+    instructions: typeof instructions === "string" ? instructions : "",
     ...rest,
     execution_policy: executionPolicy,
   }));
@@ -414,12 +422,18 @@ export interface SecurityAuditPhaseSixReports {
 
 /**
  * Fase 6: publica los tres informes. En modo incompleto el `REPORT.md` debe
- * llevar el marcador oficial de parcialidad; si no, se aborta.
+ * llevar el marcador oficial de parcialidad; si no, se aborta. La lista
+ * `incompleteReasons` (Paquete 6) acompaña al motivo primario; los artefactos
+ * la conservan para el desglose honesto de motivos.
  */
 export function writeSecurityAuditPhaseSixReports(
   layout: SecurityAuditRunLayout,
   reports: SecurityAuditPhaseSixReports,
-  options: { incomplete: boolean; incompleteReason?: string | null } = { incomplete: false },
+  options: {
+    incomplete: boolean;
+    incompleteReason?: string | null;
+    incompleteReasons?: readonly string[];
+  } = { incomplete: false },
 ): void {
   for (const name of ["REPORT.md", "FINDINGS-DETAIL.md", "NEEDS-VALIDATION.md"] as const) {
     assertSharedArtifact(name);
@@ -440,7 +454,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 export interface SecurityAuditMetadataStatusUpdate {
   runStatus: "complete" | "incomplete";
+  /** Motivo oficial primario del cierre incomplete. */
   incompleteReason?: string | null;
+  /**
+   * Paquete 6: TODOS los motivos oficiales del cierre (primario incluido),
+   * persistidos en `run-metadata.json` como `incomplete_reasons`.
+   */
+  incompleteReasons?: readonly string[];
 }
 
 /**
@@ -472,8 +492,15 @@ export function updateSecurityAuditRunMetadataStatus(
   };
   if (update.runStatus === "incomplete") {
     next.incomplete_at = new Date().toISOString();
+    // Paquete 6: la lista completa de motivos (primario incluido), deduplicada
+    // conservando el orden dado (el primario primero).
+    const reasons = [...new Set(update.incompleteReasons ?? [])]
+      .filter((reason) => typeof reason === "string" && reason.length > 0);
+    if (reasons.length > 0) next.incomplete_reasons = reasons;
+    else delete next.incomplete_reasons;
   } else {
     delete next.incomplete_at;
+    delete next.incomplete_reasons;
   }
   writeArtifactAtomic(layout.paths["run-metadata.json"], serialize(next));
 }
@@ -491,8 +518,13 @@ function listOrNone(items: readonly string[]): string {
 }
 
 export interface SecurityAuditIncompleteArtifactsInput {
-  /** Motivo oficial de `run_status: "incomplete"`. */
+  /** Motivo oficial primario de `run_status: "incomplete"`. */
   reason: SecurityAuditIncompleteReason;
+  /**
+   * Paquete 6: TODOS los motivos oficiales del cierre (opcional, retro-
+   * compatible). Sin ella, la lista se reduce al motivo primario.
+   */
+  incompleteReasons?: readonly string[];
   /** Error acotado y redactado (se recorta a 500 caracteres). */
   error?: string | null;
   profile: "quick" | "standard" | "deep";
@@ -530,6 +562,7 @@ export function writeSecurityAuditIncompleteArtifacts(
   updateSecurityAuditRunMetadataStatus(layout, {
     runStatus: "incomplete",
     incompleteReason: input.reason,
+    incompleteReasons: input.incompleteReasons,
   });
   const coverage: SecurityAuditReportCoverage = {
     unitsTotal: 0,
@@ -545,6 +578,12 @@ export function writeSecurityAuditIncompleteArtifacts(
   const pendingUnits = [...new Set(input.pendingUnits ?? [])].sort();
   const unvalidated = [...new Set(input.unvalidatedFingerprints ?? [])].sort();
   const deferred = [...new Set(input.deferredUnits ?? [])].sort();
+  // Paquete 6: motivo primario primero; el resto de motivos se listan además
+  // en el cierre (nunca se pierde un motivo oficial registrado).
+  const reasonList = [...new Set([input.reason, ...(input.incompleteReasons ?? [])])]
+    .filter((reason): reason is SecurityAuditIncompleteReason =>
+      typeof reason === "string" && reason.length > 0);
+  const additionalReasons = reasonList.filter((reason) => reason !== input.reason);
   const bundle = buildSecurityAuditReports({
     runId: layout.runId,
     profile: input.profile,
@@ -553,6 +592,7 @@ export function writeSecurityAuditIncompleteArtifacts(
     domains: input.domains ?? [],
     runStatus: "incomplete",
     incompleteReason: input.reason,
+    incompleteReasons: reasonList,
     sourceRef: input.sourceRef ?? null,
     sourceDirty: input.sourceDirty ?? false,
     executionPolicy: input.executionPolicy,
@@ -567,7 +607,10 @@ export function writeSecurityAuditIncompleteArtifacts(
     "",
     "## Cierre terminal (run parcial)",
     "",
-    `- Motivo oficial: \`${input.reason}\`.`,
+    `- Motivo oficial principal: \`${input.reason}\`.`,
+    ...(additionalReasons.length > 0
+      ? [`- Motivos oficiales adicionales: ${additionalReasons.map((reason) => `\`${reason}\``).join(", ")}.`]
+      : []),
     `- Fases completadas: ${listOrNone(phasesComplete.map(String))}.`,
     `- Fases pendientes: ${listOrNone(pendingPhases.map(String))}.`,
     `- Unidades pendientes de cobertura: ${listOrNone(pendingUnits)}.`,
@@ -585,7 +628,7 @@ export function writeSecurityAuditIncompleteArtifacts(
       detail: bundle.detail,
       needsValidation: bundle.needsValidation,
     },
-    { incomplete: true, incompleteReason: input.reason },
+    { incomplete: true, incompleteReason: input.reason, incompleteReasons: reasonList },
   );
 }
 

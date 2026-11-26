@@ -93,6 +93,7 @@ test("schema initialization is idempotent on a pre-existing database", () => {
     "security_audit_remediations",
     "security_audit_runs",
     "security_audit_units",
+    "security_audit_usage",
     "security_audit_work_state",
   ]);
 
@@ -542,6 +543,8 @@ function emptyWorkState() {
     deadlineAt: "",
     ledgerValidator: "pending" as const,
     findingsValidator: "pending" as const,
+    consolidations: [],
+    consolidatedUnitIds: {},
   };
 }
 

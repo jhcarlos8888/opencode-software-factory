@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   SECURITY_AUDIT_DOMAINS,
+  SECURITY_AUDIT_INSTRUCTIONS_MAX_CHARS,
   SECURITY_AUDIT_PHASES,
   SECURITY_AUDIT_REPORT_FILES,
   SECURITY_AUDIT_SCOPE_KINDS,
@@ -10,14 +11,18 @@ import {
   formatSecurityAuditTime,
   securityAuditIncompleteReasonLabel,
   securityAuditOutcomeLabel,
+  securityAuditPhaseBreakdown,
   securityAuditPhaseLabel,
-  securityAuditProgress,
+  securityAuditProgressSummary,
   securityAuditReportUrl,
   securityAuditRunStatusLabel,
   securityAuditScopeRequiresPaths,
   securityAuditScopeRequiresRefs,
   securityAuditSeverityLabel,
+  securityAuditStatusIncompleteReasons,
+  resolveSecurityAuditPollOutcome,
   shouldPollSecurityAudit,
+  splitSecurityAuditIncompleteReasons,
   type SecurityAuditProfile,
   type SecurityAuditScopeKind,
 } from "./security-operations.js";
@@ -51,6 +56,7 @@ interface RunSummary {
   profile: string;
   runStatus: string;
   incompleteReason: string | null;
+  incompleteReasons?: string[];
   completedPhases: number;
   cancelRequested: boolean;
   ledgerValidator: string;
@@ -59,8 +65,31 @@ interface RunSummary {
   finishedAt: string | null;
 }
 
+/** Paquete 6: desglose honesto del estado real de cada fase (API). */
+interface PhaseStateReport {
+  phase: number;
+  label: string;
+  state: string;
+  reason: string | null;
+}
+
+/** Paquete 8: cuerpo del `202` mientras la fila del run de auditoría no existe. */
+interface PreparingStatus {
+  preparing: true;
+  runId: string;
+  message: string;
+}
+
 interface RunStatus {
   run: RunSummary & { phases: string[] };
+  /**
+   * Paquete 6: TODOS los motivos oficiales del cierre, en la RAÍZ del payload
+   * (forma REAL de la API); `run.incompleteReasons` solo por compatibilidad.
+   */
+  incompleteReasons?: string[];
+  /** Paquete 7: instrucción efectiva del run (texto plano; vacía si no hay). */
+  instructions?: string;
+  phaseStates?: PhaseStateReport[];
   budget: {
     maxInvocations: number | null;
     maxConcurrency: number;
@@ -85,6 +114,7 @@ interface RunStatus {
   } | null;
   invocations: Array<{
     instanceId: string;
+    usage?: {source:string;input:number|null;output:number|null;reasoning:number|null;cacheRead:number|null;cacheWrite:number|null;partial:boolean} | null;
     phase: number;
     role: string;
     agentId: string | null;
@@ -164,6 +194,8 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
   const awaitingExecutionRef = useRef("");
   const [awaitingExecutionId, setAwaitingExecutionId] = useState("");
   const [status, setStatus] = useState<RunStatus | null>(null);
+  // Paquete 8: la auditoría seleccionada fue aceptada pero su fila aún no existe.
+  const [preparingAudit, setPreparingAudit] = useState(false);
   const [selectedFindings, setSelectedFindings] = useState<string[]>([]);
   const [verificationInputs, setVerificationInputs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
@@ -194,16 +226,31 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
     const current = () => selectedRunRef.current === runId && statusRequest.current === request;
     try {
       let payload: RunStatus | null = null;
+      let preparing = false;
       try {
-        payload = await securityApi<RunStatus>(
+        const body = await securityApi<RunStatus | PreparingStatus>(
           "/api/security-audit/runs/" + encodeURIComponent(runId),
         );
+        // Paquete 8: respuestas de una generación anterior (otro run
+        // seleccionado u otra petición) se descartan sin tocar el estado.
+        const outcome = resolveSecurityAuditPollOutcome(200, body, current());
+        if (outcome === "stale") return;
+        if (outcome === "preparing") preparing = true;
+        else payload = body as RunStatus;
       } catch (cause) {
-        // POST returns before the engines are ready and the audit row exists.
-        // A 404 is provisional only while a known accepted execution is active.
-        if (!pendingId || !(cause instanceof SecurityApiError) || cause.status !== 404) throw cause;
+        const httpStatus = cause instanceof SecurityApiError ? cause.status : 0;
+        const outcome = resolveSecurityAuditPollOutcome(httpStatus, cause, current());
+        if (outcome === "stale") return;
+        if (outcome === "preparing") {
+          preparing = true;
+        } else if (!(httpStatus === 404 && pendingId)) {
+          // POST returns before the engines are ready and the audit row exists.
+          // A 404 is provisional only while a known accepted execution is active;
+          // any other failure is surfaced once instead of being retried.
+          throw cause;
+        }
       }
-      if (!current()) return;
+      if (current()) setPreparingAudit(preparing);
       if (payload) {
         setStatus(payload);
         const confirmed = new Set(payload.findings.items.filter((item) => item.verdict === "confirmed").map((item) => item.fingerprint));
@@ -228,7 +275,10 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
         await loadHistory();
       }
     } catch (cause) {
-      if (current()) setError(cause instanceof Error ? cause.message : String(cause));
+      if (current()) {
+        setPreparingAudit(false);
+        setError(cause instanceof Error ? cause.message : String(cause));
+      }
     }
   }, [loadHistory, trackExecution]);
 
@@ -238,6 +288,7 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
     trackExecution("");
     setSelectedRunId(runId);
     setStatus(null);
+    setPreparingAudit(false);
     setSelectedFindings([]);
     setVerificationInputs({});
   }, [trackExecution]);
@@ -248,8 +299,9 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
     void loadHistory();
   }, [loadHistory, selectRun]);
 
-  // Sondear también mientras la ejecución espera a que el orquestador registre la auditoría.
-  const polling = Boolean(awaitingExecutionId) || shouldPollSecurityAudit(status?.run);
+  // Sondear también mientras la ejecución espera a que el orquestador registre
+  // la auditoría y mientras la API responda 202 "preparando" (Paquete 8).
+  const polling = Boolean(awaitingExecutionId) || preparingAudit || shouldPollSecurityAudit(status?.run);
   useEffect(() => {
     if (!polling || !selectedRunId) return;
     const timer = setInterval(() => { void loadStatus(selectedRunId); }, 1500);
@@ -293,6 +345,14 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
           (!Number.isInteger(budget.maxInvocations) || budget.maxInvocations < 1)) {
         throw new Error("El presupuesto máximo debe ser un entero mayor que cero.");
       }
+      // Paquete 7: la instrucción del formulario viaja al run. Se valida aquí
+      // con un mensaje claro; la clasificación de intención NO se bloquea.
+      if (intentText.trim().length > SECURITY_AUDIT_INSTRUCTIONS_MAX_CHARS) {
+        throw new Error(
+          "La instrucción de la auditoría supera el límite de " +
+          `${SECURITY_AUDIT_INSTRUCTIONS_MAX_CHARS} caracteres. Redúcela antes de iniciar.`,
+        );
+      }
       const payload = await securityApi<{ runId: string; message: string }>(
         "/api/security-audit/runs",
         {
@@ -303,6 +363,7 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
             profile,
             scope: scope.scope,
             budget,
+            instructions: intentText,
           })),
         },
       );
@@ -331,11 +392,21 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
 
   async function cancelAudit(runId: string): Promise<void> {
     await runAction(async () => {
-      await securityApi<{ runId: string }>(
+      const payload = await securityApi<{
+        runId: string;
+        preparing?: boolean;
+        cancelled?: boolean;
+        pendingCancelApplied?: boolean;
+      }>(
         `/api/security-audit/runs/${encodeURIComponent(runId)}/cancel`,
         { method: "POST", body: JSON.stringify({}) },
       );
-      setNotice("Cancelación solicitada. La corrida se detiene en la próxima compuerta.");
+      // Paquete 8b: durante la preparación la cancelación NO está aplicada
+      // todavía (se aplicará cuando exista la fila del run): el mensaje no
+      // puede dar por hecha una cancelación que solo está registrada.
+      setNotice(payload.preparing && payload.pendingCancelApplied === false
+        ? "Cancelación registrada; se aplicará en cuanto la auditoría exista."
+        : "Cancelación solicitada. La corrida se detiene en la próxima compuerta.");
       await loadStatus(runId);
       await loadHistory();
     });
@@ -401,7 +472,14 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
     });
   }
 
-  const progress = securityAuditProgress(status?.run?.phases ?? []);
+  // Paquete 6: desglose por estado real y motivos (primario + adicionales).
+  // `incompleteReasons` vive en la RAÍZ del payload (forma real de la API);
+  // `run.incompleteReasons` solo por compatibilidad con payloads antiguos.
+  const phaseBreakdown = securityAuditPhaseBreakdown(status?.phaseStates ?? []);
+  const reasons = splitSecurityAuditIncompleteReasons(
+    status?.run?.incompleteReason,
+    securityAuditStatusIncompleteReasons(status),
+  );
   const confirmedFindings = status?.findings.items.filter((item) => item.verdict === "confirmed") ?? [];
   const canStart = Boolean(projectPath) && teamSaved && !preflightConsumed && !busy && !activeExecution && !awaitingExecutionId;
   const scopeNeedsPaths = securityAuditScopeRequiresPaths(scopeDraft.kind);
@@ -421,7 +499,9 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
 
       {error && <div className="notice error-notice"><strong>Error</strong><span>{error}</span></div>}
       {notice && <div className="notice success-notice"><strong>Estado</strong><span>{notice}</span></div>}
-      {awaitingExecutionId && !status && <div className="security-ops-hint" role="status">Preparando motores y registro de auditoría. La información aparecerá automáticamente.</div>}
+      {!status && (preparingAudit || Boolean(awaitingExecutionId)) && (
+        <div className="security-ops-hint" role="status">Preparando auditoría… la información aparecerá automáticamente.</div>
+      )}
 
       <div className="security-ops-grid">
         <section className="security-ops-panel">
@@ -431,7 +511,13 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
             onChange={(event) => setIntentText(event.target.value)}
             placeholder="Escribe la petición de seguridad (ej.: ¿qué es una vulnerabilidad de inyección?)"
             rows={3}
+            maxLength={SECURITY_AUDIT_INSTRUCTIONS_MAX_CHARS}
           />
+          {intentText.length >= 7000 && (
+            <div className="security-ops-instruction-limit" role="status">
+              {intentText.length}/{SECURITY_AUDIT_INSTRUCTIONS_MAX_CHARS} caracteres
+            </div>
+          )}
           <div className="security-ops-actions">
             <button type="button" onClick={() => void classifyIntent()} disabled={busy || !intentText.trim()}>
               Clasificar
@@ -625,29 +711,94 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
         )}
       </section>
 
+      {/* Paquete 8: durante la preparación no hay estado que mostrar, pero la
+          cancelación sigue estando disponible (la API la admite con 202). */}
+      {!status && preparingAudit && selectedRunId && (
+        <section className="security-ops-panel security-ops-status">
+          <h3>4 · Estado de la corrida <code>{selectedRunId.slice(0, 12)}</code></h3>
+          <div className="security-ops-actions">
+            <button type="button" onClick={() => void cancelAudit(selectedRunId)} disabled={busy}>
+              Cancelar
+            </button>
+          </div>
+        </section>
+      )}
+
       {status && (
         <section className="security-ops-panel security-ops-status">
           <h3>4 · Estado de la corrida <code>{status.run.runId.slice(0, 12)}</code></h3>
 
           <div className="security-ops-phases">
             {SECURITY_AUDIT_PHASES.map((item) => {
-              const state = status.run.phases[item.phase - 1] ?? "pending";
+              // Paquete 6: la tarjeta refleja el estado REAL de la fase
+              // (Completada/Parcial/Bloqueada/No aplicable/Pendiente) con el
+              // motivo como texto secundario; sin `phaseStates` (API antigua)
+              // se conserva el comportamiento previo (checkpoint).
+              const phaseState = status.phaseStates?.find((entry) => entry.phase === item.phase) ?? null;
+              const state = phaseState?.state ?? status.run.phases[item.phase - 1] ?? "pending";
               return (
-                <div key={item.phase} className={`security-ops-phase state-${state}`}>
+                <div
+                  key={item.phase}
+                  className={`security-ops-phase state-${state}`}
+                  title={phaseState?.reason ?? undefined}
+                >
                   <span className="security-ops-phase-number">{item.phase}</span>
                   <span className="security-ops-phase-label">{item.label}</span>
                   <span className="security-ops-phase-state">{securityAuditPhaseLabel(state)}</span>
+                  {phaseState?.reason && (
+                    <span className="security-ops-phase-reason">{phaseState.reason}</span>
+                  )}
                 </div>
               );
             })}
           </div>
           <div className="security-ops-progress">
-            Progreso {progress.completed}/{progress.total} fases ({progress.percent}%)
+            {/* Paquete 6: un run no complete nunca muestra "100%" como progreso
+                efectivo; "recorridas" (checkpoints) no equivale a "completadas". */}
+            {securityAuditProgressSummary(
+              status.run.runStatus,
+              status.run.phases,
+              status.phaseStates && status.phaseStates.length > 0
+                ? phaseBreakdown.completed
+                : undefined,
+            )}
             {" · "}Estado: {securityAuditRunStatusLabel(status.run.runStatus)}
             {status.run.incompleteReason && (
               <> · {securityAuditIncompleteReasonLabel(status.run.incompleteReason)}</>
             )}
           </div>
+          {status.phaseStates && status.phaseStates.length > 0 && (
+            <div className="security-ops-phase-breakdown">
+              Fases: {phaseBreakdown.completed} completada(s) · {phaseBreakdown.partial} parcial(es) ·{" "}
+              {phaseBreakdown.blocked} bloqueada(s) · {phaseBreakdown.notApplicable} no aplicable(s) ·{" "}
+              {phaseBreakdown.pending} pendiente(s)
+            </div>
+          )}
+          {status.run.runStatus === "incomplete" && (reasons.primary || reasons.additional.length > 0) && (
+            <div className="security-ops-incomplete-reasons">
+              <div>
+                Motivo principal: {reasons.primary
+                  ? securityAuditIncompleteReasonLabel(reasons.primary)
+                  : "sin motivo registrado"}
+              </div>
+              {reasons.additional.length > 0 && (
+                <ul>
+                  {reasons.additional.map((reason) => (
+                    <li key={reason}>
+                      Motivo adicional: {securityAuditIncompleteReasonLabel(reason)}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
+
+          {(status.instructions ?? "").trim() && (
+            <div className="security-ops-instructions">
+              <h4>Instrucción de la auditoría</h4>
+              <p>{status.instructions}</p>
+            </div>
+          )}
 
           <div className="security-ops-columns">
             <div>
@@ -759,6 +910,7 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
           )}
 
           <h4>Invocaciones</h4>
+          <p className="security-ops-hint">Tokens locales por sesión (no facturación ni cuota restante). — significa dato no disponible; los contadores parciales se identifican.</p>
           {status.invocations.length === 0 ? (
             <div className="security-ops-hint">Sin invocaciones registradas todavía.</div>
           ) : (
@@ -767,7 +919,7 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
                 <thead>
                   <tr>
                     <th>Fase</th><th>Rol</th><th>Agente</th><th>Motor</th><th>Modelo</th>
-                    <th>Sesión</th><th>Estado</th><th>Cross-engine</th><th>Inicio</th>
+                    <th>Sesión</th><th>Estado</th><th>Cross-engine</th><th>Tokens</th><th>Inicio</th><th>Duración</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -793,7 +945,15 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
                             ? "planificada (sin evidencia)"
                             : "no aplica"}
                       </td>
+                      <td>{invocation.usage ? <>
+                        <small>{invocation.usage.partial ? "Parcial · " : ""}{invocation.usage.source === "opencode-session" ? "OpenCode" : "Claude SDK"}</small>
+                        <div>Entrada: {invocation.usage.input?.toLocaleString("es-CO") ?? "—"}</div>
+                        <div>Salida: {invocation.usage.output?.toLocaleString("es-CO") ?? "—"}</div>
+                        <div>Razonamiento: {invocation.usage.reasoning?.toLocaleString("es-CO") ?? "—"}</div>
+                        <div>Caché lectura/escritura: {invocation.usage.cacheRead?.toLocaleString("es-CO") ?? "—"} / {invocation.usage.cacheWrite?.toLocaleString("es-CO") ?? "—"}</div>
+                      </> : "—"}</td>
                       <td>{formatSecurityAuditTime(invocation.startedAt)}</td>
+                      <td>{invocation.finishedAt ? Math.max(0, Math.round((Date.parse(invocation.finishedAt)-Date.parse(invocation.startedAt))/1000))+" s" : "—"}</td>
                     </tr>
                   ))}
                 </tbody>

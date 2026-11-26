@@ -108,6 +108,11 @@ export function sourceOnlyOpenCodeConfig(config: Record<string, unknown>, projec
       'const p=require("node:path"),u=require("node:url");const e=p.resolve(process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT);process.chdir(process.argv[1]);import(u.pathToFileURL(e).href).catch(err=>{console.error("[factory-filesystem] "+String(err.message));process.exit(1)});',
       projectPath],
     enabled: true,
+    // Source-only sessions deny `execute`, so with codemode:true these MCP
+    // tools would only be reachable through execute and stay unreachable.
+    // With codemode:false the server exposes its 4 read-only tools directly,
+    // which the source-only allowlist already authorizes by name.
+    codemode: false,
   } } } };
 }
 

@@ -29,6 +29,9 @@ import {
   SECURITY_AUDIT_INCOMPLETE_REASONS,
   type SecurityAuditIncompleteReason,
 } from "./security-audit-contracts.js";
+// Paquete 2: el tipo del cluster de consolidación y su validador campo a
+// campo viven en el módulo puro (sin DB); aquí solo se hidratan.
+import { parseConsolidationCluster, type ConsolidationCluster } from "./security-audit-consolidation.js";
 
 export type SecurityAuditPhaseState = "pending" | "in_progress" | "complete" | "skipped";
 export type SecurityAuditRunStatus = "in_progress" | "complete" | "incomplete";
@@ -345,6 +348,12 @@ export function initializeSecurityAuditSchema(db: DatabaseSync): void {
     );
     CREATE INDEX IF NOT EXISTS idx_security_audit_invocations_run
       ON security_audit_invocations(run_id, phase, verification_kind);
+
+    CREATE TABLE IF NOT EXISTS security_audit_usage (
+      instance_id TEXT PRIMARY KEY REFERENCES security_audit_invocations(instance_id) ON DELETE CASCADE,
+      session_id TEXT NOT NULL,
+      usage_json TEXT NOT NULL
+    );
 
     CREATE TABLE IF NOT EXISTS security_audit_findings (
       run_id TEXT NOT NULL REFERENCES security_audit_runs(run_id) ON DELETE CASCADE,
@@ -1832,6 +1841,15 @@ export interface SecurityAuditWorkStateSnapshot {
   ledgerValidator: SecurityAuditValidatorState;
   findingsValidator: SecurityAuditValidatorState;
   /**
+   * Paquete 2: clusters de consolidación de candidatos duplicados aplicados
+   * (fingerprints alternativos, unitIds y razón). Historial de la fase 3 para
+   * reanudación y API; la procedencia de cada alias fingerprint vive en
+   * `discovererByFingerprint`.
+   */
+  consolidations: ConsolidationCluster[];
+  /** Paquete 2: unitId alias → unitId canónica consolidada. */
+  consolidatedUnitIds: Record<string, string>;
+  /**
    * Inicio monotónico del run (ISO); "" cuando el snapshot no lo registra.
    * Juntos con `deadlineAt` forman el presupuesto de duración persistido: la
    * reanudación conserva el deadline original y jamás lo resetea.
@@ -1935,6 +1953,14 @@ function sanitizeWorkState(value: unknown): SecurityAuditWorkStateSnapshot {
     wavesStarted: nonNegative(source.wavesStarted),
     ledgerValidator: validatorState(source.ledgerValidator),
     findingsValidator: validatorState(source.findingsValidator),
+    // Paquete 2: solo clusters íntegros (validados campo a campo); una entrada
+    // corrupta se descarta sin romper el resto del snapshot.
+    consolidations: Array.isArray(source.consolidations)
+      ? source.consolidations
+        .map(parseConsolidationCluster)
+        .filter((cluster): cluster is ConsolidationCluster => cluster !== null)
+      : [],
+    consolidatedUnitIds: sanitizedWorkStringMap(source.consolidatedUnitIds),
     startedAt: isoTimestamp(source.startedAt),
     deadlineAt: isoTimestamp(source.deadlineAt),
     savedAt: typeof source.savedAt === "string" ? source.savedAt : "",

@@ -150,6 +150,25 @@ test("an incomplete run keeps its official reason and lists unvalidated fingerpr
   assert.equal(bundle.stats.partialPass, true);
 });
 
+test("Paquete 6: the report keeps the primary reason and lists every additional one", () => {
+  const bundle = buildSecurityAuditReports(
+    input({
+      runStatus: "incomplete",
+      incompleteReason: "validation_budget_exhausted",
+      incompleteReasons: ["validation_budget_exhausted", "orchestrator_failed"],
+      pendingFingerprints: ["fp-pendiente"],
+    }),
+  );
+  assert.match(bundle.report, /motivo oficial principal `validation_budget_exhausted`/);
+  assert.match(bundle.report, /motivos oficiales adicionales: `orchestrator_failed`/);
+  // Sin lista completa, el primario no gana textos de motivos adicionales.
+  const single = buildSecurityAuditReports(
+    input({ runStatus: "incomplete", incompleteReason: "deadline_exceeded" }),
+  );
+  assert.match(single.report, /motivo oficial principal `deadline_exceeded`/);
+  assert.equal(single.report.includes("motivos oficiales adicionales"), false);
+});
+
 test("hardening notes never become findings and rejected records stay out of the table", () => {
   const bundle = buildSecurityAuditReports(
     input({ hardeningNotes: ["Aplicar cabeceras estrictas de seguridad en despliegue"] }),

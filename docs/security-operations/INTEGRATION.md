@@ -176,3 +176,43 @@ repositorio de la fábrica, con datos ficticios, dependencias externas cero,
 sin servidor HTTP y tres pruebas de base. Se creó un commit local inicial
 solo en ese laboratorio. Queda pendiente la auditoría con llamadas reales
 a los modelos, la remediación y su revalidación con evidencia real.
+
+
+## 8. Estabilización del orquestador y consumo — 26 de noviembre de 2026
+
+La consolidación automática exige una hipótesis original completa idéntica
+(salvo fingerprint), ubicación concreta autorizada, frontera, alcance y clase.
+Las coincidencias de slugs, directorios o categorías sin registros originales
+no se fusionan. Las aliases conservan su estado candidato hasta que la
+validación final de la canónica y el validador oficial sean satisfactorios;
+un rechazo sin registro válido, una validación fallida o un registro canónico
+needs_validation no acreditan la cobertura de la alias.
+
+La reserva de caza de cada ola se materializa inmediatamente antes de cada
+invocación. Se procesan lotes acotados por la concurrencia y el saldo disponible,
+se incorpora su evidencia y se protege la reserva de validación antes del
+siguiente lote. Quick conserva una sola ola lógica y el crítico obligatorio;
+no se amplía el presupuesto. El caso de regresión de nueve invocaciones
+con tres candidatos nuevos reserva las tres validaciones y conserva como
+pendiente la cobertura que no pudo cazarse.
+
+Los contadores de OpenCode se obtienen de la base local en modo de solo lectura,
+por sesión de invocación, proveedor/modelo y ventana temporal. Los resultados
+oficiales del SDK Claude pueden persistir métricas numéricas asociadas a la
+instancia y sesión exactas. La ausencia de datos se representa como null,
+no como cero. Las métricas no constituyen facturación ni cuota restante,
+no exponen contenido de mensajes y no condicionan el resultado de auditoría.
+
+Regresión: 539 pruebas API, 19 Node.js, 25 Python, validadores e integridad
+oficiales, compilación y navegador real. Se conservan 50 ejecuciones y dos
+runs de auditoría históricos, así como los siete modelos asignados.
+
+P1: prueba aislada real de OpenCode 2.1.4 con una sesión GLM-5.3 Flash y un
+único prompt sobre el laboratorio. Registro de agentes, conexión exclusiva
+factory_filesystem, lectura stdio de fuente y rechazo de traversal: PASS.
+Acceso directo de la herramienta por el modelo: FAIL (respuesta BLOQUEADO,
+sin llamada de herramienta). codemode:false en la configuración temporal
+no basta para certificar su exposición efectiva. No se habilita execute ni
+se cambian las políticas de permisos para simular un resultado positivo.
+Se requiere resolver y verificar esta incompatibilidad antes de autorizar
+otra auditoría real. No hubo nueva auditoría ni remediación en esta revisión.

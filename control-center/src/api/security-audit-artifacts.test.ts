@@ -25,6 +25,7 @@ import {
   readSecurityAuditArtifact,
   resolveSecurityAuditRunDirectory,
   securityAuditsRoot,
+  updateSecurityAuditRunMetadataStatus,
   seedSecurityAuditCoverageLedger,
   updateSecurityAuditCoverageLedger,
   writeSecurityAuditArchitecture,
@@ -258,6 +259,36 @@ test("run metadata is source-only: the sandboxed policy is always rejected (F08)
   const republished = JSON.parse(readSecurityAuditArtifact(layout, "run-metadata.json"));
   assert.equal(republished.execution_policy, "source-only");
   assert.equal("sandboxAuthorization" in republished, false);
+});
+
+test("Paquete 7: run-metadata.json persiste la instrucción efectiva del operador", () => {
+  const layout = createSecurityAuditRunDirectory("run-metadata-instruccion");
+
+  writeSecurityAuditRunMetadata(layout, metadata({
+    instructions: "Prioriza la superficie de autenticación y revisa los tokens de sesión.",
+  }));
+  const stored = JSON.parse(readSecurityAuditArtifact(layout, "run-metadata.json")) as Record<string, unknown>;
+  assert.equal(
+    stored.instructions,
+    "Prioriza la superficie de autenticación y revisa los tokens de sesión.",
+    "la instrucción efectiva queda publicada en el campo propio del run",
+  );
+  assert.equal(stored.execution_policy, "source-only");
+
+  // Sin instrucción registrada: cadena vacía honesta (nunca texto inventado).
+  const emptyLayout = createSecurityAuditRunDirectory("run-metadata-sin-instruccion");
+  writeSecurityAuditRunMetadata(emptyLayout, metadata());
+  const empty = JSON.parse(readSecurityAuditArtifact(emptyLayout, "run-metadata.json")) as Record<string, unknown>;
+  assert.equal(empty.instructions, "");
+
+  // La actualización de estado terminal conserva la instrucción persistida.
+  updateSecurityAuditRunMetadataStatus(layout, { runStatus: "incomplete", incompleteReason: "deadline_exceeded" });
+  const after = JSON.parse(readSecurityAuditArtifact(layout, "run-metadata.json")) as Record<string, unknown>;
+  assert.equal(
+    after.instructions,
+    "Prioriza la superficie de autenticación y revisa los tokens de sesión.",
+    "el cierre no borra la instrucción del run",
+  );
 });
 
 test("ledger and findings are validated by the official validators on every write", () => {

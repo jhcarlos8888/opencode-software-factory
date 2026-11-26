@@ -11,6 +11,7 @@ import {
   resumeSecurityAuditBudget,
   securityAuditBudgetEvidence,
   securityAuditBudgetOverLimit,
+  setSecurityAuditValidationReserve,
   spendSecurityAuditCritic,
   spendSecurityAuditRecon,
   spendSecurityAuditVerifier,
@@ -390,4 +391,103 @@ test("verification strategy separates phases 3 and 5 except for quick", () => {
     assert.equal(strategy.finalRecordVerification, "fresh-agent-per-candidate", profile);
     assert.equal(strategy.candidateValidation, "fresh-agent-per-candidate", profile);
   }
+});
+
+// Paquete 4: reserva de validación adaptativa (protege la verificación
+// independiente de los candidatos ya conocidos; los hunters solo consumen el
+// excedente real tras ella).
+test("the adaptive validation reserve grows to the known candidates and never shrinks", () => {
+  const ledger = ledgerFor("quick", 12);
+  assert.deepEqual(ledger.reserved, { recon: 4, critics: 1, validation: 1 });
+
+  // Crece hasta los verificadores pedidos (cabe: 0+4+1+6 = 11 <= 12).
+  const grown = setSecurityAuditValidationReserve(ledger, 6);
+  assert.equal(grown.requested, 6);
+  assert.equal(grown.granted, 6);
+  assert.equal(grown.shortfall, 0);
+  assert.deepEqual(grown.ledger.reserved, { recon: 4, critics: 1, validation: 6 });
+  assert.equal(securityAuditBudgetOverLimit(grown.ledger), false);
+  // Inmutable: el ledger original no muta y ningún otro campo se toca.
+  assert.deepEqual(ledger.reserved, { recon: 4, critics: 1, validation: 1 });
+  assert.deepEqual(grown.ledger.spent, ledger.spent);
+  assert.equal(grown.ledger.pendingUnits, ledger.pendingUnits);
+  assert.equal(grown.ledger.wavesStarted, ledger.wavesStarted);
+  assert.deepEqual(grown.ledger.deferredUnits, ledger.deferredUnits);
+  assert.deepEqual(grown.ledger.unvalidatedFingerprints, ledger.unvalidatedFingerprints);
+
+  // Nunca decrece: pedir menos de lo ya reservado no reduce la reserva.
+  const notShrunk = setSecurityAuditValidationReserve(grown.ledger, 1);
+  assert.equal(notShrunk.requested, 1);
+  assert.equal(notShrunk.granted, 6);
+  assert.equal(notShrunk.shortfall, 0);
+  assert.deepEqual(notShrunk.ledger.reserved, { recon: 4, critics: 1, validation: 6 });
+  // Y crecer de nuevo sigue siendo posible.
+  const grownAgain = setSecurityAuditValidationReserve(notShrunk.ledger, 7);
+  assert.equal(grownAgain.granted, 7);
+  assert.equal(grownAgain.shortfall, 0);
+});
+
+test("the adaptive validation reserve never pushes the ledger over maxInvocations", () => {
+  // quick 8: tras gastar los 4 recon el disponible es 8 - 4 - 0 - 1 = 3.
+  const ledger = ledgerFor("quick", 8);
+  const afterRecon = spendSecurityAuditRecon(ledger, 4);
+  assert.equal(afterRecon.ok, true);
+  if (!afterRecon.ok) throw new Error("unreachable");
+
+  const capped = setSecurityAuditValidationReserve(afterRecon.ledger, 5);
+  assert.equal(capped.requested, 5);
+  assert.equal(capped.granted, 3, "granted queda acotado por el techo");
+  assert.equal(capped.shortfall, 2, "shortfall = minVerifiers - granted");
+  assert.deepEqual(capped.ledger.reserved, { recon: 0, critics: 1, validation: 3 });
+  // Invariante del techo: spent(4) + recon(0) + critics(1) + granted(3) = 8.
+  assert.equal(securityAuditBudgetOverLimit(capped.ledger), false);
+  assert.equal(freeSecurityAuditUnits(capped.ledger), 0);
+
+  // El planificador de olas consume SOLO el excedente real: sin excedente no
+  // lanza hunters ni toca la reserva de validación.
+  const wave = planSecurityAuditHuntWave(capped.ledger, ["u1", "u2"]);
+  assert.equal(wave.ok, true);
+  if (wave.ok) {
+    assert.equal(wave.launched, 0);
+    assert.equal(wave.deferred.length, 2);
+    assert.deepEqual(wave.ledger.reserved, { recon: 0, critics: 1, validation: 3 });
+    assert.equal(securityAuditBudgetOverLimit(wave.ledger), false);
+  }
+});
+
+test("without maxInvocations the validation reserve concedes exactly what is asked", () => {
+  const unlimited = createSecurityAuditBudget({
+    profile: "standard",
+    maxInvocations: null,
+    maxConcurrency: 2,
+    maxDurationMs: 1000,
+  });
+  assert.equal(unlimited.ok, true);
+  if (!unlimited.ok) throw new Error("unreachable");
+  assert.deepEqual(unlimited.ledger.reserved, { recon: 4, critics: 2, validation: 1 });
+
+  const grown = setSecurityAuditValidationReserve(unlimited.ledger, 7);
+  assert.equal(grown.requested, 7);
+  assert.equal(grown.granted, 7, "reserva documental: concede lo pedido");
+  assert.equal(grown.shortfall, 0);
+  assert.deepEqual(grown.ledger.reserved, { recon: 4, critics: 2, validation: 7 });
+  assert.equal(freeSecurityAuditUnits(grown.ledger), Number.POSITIVE_INFINITY);
+  // Y nunca decrece tampoco sin tope.
+  const notShrunk = setSecurityAuditValidationReserve(grown.ledger, 2);
+  assert.equal(notShrunk.granted, 7);
+  assert.deepEqual(notShrunk.ledger.reserved, { recon: 4, critics: 2, validation: 7 });
+});
+
+test("an invalid minVerifiers is rejected with the budget config error", () => {
+  const ledger = ledgerFor("quick", 12);
+  assert.throws(() => setSecurityAuditValidationReserve(ledger, -1), SecurityAuditBudgetConfigError);
+  assert.throws(() => setSecurityAuditValidationReserve(ledger, 1.5), SecurityAuditBudgetConfigError);
+  assert.throws(
+    () => setSecurityAuditValidationReserve(ledger, "3" as unknown as number),
+    SecurityAuditBudgetConfigError,
+  );
+  // El límite inferior válido (0) se acepta y no reduce la reserva.
+  const zero = setSecurityAuditValidationReserve(ledger, 0);
+  assert.equal(zero.granted, 1);
+  assert.equal(zero.shortfall, 0);
 });

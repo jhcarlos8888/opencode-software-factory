@@ -9,7 +9,13 @@ import Fastify from "fastify";
 import { DatabaseSync } from "node:sqlite";
 import {
   registerSecurityAuditRoutes,
+  SECURITY_AUDIT_PENDING_CANCEL_TTL_MS,
+  SECURITY_AUDIT_PREPARING_TTL_MS,
   SECURITY_AUDIT_REPORT_ARTIFACTS,
+  isSecurityAuditPendingCancel,
+  isSecurityAuditPreparing,
+  markSecurityAuditPendingCancel,
+  markSecurityAuditPreparing,
   type SecurityAuditApiDeps,
 } from "./security-audit-api.js";
 import { buildSecurityAuditRemediationPayload } from "../web/security-operations.js";
@@ -26,10 +32,13 @@ import {
   recordSecurityAuditCheckpoint,
   recordSecurityAuditCrossEngineEvidence,
   recordSecurityAuditInvocation,
+  saveSecurityAuditWorkState,
   setSecurityAuditPhase,
   setSecurityAuditValidators,
+  updateSecurityAuditRunStatus,
   upsertSecurityAuditFinding,
   upsertSecurityAuditUnits,
+  type SecurityAuditWorkStateSnapshot,
 } from "./security-audit-persistence.js";
 import {
   createSecurityAuditRunDirectory,
@@ -373,6 +382,133 @@ test("starting an audit enforces favorites and preflight like regular executions
   assert.equal(h.calls.filter((call) => call.type === "start").length, 0, "ninguna ejecución sin preconsulta válida");
 });
 
+test("Paquete 7: start accepts trimmed instructions up to 8000 and rejects longer ones", async () => {
+  const h = harness();
+  const base = {
+    path: "/srv/example",
+    profile: "quick",
+    scope: { kind: "project" },
+    budget: { maxInvocations: 5, maxConcurrency: 1, maxDurationMs: 600000 },
+    preflightDepth: "quick",
+  };
+
+  const accepted = await h.app.inject({
+    method: "POST", url: "/api/security-audit/runs",
+    payload: { ...base, instructions: "  Prioriza la superficie de autenticaci\u00f3n.  " },
+  });
+  assert.equal(accepted.statusCode, 202, accepted.body);
+  const startCalls = () => h.calls.filter((call) => call.type === "start");
+  assert.equal(startCalls().length, 1);
+  assert.equal(startCalls()[0]?.instructions, "Prioriza la superficie de autenticaci\u00f3n.",
+    "las instrucciones viajan recortadas a startExecution");
+
+  // Exactamente 8000: aceptado.
+  h.setPreflight({ path: "/srv/example", decision: "accepted", teamSaved: true, consumed: false, preconsultedAt: "", analysis: {} });
+  const limit = await h.app.inject({
+    method: "POST", url: "/api/security-audit/runs",
+    payload: { ...base, instructions: "a".repeat(8000) },
+  });
+  assert.equal(limit.statusCode, 202, limit.body);
+  assert.equal(startCalls().length, 2);
+  assert.equal(startCalls()[1]?.instructions?.length, 8000);
+
+  // 8001: rechazo 400 y NINGUNA ejecuci\u00f3n nueva.
+  h.setPreflight({ path: "/srv/example", decision: "accepted", teamSaved: true, consumed: false, preconsultedAt: "", analysis: {} });
+  const rejected = await h.app.inject({
+    method: "POST", url: "/api/security-audit/runs",
+    payload: { ...base, instructions: "a".repeat(8001) },
+  });
+  assert.equal(rejected.statusCode, 400);
+  assert.match((rejected.json() as { error: string }).error, /8000/);
+  assert.equal(startCalls().length, 2, "el rechazo no inicia ejecuci\u00f3n");
+
+  // Tipo no string: rechazo 400.
+  h.setPreflight({ path: "/srv/example", decision: "accepted", teamSaved: true, consumed: false, preconsultedAt: "", analysis: {} });
+  const wrongType = await h.app.inject({
+    method: "POST", url: "/api/security-audit/runs",
+    payload: { ...base, instructions: 12345 },
+  });
+  assert.equal(wrongType.statusCode, 400);
+  assert.equal(startCalls().length, 2);
+
+  // Sin instrucciones: el texto por defecto oficial (nunca vac\u00edo).
+  h.setPreflight({ path: "/srv/example", decision: "accepted", teamSaved: true, consumed: false, preconsultedAt: "", analysis: {} });
+  const defaults = await h.app.inject({ method: "POST", url: "/api/security-audit/runs", payload: base });
+  assert.equal(defaults.statusCode, 202, defaults.body);
+  assert.equal(startCalls().length, 3);
+  assert.equal(
+    startCalls()[2]?.instructions,
+    "Auditor\u00eda de seguridad completa solicitada desde Security Operations.",
+  );
+});
+
+test("Paquete 7: status exposes the effective instruction recorded in the origin execution run", async () => {
+  const h = harness();
+  seedRun(h.db, "api-instrucciones");
+  h.db.prepare(
+    `INSERT INTO execution_runs (id, project_path, instructions, status, started_at, updated_at, configuration_snapshot_json)
+     VALUES (?, '/srv/example', 'Instrucci\u00f3n original del operador.', 'running', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ?)`,
+  ).run("exec-orig-1", JSON.stringify({ securityAudit: { resumeRunId: "api-instrucciones" } }));
+  h.setExecutionFor("exec-orig-1", {
+    run: { id: "exec-orig-1", status: "running", instructions: "Instrucci\u00f3n original del operador." },
+    agents: [], events: [], decisions: [], decisionHistory: [],
+  });
+
+  const status = await h.app.inject({ method: "GET", url: "/api/security-audit/runs/api-instrucciones" });
+  assert.equal(status.statusCode, 200);
+  assert.equal(
+    (status.json() as Record<string, unknown>).instructions,
+    "Instrucci\u00f3n original del operador.",
+  );
+
+  // Sin ejecuci\u00f3n asociada: cadena vac\u00eda (nunca texto inventado).
+  seedRun(h.db, "api-sin-exec");
+  const empty = await h.app.inject({ method: "GET", url: "/api/security-audit/runs/api-sin-exec" });
+  assert.equal(empty.statusCode, 200);
+  assert.equal((empty.json() as Record<string, unknown>).instructions, "");
+});
+
+test("Paquete 7: resume reuses the original instruction instead of a generated one", async () => {
+  const h = harness();
+  seedRun(h.db, "api-resume-instr");
+  h.db.prepare(
+    `INSERT INTO execution_runs (id, project_path, instructions, status, started_at, updated_at, configuration_snapshot_json)
+     VALUES (?, '/srv/example', 'Instrucci\u00f3n original del operador.', 'failed', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z', ?)`,
+  ).run("exec-orig-2", JSON.stringify({ securityAudit: { resumeRunId: "api-resume-instr" } }));
+  h.setExecutionFor("exec-orig-2", {
+    run: { id: "exec-orig-2", status: "failed", instructions: "Instrucci\u00f3n original del operador." },
+    agents: [], events: [], decisions: [], decisionHistory: [],
+  });
+
+  const resumed = await h.app.inject({
+    method: "POST", url: "/api/security-audit/runs/api-resume-instr/resume", payload: {},
+  });
+  assert.equal(resumed.statusCode, 202, resumed.body);
+  const call = h.calls.find((item) => item.type === "start");
+  assert.equal(
+    call?.instructions,
+    "Instrucci\u00f3n original del operador.",
+    "la reanudaci\u00f3n reutiliza la instrucci\u00f3n original",
+  );
+  assert.equal(
+    (call?.instructions ?? "").includes("Reanudaci\u00f3n"),
+    false,
+    "nunca se sustituye por el texto de reanudaci\u00f3n",
+  );
+
+  // Sin ejecuci\u00f3n recuperable: el default oficial (nunca una instrucci\u00f3n inventada).
+  seedRun(h.db, "api-resume-default");
+  const fallback = await h.app.inject({
+    method: "POST", url: "/api/security-audit/runs/api-resume-default/resume", payload: {},
+  });
+  assert.equal(fallback.statusCode, 202, fallback.body);
+  const fallbackCall = h.calls.filter((item) => item.type === "start")[1];
+  assert.equal(
+    fallbackCall?.instructions,
+    "Auditor\u00eda de seguridad completa solicitada desde Security Operations.",
+  );
+});
+
 test("history and status expose real persistence data", async () => {
   const h = harness();
   seedRun(h.db, "api-run-a", { projectPath: "/srv/example" });
@@ -480,6 +616,75 @@ test("history and status expose real persistence data", async () => {
   assert.equal(missing.statusCode, 404);
   const invalid = await h.app.inject({ method: "GET", url: "/api/security-audit/runs/ruta%2Fmala" });
   assert.equal(invalid.statusCode, 400);
+});
+
+/** work_state mínimo válido para las pruebas de proyección de estado. */
+function emptyWorkState(): Omit<SecurityAuditWorkStateSnapshot, "savedAt"> {
+  return {
+    candidateById: {},
+    discovererByFingerprint: {},
+    phase3InstanceByFingerprint: {},
+    quickPhase3FinalVerified: {},
+    unitIdByFingerprint: {},
+    findings: {},
+    unvalidated: [],
+    deferred: [],
+    pendingReasons: [],
+    cursor: 0,
+    instanceCounter: 0,
+    wavesStarted: 0,
+    ledgerValidator: "pending",
+    findingsValidator: "pending",
+    consolidations: [],
+    consolidatedUnitIds: {},
+    startedAt: "2026-01-01T00:00:00.000Z",
+    deadlineAt: "",
+  };
+}
+
+// Defectos 3 y 4 de la revisión del Paquete 6.
+test("phase 2 is not partial because of candidates and the primary reason always leads", async () => {
+  const h = harness();
+  seedRun(h.db, "api-p6-defectos");
+  // Caza terminada: la única unidad pendiente es `candidate` (fase 3).
+  upsertSecurityAuditUnits(h.db, "api-p6-defectos", [
+    { unitId: "unit-cubierta", status: "covered", payload: {} },
+    { unitId: "unit-candidato", status: "candidate", payload: {} },
+  ]);
+  for (let phase = 1; phase <= 6; phase += 1) {
+    setSecurityAuditPhase(h.db, "api-p6-defectos", phase, "complete");
+    recordSecurityAuditCheckpoint(h.db, "api-p6-defectos", phase, "complete", {});
+  }
+  // Cierre incomplete con primario fijado EXPLÍCITAMENTE (deadline_exceeded,
+  // sin addReason equivalente en el work_state) + work_state con OTROS motivos.
+  updateSecurityAuditRunStatus(h.db, "api-p6-defectos", "incomplete", "deadline_exceeded");
+  saveSecurityAuditWorkState(h.db, "api-p6-defectos", {
+    ...emptyWorkState(),
+    pendingReasons: ["critic_budget_exhausted", "validation_budget_exhausted"],
+    unvalidated: ["fp-1"],
+  });
+
+  const status = await h.app.inject({ method: "GET", url: "/api/security-audit/runs/api-p6-defectos" });
+  assert.equal(status.statusCode, 200);
+  const body = status.json() as {
+    incompleteReasons: string[];
+    phaseStates: Array<{ phase: number; state: string; reason: string | null }>;
+  };
+  // Defecto 4: el primario SIEMPRE está presente y primero; el resto ordenado
+  // por la precedencia oficial.
+  assert.deepEqual(body.incompleteReasons, [
+    "deadline_exceeded",
+    "validation_budget_exhausted",
+    "critic_budget_exhausted",
+  ]);
+  // Defecto 3: con la caza terminada la fase 2 NO es parcial por candidatos;
+  // la fase 3 queda bloqueada por el presupuesto de validación agotado.
+  const phase2 = body.phaseStates.find((phase) => phase.phase === 2);
+  const phase3 = body.phaseStates.find((phase) => phase.phase === 3);
+  assert.equal(phase2?.state, "completed", phase2?.reason ?? "");
+  assert.equal(phase3?.state, "blocked", phase3?.reason ?? "");
+  // La forma pública de coverage.pendingUnits no cambia.
+  assert.ok(body.phaseStates.length === 6);
 });
 
 test("report downloads use an allowlist and confined paths", async () => {
@@ -1361,4 +1566,188 @@ test("N5: writerTeamCheck rejects when a planner-required agent is disabled", as
   assert.equal(response.statusCode, 409);
   assert.match((response.json() as { error: string }).error, /implementer/);
   assert.equal(h.calls.filter((call) => call.type === "start").length, 0, "sin ejecución sin el equipo completo");
+});
+
+test("Paquete 8: POST answers preparing and the first poll answers 202 until the row exists", async () => {
+  const h = harness();
+  const base = {
+    path: "/srv/example", profile: "quick", scope: { kind: "project" }, preflightDepth: "quick",
+  };
+
+  // (a) El POST mantiene el 202 y anuncia preparing.
+  const started = await h.app.inject({ method: "POST", url: "/api/security-audit/runs", payload: base });
+  assert.equal(started.statusCode, 202, started.body);
+  const startedBody = started.json() as Record<string, unknown>;
+  assert.equal(startedBody.preparing, true);
+  const runId = String(startedBody.runId);
+
+  // (b) GET inmediato: la fila de auditoría aún no existe (el orquestador la
+  // crea de forma asíncrona) → 202 preparing, NUNCA 404.
+  assert.equal(isSecurityAuditPreparing(runId), true);
+  const preparing = await h.app.inject({ method: "GET", url: `/api/security-audit/runs/${runId}` });
+  assert.equal(preparing.statusCode, 202, preparing.body);
+  const preparingBody = preparing.json() as Record<string, unknown>;
+  assert.equal(preparingBody.preparing, true);
+  assert.equal(preparingBody.runId, runId);
+  assert.equal(preparingBody.message, "La auditoría está en preparación.");
+
+  // (d) Un identificador realmente desconocido sigue siendo 404.
+  const unknown = await h.app.inject({ method: "GET", url: "/api/security-audit/runs/api-desconocido" });
+  assert.equal(unknown.statusCode, 404);
+
+  // (c) Cuando la fila ya existe en la BD → 200 normal y el id sale del registro.
+  seedRun(h.db, runId);
+  const ready = await h.app.inject({ method: "GET", url: `/api/security-audit/runs/${runId}` });
+  assert.equal(ready.statusCode, 200, ready.body);
+  const readyBody = ready.json() as { run: { runId: string } };
+  assert.equal(readyBody.run.runId, runId);
+  assert.equal(isSecurityAuditPreparing(runId), false, "el id sale del registro al existir la fila");
+});
+
+test("Paquete 8: an expired preparing entry no longer shields the identifier", async () => {
+  const h = harness();
+  const expired = "api-preparacion-caducada";
+  markSecurityAuditPreparing(expired, Date.now() - (SECURITY_AUDIT_PREPARING_TTL_MS + 1_000));
+  assert.equal(isSecurityAuditPreparing(expired), false, "la entrada caducó al superar el TTL");
+
+  // (e) TTL expirado sin fila en la BD → 404 (el puente no es eterno).
+  const response = await h.app.inject({ method: "GET", url: `/api/security-audit/runs/${expired}` });
+  assert.equal(response.statusCode, 404);
+  assert.match((response.json() as { error: string }).error, /no encontrada/);
+});
+
+test("Paquete 8: cancelling while preparing answers 202 without faking the cancellation", async () => {
+  const h = harness();
+  const base = {
+    path: "/srv/example", profile: "quick", scope: { kind: "project" }, preflightDepth: "quick",
+  };
+  const started = await h.app.inject({ method: "POST", url: "/api/security-audit/runs", payload: base });
+  assert.equal(started.statusCode, 202, started.body);
+  const runId = String((started.json() as Record<string, unknown>).runId);
+
+  // (f) El run aún no existe: se admite la petición (202) pero NO se finge una
+  // cancelación efectiva ni se toca el motor de ejecuciones.
+  const cancelled = await h.app.inject({
+    method: "POST", url: `/api/security-audit/runs/${runId}/cancel`, payload: {},
+  });
+  assert.equal(cancelled.statusCode, 202, cancelled.body);
+  const body = cancelled.json() as Record<string, unknown>;
+  assert.equal(body.preparing, true);
+  assert.equal(body.cancelRequested, true);
+  assert.equal(body.cancelled, undefined, "sin cancelación efectiva inventada");
+  assert.equal(h.calls.some((call) => call.type === "cancel"), false, "no hay ejecución que cancelar todavía");
+
+  // La cancelación normal de un run existente no se rompe.
+  seedRun(h.db, "api-cancel-existente");
+  h.db.prepare(
+    `INSERT INTO execution_runs (id, project_path, instructions, status, started_at, updated_at)
+     VALUES (?, '/srv/example', 'Auditoría', 'running', '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z')`,
+  ).run("api-cancel-existente");
+  h.setExecution({
+    run: { id: "api-cancel-existente", status: "running" },
+    agents: [], events: [], decisions: [], decisionHistory: [],
+  });
+  const normal = await h.app.inject({
+    method: "POST", url: "/api/security-audit/runs/api-cancel-existente/cancel", payload: {},
+  });
+  assert.equal(normal.statusCode, 200, normal.body);
+  assert.equal((normal.json() as Record<string, unknown>).cancelled, true);
+});
+
+test("Paquete 8b: cancel during preparation with a live execution cancels it for real", async () => {
+  const h = harness();
+  const base = {
+    path: "/srv/example", profile: "quick", scope: { kind: "project" }, preflightDepth: "quick",
+  };
+  const started = await h.app.inject({ method: "POST", url: "/api/security-audit/runs", payload: base });
+  assert.equal(started.statusCode, 202, started.body);
+  const runId = String((started.json() as Record<string, unknown>).runId);
+
+  // (a) La ejecución ya existe en el proceso (startExecution la creó): la
+  // cancelación es REAL por la misma vía que la normal.
+  h.setExecution({
+    run: { id: runId, status: "running" },
+    agents: [], events: [], decisions: [], decisionHistory: [],
+  });
+  const cancelled = await h.app.inject({
+    method: "POST", url: `/api/security-audit/runs/${runId}/cancel`, payload: {},
+  });
+  assert.equal(cancelled.statusCode, 202, cancelled.body);
+  const body = cancelled.json() as Record<string, unknown>;
+  assert.equal(body.cancelled, true, "cancelación real de la ejecución");
+  assert.equal(body.executionRunId, runId);
+  assert.equal(body.pendingCancelApplied, false);
+  assert.equal(h.calls.filter((call) => call.type === "cancel").length, 1);
+  // La fila aún no existe: la persistencia del flag queda pendiente.
+  assert.equal(isSecurityAuditCancelRequested(h.db, runId), false);
+  assert.equal(isSecurityAuditPendingCancel(runId), true);
+
+  // (c) Al aparecer la fila, el GET aplica la cancelación pendiente SIN
+  // volver a cancelar la ejecución (sin doble cancelación).
+  seedRun(h.db, runId);
+  const ready = await h.app.inject({ method: "GET", url: `/api/security-audit/runs/${runId}` });
+  assert.equal(ready.statusCode, 200, ready.body);
+  assert.equal(
+    (ready.json() as { run: { cancelRequested: boolean } }).run.cancelRequested,
+    true,
+    "cancelRequested del run persistido al existir la fila",
+  );
+  assert.equal(h.calls.filter((call) => call.type === "cancel").length, 1, "sin doble cancelación");
+  assert.equal(isSecurityAuditPendingCancel(runId), false, "entrada consumida una sola vez");
+});
+
+test("Paquete 8b: cancel without an execution stays pending and is applied once the row exists", async () => {
+  const h = harness();
+  const base = {
+    path: "/srv/example", profile: "quick", scope: { kind: "project" }, preflightDepth: "quick",
+  };
+  const started = await h.app.inject({ method: "POST", url: "/api/security-audit/runs", payload: base });
+  assert.equal(started.statusCode, 202, started.body);
+  const runId = String((started.json() as Record<string, unknown>).runId);
+  // Sin setExecution: todavía no hay ejecución consultable.
+
+  // (b) Sin ejecución: queda pendiente, sin cancelación fingida.
+  const cancelled = await h.app.inject({
+    method: "POST", url: `/api/security-audit/runs/${runId}/cancel`, payload: {},
+  });
+  assert.equal(cancelled.statusCode, 202, cancelled.body);
+  const body = cancelled.json() as Record<string, unknown>;
+  assert.equal(body.preparing, true);
+  assert.equal(body.cancelRequested, true);
+  assert.equal(body.pendingCancelApplied, false);
+  assert.equal(body.cancelled, undefined, "sin cancelación efectiva inventada");
+  assert.equal(h.calls.some((call) => call.type === "cancel"), false);
+  assert.equal(isSecurityAuditPendingCancel(runId), true);
+
+  // Mientras la fila no exista, el sondeo sigue 202 y la entrada NO se consume.
+  const preparing = await h.app.inject({ method: "GET", url: `/api/security-audit/runs/${runId}` });
+  assert.equal(preparing.statusCode, 202, preparing.body);
+  assert.equal(isSecurityAuditPendingCancel(runId), true, "la pendiente sobrevive al sondeo");
+
+  // Aparece la fila → el GET aplica la pendiente (cancelRequested real).
+  seedRun(h.db, runId);
+  const ready = await h.app.inject({ method: "GET", url: `/api/security-audit/runs/${runId}` });
+  assert.equal(ready.statusCode, 200, ready.body);
+  assert.equal((ready.json() as { run: { cancelRequested: boolean } }).run.cancelRequested, true);
+  assert.equal(isSecurityAuditCancelRequested(h.db, runId), true);
+  assert.equal(isSecurityAuditPendingCancel(runId), false, "entrada consumida al aplicar");
+  assert.equal(h.calls.some((call) => call.type === "cancel"), false, "no hay ejecución que cancelar");
+});
+
+test("Paquete 8b: an expired pending cancel is never applied", async () => {
+  const h = harness();
+  const expired = "api-cancel-pendiente-caducada";
+  markSecurityAuditPendingCancel(expired, Date.now() - (SECURITY_AUDIT_PENDING_CANCEL_TTL_MS + 1_000));
+  assert.equal(isSecurityAuditPendingCancel(expired), false, "la entrada caducó al superar el TTL");
+
+  // (d) TTL expirado: aunque la fila exista, no se aplica nada.
+  seedRun(h.db, expired);
+  const ready = await h.app.inject({ method: "GET", url: `/api/security-audit/runs/${expired}` });
+  assert.equal(ready.statusCode, 200, ready.body);
+  assert.equal(
+    (ready.json() as { run: { cancelRequested: boolean } }).run.cancelRequested,
+    false,
+    "una entrada caducada no aplica ninguna cancelación",
+  );
+  assert.equal(isSecurityAuditCancelRequested(h.db, expired), false);
 });

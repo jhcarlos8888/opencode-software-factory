@@ -47,6 +47,7 @@ import {
   type AgentAssignment, type EngineId, type ExecutionAgentRecord, type ExecutionDecisionRecord,
   type ExecutionSnapshot, type ExecutionStatus
 } from "./database.js";
+import { storeClaudeAuditUsage } from "./security-audit-usage.js";
 import { finishSecurityAuditInvocation, listSecurityAuditRuns, recordSecurityAuditInvocation, setSecurityAuditInvocationSession } from "./security-audit-persistence.js";
 import { classifySecurityAuditProviderError } from "./security-audit-contracts.js";
 import {
@@ -1403,6 +1404,10 @@ async function runClaudeAgent(
           }
         }
       } else if (record.type === "result") {
+        if (state.securityAuditRunId && sessionId) {
+          try { storeClaudeAuditUsage(getFactoryDatabase(), agent.id, sessionId, record); }
+          catch { /* Optional SDK usage never changes the invocation outcome. */ }
+        }
         const canonicalResult = extractClaudeFinalText(record);
         if (canonicalResult) {
           finalText = canonicalResult;
@@ -1810,6 +1815,9 @@ async function executeRun(
         sourceRef: null,
         sourceDirty: false,
         roster: securityAudit.roster,
+        // Paquete 7: la instrucción efectiva del run viaja al orquestador para
+        // persistirse en run-metadata.json y delimitarse en los prompts.
+        instructions,
         executionPolicy: securityAudit.resolved.executionPolicy,
         sandboxAuthorization: securityAudit.resolved.sandboxAuthorization,
         resumeRunId: securityAudit.resolved.resumeRunId

@@ -132,6 +132,16 @@ function validatorsPerCandidate(profile: SecurityAuditProfile): number {
   return profile === "quick" ? 1 : 2;
 }
 
+/**
+ * Verificadores que consume CADA candidato según el perfil: `quick` 1 (fases
+ * 3 y 5 fusionadas) y `standard`/`deep` 2 (fase 3 + fase 5 con instancias
+ * frescas distintas). La reserva de validación adaptativa usa este factor para
+ * pedir el total real de verificadores por candidato.
+ */
+export function validatorsPerCandidateFor(profile: SecurityAuditProfile): number {
+  return validatorsPerCandidate(profile);
+}
+
 function requireInteger(value: unknown, field: string, minimum: number): number {
   if (typeof value !== "number" || !Number.isInteger(value) || value < minimum) {
     throw new SecurityAuditBudgetConfigError(`${field} debe ser un entero >= ${minimum}`);
@@ -205,6 +215,68 @@ export function createSecurityAuditBudget(
       deferredUnits: [],
       unvalidatedFingerprints: [],
     },
+  };
+}
+
+export interface ValidationReserveResult {
+  ledger: SecurityAuditBudgetLedger;
+  /** Verificadores pedidos (`minVerifiers`). */
+  requested: number;
+  /** Reserva de validación efectiva tras la operación. */
+  granted: number;
+  /** `minVerifiers - granted` acotado a >= 0. */
+  shortfall: number;
+}
+
+/**
+ * Reserva de validación adaptativa (Paquete 4). La reserva de validación
+ * protege la verificación independiente de los candidatos YA conocidos: el
+ * planificador de olas (`planSecurityAuditHuntWave`) consume solo el excedente
+ * real tras esta reserva, de modo que descubrir más candidatos nunca deja a la
+ * fase 3 sin presupuesto para validarlos.
+ *
+ * Reglas:
+ * - `minVerifiers` es un entero >= 0 (si no, `SecurityAuditBudgetConfigError`).
+ * - La reserva SOLO puede crecer: `granted >= ledger.reserved.validation`;
+ *   jamás la reduce (con el ledger válido `disponible >= validation` siempre,
+ *   así que `min(max(actual, minVerifiers), disponible)` nunca decrece).
+ * - Jamás provoca `spentTotal + reserved.recon + reserved.critics + granted >
+ *   maxInvocations`. Con `maxInvocations === null` se concede lo pedido
+ *   (reserva documental: sin tope no hay gate que defender).
+ * - `granted = min(max(actual, minVerifiers), disponible)`, con
+ *   `disponible = max - spentTotal - reserved.recon - reserved.critics`.
+ * - No modifica `spent`, `pendingUnits`, `wavesStarted` ni `deferredUnits`.
+ * - Devuelve un ledger nuevo (inmutable).
+ */
+export function setSecurityAuditValidationReserve(
+  ledger: SecurityAuditBudgetLedger,
+  minVerifiers: number,
+): ValidationReserveResult {
+  requireInteger(minVerifiers, "minVerifiers", 0);
+  const actual = ledger.reserved.validation;
+  const requested = Math.max(actual, minVerifiers);
+  let granted: number;
+  if (ledger.maxInvocations === null) {
+    // Sin tope la reserva es documental: se concede exactamente lo pedido.
+    granted = requested;
+  } else {
+    const disponible =
+      ledger.maxInvocations - spentTotal(ledger) - ledger.reserved.recon - ledger.reserved.critics;
+    granted = Math.min(requested, Math.max(actual, disponible));
+  }
+  const next: SecurityAuditBudgetLedger = {
+    ...ledger,
+    reserved: { ...ledger.reserved, validation: granted },
+  };
+  if (securityAuditBudgetOverLimit(next)) {
+    // Defensa en profundidad: jamás publicar un ledger fuera del tope.
+    throw new SecurityAuditBudgetConfigError("la reserva de validación excedería maxInvocations");
+  }
+  return {
+    ledger: next,
+    requested: minVerifiers,
+    granted,
+    shortfall: Math.max(0, minVerifiers - granted),
   };
 }
 
@@ -346,6 +418,11 @@ export function spendSecurityAuditRecon(
   amount = 1,
 ): SecurityAuditBudgetResult {
   return spendCategory(ledger, "recon", amount);
+}
+
+/** Spend one hunter immediately before launch, never from validation reserves. */
+export function spendSecurityAuditHunter(ledger: SecurityAuditBudgetLedger): SecurityAuditBudgetResult {
+  return spendCategory(ledger, "hunters", 1);
 }
 
 /** Gasta críticos (primero la reserva de críticos). */
