@@ -16,6 +16,7 @@ import {
   securityAuditProgress,
   securityAuditProgressSummary,
   securityAuditReportUrl,
+  securityAuditRemediationLabel,
   securityAuditRunStatusLabel,
   securityAuditScopeRequiresPaths,
   securityAuditScopeRequiresRefs,
@@ -371,4 +372,12 @@ test("remediation form includes bounded operator notes without changing approval
   });
   assert.equal(buildSecurityAuditRemediationPayload({...input,notes:"x".repeat(4100)}).notes, "x".repeat(4000));
   assert.equal(buildSecurityAuditRemediationPayload({...input,notes:" "}).notes, undefined);
+});
+
+test("remediation label separates implementation and independent verification", () => {
+  assert.equal(securityAuditRemediationLabel("in_progress", "succeeded"), "Implementación completada · pendiente de revalidación");
+  assert.equal(securityAuditRemediationLabel("in_progress", "failed"), "Implementación fallida");
+  assert.equal(securityAuditRemediationLabel("in_progress", "waiting"), "Implementación esperando autorización");
+  assert.equal(securityAuditRemediationLabel("in_progress", null), "Estado de implementación no disponible");
+  assert.equal(securityAuditRemediationLabel("verified_fixed", "succeeded"), "Corrección verificada");
 });

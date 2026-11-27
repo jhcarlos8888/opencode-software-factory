@@ -914,6 +914,17 @@ test("remediation is a separate traditional execution tied to confirmed findings
   });
   assert.equal(list.statusCode, 200);
   assert.equal((list.json() as { remediations: unknown[] }).remediations.length, 1);
+  const executionRunId = remediations[0]!.executionRunId!;
+  h.setExecutionFor(executionRunId, {run:{id:executionRunId,status:"succeeded"}});
+  const updated = await h.app.inject({method:"GET",url:"/api/security-audit/runs/api-remedio/remediations"});
+  assert.equal(updated.statusCode,200);
+  assert.equal(updated.json().remediations[0].executionStatus,"succeeded");
+  assert.equal(updated.json().remediations[0].state,"in_progress");
+  const status = await h.app.inject({method:"GET",url:"/api/security-audit/runs/api-remedio"});
+  assert.equal(status.statusCode,200);
+  assert.equal(status.json().remediations[0].executionStatus,"succeeded");
+  assert.equal(status.json().remediations[0].state,"in_progress");
+  assert.equal(listSecurityAuditRemediations(h.db,"api-remedio")[0]?.state,"in_progress");
 });
 
 /**

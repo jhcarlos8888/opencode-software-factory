@@ -15,6 +15,7 @@ import {
   securityAuditPhaseLabel,
   securityAuditProgressSummary,
   securityAuditReportUrl,
+  securityAuditRemediationLabel,
   securityAuditRunStatusLabel,
   securityAuditScopeRequiresPaths,
   securityAuditScopeRequiresRefs,
@@ -152,6 +153,7 @@ interface RunStatus {
     fingerprint: string;
     state: string;
     executionRunId: string | null;
+    executionStatus?: string | null;
     evidenceCount: number;
     updatedAt: string;
   }>;
@@ -889,7 +891,7 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
               <ul>
                 {status.remediations.map((remediation) => (
                   <li key={remediation.fingerprint}>
-                    <code>{remediation.fingerprint}</code> → {remediation.state}
+                    <code>{remediation.fingerprint}</code> → {securityAuditRemediationLabel(remediation.state, remediation.executionStatus)}
                     {remediation.executionRunId ? ` · ejecución ${remediation.executionRunId.slice(0, 8)}` : ""}
                     {" · evidencias: "}{remediation.evidenceCount}
                     {remediation.state !== "verified_fixed" && (

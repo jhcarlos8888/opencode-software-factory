@@ -120,6 +120,25 @@ export function securityAuditOutcomeLabel(outcome: string): string {
   return OUTCOME_LABELS[outcome] ?? outcome;
 }
 
+/** Implementation status is derived from its linked execution, not from
+ * evidence of security revalidation. Never infer verified_fixed from success. */
+export function securityAuditRemediationLabel(state: string, executionStatus?: string | null): string {
+  if (state === "verified_fixed") return "Corrección verificada";
+  if (state === "rejected") return "Rechazada";
+  if (state === "revalidated") return "Revalidada";
+  if (state === "requested" || state === "in_progress") {
+    if (executionStatus === "succeeded") return "Implementación completada · pendiente de revalidación";
+    if (executionStatus === "failed") return "Implementación fallida";
+    if (executionStatus === "cancelled") return "Implementación cancelada";
+    if (executionStatus === "interrupted") return "Implementación interrumpida";
+    if (executionStatus === "waiting") return "Implementación esperando autorización";
+    if (executionStatus === "running") return "Implementación en ejecución";
+    if (executionStatus === "queued") return "Implementación en cola";
+    return "Estado de implementación no disponible";
+  }
+  return state;
+}
+
 export function securityAuditProgress(phases: readonly string[]): {
   completed: number;
   total: number;
