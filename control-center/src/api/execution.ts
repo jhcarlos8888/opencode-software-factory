@@ -49,6 +49,7 @@ import {
   type ExecutionSnapshot, type ExecutionStatus
 } from "./database.js";
 import { storeClaudeAuditUsage } from "./security-audit-usage.js";
+import { recoverFocusedVerificationLedgers } from "./security-audit-focused-ledger.js";
 import { finishSecurityAuditInvocation, listSecurityAuditRuns, recordSecurityAuditInvocation, setSecurityAuditInvocationSession } from "./security-audit-persistence.js";
 import { classifySecurityAuditProviderError } from "./security-audit-contracts.js";
 import {
@@ -2282,6 +2283,7 @@ export function getExecution(runId: string): ExecutionSnapshot | null {
 export function recoverExecutionState(): void {
   markUnfinishedExecutionsInterrupted();
   reconcileSecurityAuditRunsAfterRecovery();
+  recoverFocusedVerificationLedgers(getFactoryDatabase());
 }
 
 /**

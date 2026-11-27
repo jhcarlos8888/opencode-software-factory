@@ -1,3 +1,4 @@
+import { initializeFocusedVerificationSchema } from "./security-audit-focused-ledger.js";
 /**
  * Persistencia SQLite de los runs `security-audit` sobre `node:sqlite`.
  *
@@ -467,6 +468,7 @@ export function initializeSecurityAuditSchema(db: DatabaseSync): void {
   // Migración de reconstrucción para bases con un CHECK anterior de motivos
   // de cierre (idempotente; ver comentarios).
   rebuildSecurityAuditRunsIfLegacy(db);
+  initializeFocusedVerificationSchema(db);
 }
 
 export interface SecurityAuditRunInput {

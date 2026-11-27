@@ -89,6 +89,8 @@ test("schema initialization is idempotent on a pre-existing database", () => {
     "security_audit_checkpoints",
     "security_audit_findings",
     "security_audit_findings_history",
+    "security_audit_focused_attempts",
+    "security_audit_focused_runs",
     "security_audit_invocations",
     "security_audit_remediations",
     "security_audit_runs",

@@ -64,6 +64,7 @@ export interface FocusedVerificationReceipt {
   decision: Decision;
   record: Record<string, unknown>;
   recordSha256: string;
+  outputSha256: string;
   sourceChecks: Array<{file:string;line:number;quoteSha256:string}>;
   officialValidator: "PASS";
 }
@@ -166,7 +167,7 @@ function accept(
   officialCheck(record,plan.projectPath);
   return {instanceId:result.instanceId,agentRunId:result.agentRunId,handoffId:result.handoffId,sessionId:result.sessionId,
     verifier:{...request.verifier},fingerprint:plan.fingerprint,snapshotSha256:plan.currentSnapshotSha256,decision,
-    record,recordSha256:sha(record),sourceChecks:checks.map(c=>({file:c.file,line:c.line,quoteSha256:sha(c.quote)})),officialValidator:"PASS"};
+    record,recordSha256:sha(record),outputSha256:createHash("sha256").update(result.output).digest("hex"),sourceChecks:checks.map(c=>({file:c.file,line:c.line,quoteSha256:sha(c.quote)})),officialValidator:"PASS"};
 }
 
 function prompt(plan:FocusedRevalidationPlan,original:Record<string,unknown>):string {
@@ -193,6 +194,8 @@ export async function runFocusedVerification(input:{
   originalRecord:unknown;
   invoke:(request:FocusedVerificationRequest)=>Promise<FocusedVerificationResult>;
   signal?:AbortSignal;
+  onCharge?:(request:FocusedVerificationRequest)=>void;
+  onReceipt?:(receipt:FocusedVerificationReceipt)=>void;
 }):Promise<FocusedVerificationOutcome> {
   const plan=input.plan, receipts:FocusedVerificationReceipt[]=[];
   let attempted=0;
@@ -228,6 +231,7 @@ export async function runFocusedVerification(input:{
       const request:FocusedVerificationRequest={instanceId:randomUUID(),verifier:{...verifier},fingerprint:plan.fingerprint,
         snapshotSha256:plan.currentSnapshotSha256,projectPath:plan.projectPath,allowedPaths:[...plan.scope.scopePaths],
         permissionProfile:"read-only",executionPolicy:"source-only",prompt:instructions,signal:controller.signal};
+      input.onCharge?.(request);
       attempted++;
       const result=await input.invoke(request);
       checkStop();
@@ -236,6 +240,7 @@ export async function runFocusedVerification(input:{
       const receipt=accept(plan,request,result,source);
       ensure(!receipts.some(r=>r.instanceId===receipt.instanceId||r.sessionId===receipt.sessionId||
         r.agentRunId===receipt.agentRunId||r.handoffId===receipt.handoffId),"verifier_identity_reused");
+      input.onReceipt?.(receipt);
       receipts.push(receipt);
     }
     await capture(plan);

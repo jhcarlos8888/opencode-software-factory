@@ -139,3 +139,10 @@ test("source-only runtime forces codemode:false without mutating the provider co
     { FACTORY_FILESYSTEM_MCP_ENTRYPOINT: "/tmp/mcp/entrypoint.js" }
   );
 });
+
+test("focused OpenCode MCP keeps external servers omitted and passes a closed file list via argv",async()=>{
+  const {sourceOnlyOpenCodeConfig}=await import("./opencode-agents.js");
+  const config=sourceOnlyOpenCodeConfig({mcp:{servers:{factory_filesystem:{enabled:true},external:{enabled:true}}}},"/project",["src/one.ts"]) as {mcp:{servers:Record<string,{command:string[]}>}};
+  assert.deepEqual(Object.keys(config.mcp.servers),["factory_filesystem"]);
+  assert.deepEqual(config.mcp.servers.factory_filesystem!.command.slice(-3),["/project","--focused-paths-json",'["src/one.ts"]']);
+});

@@ -99,14 +99,14 @@ export function inspectFactoryFilesystemMcp(payload: unknown): OpenCodeMcpRegist
  * argument anchors the internal MCP to the real project independently of
  * the engine session's private location (never load target-local agents/MCP).
  */
-export function sourceOnlyOpenCodeConfig(config: Record<string, unknown>, projectPath: string): Record<string, unknown> {
+export function sourceOnlyOpenCodeConfig(config: Record<string, unknown>, projectPath: string, focusedPaths?: readonly string[]): Record<string, unknown> {
   const mcp = config.mcp as { servers?: Record<string, Record<string, unknown>> } | undefined;
   if (!mcp?.servers?.factory_filesystem) throw new Error("Falta el MCP interno de lectura");
   return { ...config, mcp: { servers: { factory_filesystem: {
     ...mcp.servers.factory_filesystem,
     command: ["node", "-e",
       'const p=require("node:path"),u=require("node:url");const e=p.resolve(process.env.FACTORY_FILESYSTEM_MCP_ENTRYPOINT);process.chdir(process.argv[1]);import(u.pathToFileURL(e).href).catch(err=>{console.error("[factory-filesystem] "+String(err.message));process.exit(1)});',
-      projectPath],
+      projectPath, ...(focusedPaths === undefined ? [] : ["--focused-paths-json", JSON.stringify(focusedPaths)])],
     enabled: true,
     // Source-only sessions deny `execute`, so with codemode:true these MCP
     // tools would only be reachable through execute and stay unreachable.

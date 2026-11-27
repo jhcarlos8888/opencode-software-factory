@@ -25,3 +25,8 @@ test("only named read-only factory filesystem MCP tools are allowed", () => {
   assert.equal(isAllowedFactoryFilesystemMcpTool("mcp__factory_filesystem__read_file", "other_server"), false);
   assert.equal(isFactoryFilesystemToolName("mcp__factory_filesystem__write_file"), false);
 });
+
+test("focused Claude MCP receives an explicit launcher-only allowlist",()=>{
+  const config=createClaudeFactoryMcpConfig("/opt/factory","/usr/bin/node",["src/one.ts","test/two.ts"]);
+  assert.deepEqual(config.factory_filesystem.args,["/opt/factory/.opencode/mcp/factory-filesystem.mjs","--focused-paths-json",'["src/one.ts","test/two.ts"]']);
+});

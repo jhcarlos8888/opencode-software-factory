@@ -9,13 +9,13 @@ const FACTORY_FILESYSTEM_TOOLS = new Set(["list_files", "read_file", "search_tex
  * The CLI inherits cwd=projectPath, while the executable path is absolute
  * under the installed factory runtime.
  */
-export function createClaudeFactoryMcpConfig(factoryRoot: string, nodeExecutable = process.execPath) {
+export function createClaudeFactoryMcpConfig(factoryRoot: string, nodeExecutable = process.execPath, focusedPaths?: readonly string[]) {
   const entryPoint = resolve(join(factoryRoot, ".opencode", "mcp", "factory-filesystem.mjs"));
   return {
     [FACTORY_FILESYSTEM_SERVER_NAME]: {
       type: "stdio" as const,
       command: nodeExecutable,
-      args: [entryPoint],
+      args: [entryPoint, ...(focusedPaths === undefined ? [] : ["--focused-paths-json", JSON.stringify(focusedPaths)])],
       alwaysLoad: true,
       timeout: 30000
     }

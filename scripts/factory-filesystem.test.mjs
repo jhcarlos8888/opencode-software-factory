@@ -349,3 +349,59 @@ test("read_file paginates larger source files without relaxing response or path 
     await assert.rejects(() => fs.readProjectFile({path:".env",start_line:2}), /sensibles/);
   } finally { await rm(f.base, {recursive:true,force:true}); }
 });
+
+test("focused MCP enumerates and reads only the explicit files, without exposing sibling names or JUnit", async () => {
+  const f = await fixture();
+  try {
+    await writeFile(join(f.project, "src", "Hidden.java"), "factory filesystem safe search NOT-IN-SCOPE");
+    await mkdir(join(f.project, "other"));
+    await writeFile(join(f.project, "other", "Notes.txt"), "factory filesystem safe search");
+    const scope = ["src/App.java"];
+    const fs = await createProjectFilesystem(f.project, scope);
+    scope.push("README.md");
+    assert.deepEqual((await fs.listFiles({path:"."})).entries.map(e=>e.path),["src/","src/App.java"]);
+    const search=await fs.searchText({query:"factory filesystem safe search"});
+    assert.equal(search.files_scanned,1);
+    assert.deepEqual(search.matches.map(e=>e.path),["src/App.java"]);
+    assert.match((await fs.readProjectFile({path:"src/App.java"})).content,/class App/);
+    for(const path of ["README.md","src/Hidden.java","other/Notes.txt","src/AppAlias.java","../outside/outside.txt","/etc/passwd"]){
+      await assert.rejects(()=>fs.readProjectFile({path}));
+      await assert.rejects(()=>fs.searchText({query:"safe",path}));
+    }
+    await assert.rejects(()=>fs.listFiles({path:"other"}),/alcance focalizado/);
+    await assert.rejects(()=>fs.summarizeJUnit({modules:["."]}),/no está habilitado/);
+    await rm(join(f.project,"src","App.java"));await mkdir(join(f.project,"src","App.java"));
+    await writeFile(join(f.project,"src","App.java","Nested.txt"),"not allowed");
+    await assert.rejects(()=>fs.listFiles({path:"src/App.java"}),/alcance focalizado/);
+    assert.deepEqual((await fs.listFiles({path:"."})).entries.map(e=>e.path),["src/"]);
+    assert.equal((await fs.searchText({query:"not allowed"})).count,0);
+  } finally {await rm(f.base,{recursive:true,force:true});}
+});
+
+test("focused allowlist rejects empty, ambiguous, sensitive, missing, directory and symlink entries",async()=>{
+  const f=await fixture();
+  try {
+    for(const list of [[],null,"src/App.java",["."],["src"],["src/App.java","src/App.java"],["src/App.java","src"],[".env"],["src/AppAlias.java"],["missing"],["../outside/outside.txt"],["/etc/passwd"],["src//App.java"],["src\\\\App.java"],["node_modules/dependency.js"],Array.from({length:17},(_,i)=>"f"+i)]){
+      await assert.rejects(()=>createProjectFilesystem(f.project,list));
+    }
+  }finally{await rm(f.base,{recursive:true,force:true});}
+});
+
+test("focused stdio protocol exposes only three tools and cannot broaden scope through tool arguments",async()=>{
+  const f=await fixture();
+  try{
+    const script=fileURLToPath(new URL("../.opencode/mcp/factory-filesystem.mjs",import.meta.url));
+    const child=spawn(process.execPath,[script,"--focused-paths-json",JSON.stringify(["src/App.java"])],{cwd:f.project,stdio:["pipe","pipe","pipe"]});
+    let stdout="",stderr="";
+    child.stdout.on("data",d=>stdout+=d);child.stderr.on("data",d=>stderr+=d);
+    const requests=[{method:"tools/list"},{method:"tools/call",params:{name:"read_file",arguments:{path:"README.md",allowedPaths:["README.md"]}}},{method:"tools/call",params:{name:"read_file",arguments:{path:"src/App.java"}}},{method:"tools/call",params:{name:"summarize_junit",arguments:{modules:["."]}}},{method:"tools/call",params:{name:"constructor",arguments:{}}}];
+    child.stdin.end(requests.map((q,i)=>JSON.stringify({jsonrpc:"2.0",id:i+1,...q})).join("\n")+"\n");
+    const [exit]=await once(child,"close");assert.equal(exit,0,stderr);
+    const response=stdout.trim().split("\n").map(JSON.parse);
+    assert.deepEqual(response[0].result.tools.map(t=>t.name).sort(),["list_files","read_file","search_text"]);
+    assert.equal(response[1].result.isError,true);
+    assert.equal(response[2].result.isError,false);
+    assert.match(response[2].result.content[0].text,/class App/);
+    assert.equal(response[3].result.isError,true);assert.equal(response[4].result.isError,true);
+  }finally{await rm(f.base,{recursive:true,force:true});}
+});

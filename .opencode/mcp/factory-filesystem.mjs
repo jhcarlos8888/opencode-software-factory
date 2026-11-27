@@ -89,7 +89,28 @@ function isValidRelativePath(value) {
   return !segments.some((segment) => segment === "..");
 }
 
-export async function createProjectFilesystem(rootCandidate = process.cwd()) {
+/** Only the trusted launcher may supply an explicit file allowlist. The
+ * MCP tool arguments cannot change it. Directories are traversal-only. */
+export async function createProjectFilesystem(rootCandidate = process.cwd(), allowedPaths) {
+  let allowed = null, directories = null;
+  if (allowedPaths !== undefined) {
+    if (!Array.isArray(allowedPaths) || allowedPaths.length < 1 || allowedPaths.length > 16 ||
+        new Set(allowedPaths).size !== allowedPaths.length || allowedPaths.some(path =>
+          !isValidRelativePath(path) || !path || /[\\:\p{Cc}\p{Cf}]/u.test(path) ||
+          path.split("/").some(part => !part || part === "." || part === ".." || IGNORED_DIRECTORIES.has(part)) ||
+          isSensitiveRelativePath(path))) {
+      throw new Error("Lista focalizada de archivos inválida.");
+    }
+    allowed = new Set(allowedPaths);
+    directories = new Set(["."]);
+    for (const file of allowed) {
+      const parts = file.split("/");
+      for (let i=1;i<parts.length;i++) directories.add(parts.slice(0,i).join("/"));
+    }
+    if ([...allowed].some(file=>directories.has(file))) throw new Error("Lista focalizada contiene directorios ambiguos.");
+  }
+  const allowedFile = path => allowed === null || allowed.has(path);
+  const allowedDirectory = path => directories === null || directories.has(path);
   const root = await realpath(rootCandidate);
   const rootInfo = await stat(root);
   if (!rootInfo.isDirectory()) {
@@ -97,6 +118,7 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
   }
 
   async function readDirectoryNoFollow(absolute, expectedRelative) {
+    if (!allowedDirectory(expectedRelative)) throw new Error("Directorio fuera del alcance focalizado.");
     const flags = fsConstants.O_RDONLY | (fsConstants.O_DIRECTORY ?? 0) | (fsConstants.O_NOFOLLOW ?? 0);
     const handle = await open(absolute, flags);
     try {
@@ -115,7 +137,8 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
   }
 
   async function readFileNoFollow(absolute, expectedRelative, maxBytes) {
-    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0);
+    if (!allowedFile(expectedRelative)) throw new Error("Archivo fuera del alcance focalizado.");
+    const flags = fsConstants.O_RDONLY | (fsConstants.O_NOFOLLOW ?? 0) | (fsConstants.O_NONBLOCK ?? 0);
     const handle = await open(absolute, flags);
     try {
       const before = await handle.stat();
@@ -150,6 +173,9 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
     if (!containsPath(root, lexical)) {
       throw new Error("La ruta solicitada está fuera del proyecto.");
     }
+
+    const requested = relative(root, lexical).split(sep).join("/") || ".";
+    if (!allowedFile(requested) && !allowedDirectory(requested)) throw new Error("Ruta fuera del alcance focalizado.");
 
     // Inspect every supplied path component without following links. Even a
     // symlink whose target remains inside the root is refused for predictable
@@ -186,7 +212,11 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
     // realpath of the full path detects symlink escapes; enumeration below
     // separately refuses every symlink entry to avoid following project links.
     const info = await stat(canonical);
-    return { absolute: canonical, relative: canonicalRelative || ".", info };
+    const name = canonicalRelative || ".";
+    if (allowed !== null && !(info.isFile() && allowedFile(name) || info.isDirectory() && allowedDirectory(name))) {
+      throw new Error("Tipo o ruta fuera del alcance focalizado.");
+    }
+    return { absolute: canonical, relative: name, info };
   }
 
   async function listFiles({ path = ".", max_depth = 4, max_entries = 250 } = {}) {
@@ -223,10 +253,10 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
         if (entry.isSymbolicLink()) continue;
 
         if (entry.isDirectory()) {
-          if (IGNORED_DIRECTORIES.has(entry.name)) continue;
+          if (IGNORED_DIRECTORIES.has(entry.name) || !allowedDirectory(rel)) continue;
           results.push({ path: rel + "/", type: "directory" });
           if (depth < depthLimit) await visit(resolve(directory, entry.name), rel, depth + 1);
-        } else if (entry.isFile()) {
+        } else if (entry.isFile() && allowedFile(rel)) {
           let info;
           try { info = await lstat(resolve(directory, entry.name)); } catch { continue; }
           if (!info.isFile() || info.isSymbolicLink()) continue;
@@ -305,7 +335,7 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
     let truncated = false;
 
     async function scanFile(absolute, rel, strict = false) {
-      if (truncated) return;
+      if (truncated || !allowedFile(rel)) return;
       if (filesScanned >= MAX_SEARCH_FILES) { truncated = true; return; }
       filesScanned++;
       let info;
@@ -349,7 +379,7 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
         const rel = relativeDirectory === "." ? entry.name : relativeDirectory + "/" + entry.name;
         if (isSensitiveRelativePath(rel) || entry.isSymbolicLink()) continue;
         if (entry.isDirectory()) {
-          if (IGNORED_DIRECTORIES.has(entry.name)) continue;
+          if (IGNORED_DIRECTORIES.has(entry.name) || !allowedDirectory(rel)) continue;
           await visit(resolve(directory, entry.name), rel, depth + 1);
         } else if (entry.isFile()) {
           await scanFile(resolve(directory, entry.name), rel);
@@ -373,6 +403,7 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
   // Read only conventional Gradle/Maven JUnit report directories explicitly
   // selected by the caller. Never return arbitrary XML contents or test logs.
   async function summarizeJUnit({ modules } = {}) {
+    if (allowed !== null) throw new Error("JUnit no está habilitado en revalidación focalizada.");
     if (!Array.isArray(modules) || modules.length < 1 || modules.length > 40 ||
         modules.some((m) => typeof m !== "string" || !/^(?:\.|[\w.-]+(?:\/[\w.-]+)*)$/.test(m) ||
           (m !== "." && m.split("/").some((part) => part === ".." || part === ".")) || isSensitiveRelativePath(m))) {
@@ -438,6 +469,12 @@ export async function createProjectFilesystem(rootCandidate = process.cwd()) {
       note: "Contadores declarados en informes existentes; no ejecuta pruebas ni acredita que sean recientes. No suma informes que no pudo leer." };
   }
 
+  // Validate actual file types, sensitive paths and symlinks before exposing
+  // the server. A missing/invalid path cannot broaden the allowlist.
+  if (allowed !== null) for (const file of allowed) {
+    const target = await resolveInside(file);
+    if (!target.info.isFile() || target.relative !== file) throw new Error("Archivo focalizado no canónico.");
+  }
   return { root, listFiles, readProjectFile, searchText, summarizeJUnit };
 }
 
@@ -498,12 +535,19 @@ function send(message) {
 }
 
 async function runMcpServer() {
-  const filesystem = await createProjectFilesystem(process.cwd());
+  const args = process.argv.slice(2);
+  let allowedPaths;
+  if (args.length !== 0) {
+    if (args.length !== 2 || args[0] !== "--focused-paths-json") throw new Error("Argumentos MCP no reconocidos.");
+    allowedPaths = JSON.parse(args[1]);
+    if (!Array.isArray(allowedPaths)) throw new Error("Lista focalizada de archivos inválida.");
+  }
+  const filesystem = await createProjectFilesystem(process.cwd(), allowedPaths);
   const tools = {
     list_files: filesystem.listFiles,
     read_file: filesystem.readProjectFile,
     search_text: filesystem.searchText,
-    summarize_junit: filesystem.summarizeJUnit
+    ...(allowedPaths === undefined ? {summarize_junit: filesystem.summarizeJUnit} : {})
   };
 
   const input = createInterface({ input: process.stdin, crlfDelay: Infinity });
@@ -539,12 +583,12 @@ async function runMcpServer() {
       continue;
     }
     if (message.method === "tools/list") {
-      send({ jsonrpc: "2.0", id: message.id, result: { tools: TOOL_DEFINITIONS } });
+      send({ jsonrpc: "2.0", id: message.id, result: { tools: TOOL_DEFINITIONS.filter(tool => Object.hasOwn(tools, tool.name)) } });
       continue;
     }
     if (message.method === "tools/call") {
       const name = message.params?.name;
-      const handler = tools[name];
+      const handler = typeof name === "string" && Object.hasOwn(tools, name) ? tools[name] : undefined;
       if (!handler) {
         send({
           jsonrpc: "2.0",
