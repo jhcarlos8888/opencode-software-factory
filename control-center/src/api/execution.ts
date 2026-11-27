@@ -12,6 +12,7 @@ import {
   createExecutionAdmissionGate, grantAgentRunApprovalKey, hasAgentRunApprovalKey
 } from "./execution-guards.js";
 import { inspectFactoryFilesystemMcp, inspectOpenCodeAgentRegistry, sourceOnlyOpenCodeConfig, unexpectedAuditMcpServers } from "./opencode-agents.js";
+import { waitForMcpCatalogSettled, OPENCODE_MCP_CATALOG_SETTLE_MS } from "./opencode-mcp-settle.js";
 import { buildOpenCodePermissionRules } from "./opencode-permissions.js";
 import { EXECUTION_WAVES } from "./execution-waves.js";
 import { summarizeOpenCodeToolResult } from "./opencode-tool-audit.js";
@@ -368,56 +369,55 @@ async function waitForFactoryFilesystemMcp(
   const query = new URLSearchParams();
   query.set("location[directory]", runtime.sessionRoot ?? projectPath);
   const endpoint = "/api/mcp?" + query.toString();
-  const deadline = Date.now() + 15000;
-  let reportedWaiting = false;
+  let lastError: string | null = null;
   let lastStatus = inspectFactoryFilesystemMcp({ data: [] });
 
-  while (Date.now() < deadline) {
-    try {
-      const payload = await openCodeRequest<unknown>(runtime, "GET", endpoint, undefined, 2500);
+  // Conectar el servidor MCP no basta: OpenCode 2.1.4 registra las tools de
+  // forma asíncrona (recarga del registro tras un debounce de 100 ms), de modo
+  // que un primer prompt a los 97 ms ve un catálogo incompleto. Exigimos que
+  // el MCP permanezca conectado durante la ventana de estabilización completa.
+  const settle = await waitForMcpCatalogSettled({
+    observe: async () => {
+      let payload: unknown;
+      try {
+        payload = await openCodeRequest<unknown>(runtime, "GET", endpoint, undefined, 2500);
+      } catch (error) {
+        // Los errores transitorios de conexión (arranque del servidor, MODULE_NOT_FOUND
+        // durante el arranque, "Connection closed") deben reintentar hasta el deadline;
+        // solo un `failed` reportado por el payload de /api/mcp aborta de inmediato.
+        lastError = sanitizeText(error instanceof Error ? error.message : String(error)).slice(0, 1200);
+        return { ready: false, status: null, error: lastError };
+      }
       lastStatus = inspectFactoryFilesystemMcp(payload);
-      if (lastStatus.ready) {
-        if (runtime.sourceOnly) {
-          const extras = unexpectedAuditMcpServers(payload);
-          if (extras.length) throw new Error("MCP server externo no deshabilitado en source-only: " + extras.join(", "));
-        }
-        runtime.filesystemReadyProjects.add(projectPath);
-        addLog(
-          runId,
-          "OPENCODE-SERVER",
-          "success",
-          "MCP factory_filesystem conectado al proyecto seleccionado; lectura/búsqueda segura disponible."
-        );
-        return;
+      if (lastStatus.error) lastError = lastStatus.error;
+      if (lastStatus.ready && runtime.sourceOnly) {
+        const extras = unexpectedAuditMcpServers(payload);
+        if (extras.length) throw new Error("MCP server externo no deshabilitado en source-only: " + extras.join(", "));
       }
-      if (lastStatus.status === "failed") {
-        throw new Error(lastStatus.error ?? "OpenCode devolvió el estado failed sin detalle.");
-      }
-      if (!reportedWaiting) {
-        reportedWaiting = true;
-        addLog(
-          runId,
-          "OPENCODE-SERVER",
-          "info",
-          "La sesión existe; se espera la conexión del MCP local de lectura antes de enviar el primer prompt."
-        );
-      }
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (/MCP server|MODULE_NOT_FOUND|factory_filesystem|Connection closed/i.test(message)) {
-        lastStatus = { ready: false, status: "failed", error: sanitizeText(message).slice(0, 1200) };
-      }
-    }
-    await delay(250);
+      return lastStatus;
+    },
+    onWaiting: () => addLog(runId, "OPENCODE-SERVER", "info", "La sesión existe; se espera la conexión del MCP local de lectura antes de enviar el primer prompt."),
+    onSettling: () => addLog(runId, "OPENCODE-SERVER", "info", "MCP local conectado; se confirma la estabilización del catálogo de herramientas antes del primer prompt (evita el registro diferido de OpenCode).")
+  });
+
+  if (!settle.settled) {
+    const detailError = settle.status.error ?? lastError ?? "";
+    const detail = [
+      "El MCP local factory_filesystem no permaneció conectado durante la ventana de estabilización del catálogo (" + OPENCODE_MCP_CATALOG_SETTLE_MS + " ms) antes de iniciar el agente.",
+      "Estado: " + String(settle.status.status ?? "no registrado") + ".",
+      detailError ? "Detalle: " + sanitizeText(detailError).slice(0, 1200) : ""
+    ].filter(Boolean).join(" ");
+    addLog(runId, "OPENCODE-SERVER", "warning", detail);
+    throw new Error(detail);
   }
 
-  const detail = [
-    "El MCP local factory_filesystem no quedó conectado al proyecto antes de iniciar el agente.",
-    "Estado: " + String(lastStatus.status ?? "no registrado") + ".",
-    lastStatus.error ? "Detalle: " + sanitizeText(lastStatus.error).slice(0, 1200) : ""
-  ].filter(Boolean).join(" ");
-  addLog(runId, "OPENCODE-SERVER", "warning", detail);
-  throw new Error(detail);
+  runtime.filesystemReadyProjects.add(projectPath);
+  addLog(
+    runId,
+    "OPENCODE-SERVER",
+    "success",
+    "MCP factory_filesystem conectado y catálogo estabilizado en " + settle.waitedMs + " ms; lectura/búsqueda segura disponible."
+  );
 }
 
 async function waitForOpenCodeSessionIdle(runtime: OpenCodeRuntime, sessionId: string): Promise<void> {

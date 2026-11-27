@@ -82,6 +82,59 @@ una regresión explícita en el contrato de la fábrica.
   `OPENCODE_CONFIG` y `OPENCODE_CONFIG_DIR` siguen apuntando a la fábrica
   (`8e1f7d1`).
 
+## Causa raíz 4 — registro asíncrono de tools MCP (debounce de 100 ms)
+
+- **Síntoma:** una sesión arrancó con el MCP `factory_filesystem` en estado
+  `connected`, pero el modelo respondió BLOQUEADO porque solo veía la tool
+  `skill`: las tools del MCP no estaban expuestas todavía.
+- **Evidencia:** la sesión real `ses_de60a38c3ffeOanuefZYD2GTim` registró
+  `mcp connected` a las 22:24:27.409Z y el primer mensaje del assistant a las
+  22:24:27.506Z (delta 97 ms) con `tools=4`; el modelo solo vio `skill`. El
+  registro de tools se actualizó a los ~100 ms, después del primer prompt.
+- **Mecanismo:** OpenCode 2.1.4 registra las tools MCP de forma asíncrona. Al
+  conectar un servidor publica `mcp.tools.changed` y el registro se recarga
+  tras `Stream.debounce("100 millis")` (`packages/core/src/tool/mcp.ts`).
+  Conectar el servidor **no implica** que el modelo ya vea sus tools: exigir
+  solo `status === "connected"` en `waitForFactoryFilesystemMcp` dejaba pasar
+  el primer prompt dentro de esa ventana de ~100 ms.
+- **Corrección:** `control-center/src/api/opencode-mcp-settle.ts` añade
+  `waitForMcpCatalogSettled`, que exige que el MCP esté `connected` en
+  **todas** las observaciones durante una ventana de estabilización de
+  **400 ms** (`OPENCODE_MCP_CATALOG_SETTLE_MS`, ≥ 4× el debounce de 100 ms)
+  medida desde la primera lectura connected. El sondeo es cada 100 ms
+  (`OPENCODE_MCP_CATALOG_POLL_MS`): no hay stream de eventos de estado, de
+  modo que la única forma de comprobar la ventana es observando
+  periódicamente. Incluye reinicio de la ventana si la conexión se pierde,
+  error inmediato ante `status: "failed"` (`McpCatalogFailedError`) y fallo
+  cerrado al agotar el deadline de 15 s. La política source-only, la detección
+  de MCP externos y el resto del flujo no cambian (`execution.ts`,
+  `waitForFactoryFilesystemMcp`).
+- **Límite:** esta ventana de estabilización no sustituye la prueba real con
+  modelo: solo elimina la condición de carrera documentada. La verificación
+  end-to-end con un modelo real sigue siendo necesaria para afirmar que el
+  catálogo es visible en el primer prompt.
+
+### Verificación real (26 nov 2026)
+
+Sesión final `ses_de5c90eb4ffeEI07Zovzd4FnEh` (agente `reverse`, modelo
+`opencode-go/glm-5.3-flash`, build desplegado
+`sha256:8fb3e4e059e87ff65af732866f5fdbcbe60674a8f8048d1046294d8b122f003e`):
+el gate de estabilización devolvió `settled=true` con `waitedMs=1260` y el
+agente hizo **una única invocación** de `factory_filesystem_read_file` sobre
+`src/documents.js` con `state.status=completed`; el resultado incluye
+`export function getDocument(...)` y el texto final cita la línea 1 del
+fichero. No hay `execute`, `skill`, shell ni escritura. Consumo: turno 1
+`input 3147 / output 31 / reasoning 37`; turno 2 `input 351 / output 37 /
+reasoning 84` (cache read 3136); coste total `0.00050605 + 0.00020723`. La
+evidencia persistente (README, `evidence.json` y `server.log`) está en
+`~/.local/state/opencode-software-factory/source-only-real-test-20261126-final/`.
+
+La primera prueba real, sobre el build anterior, usó la sesión
+`ses_de5d6f1d9ffevwi1PrGdsAYm32` con `waitedMs=505`; por eso esta sección cita
+la segunda prueba como evidencia del build desplegado. La evidencia de los
+97 ms sigue siendo la de la sesión `ses_de60a38c3ffeOanuefZYD2GTim`
+(log + BD), no la de estas sesiones.
+
 ## Qué comprueban las pruebas (lista, lectura, búsqueda y rechazo)
 
 `scripts/factory-filesystem.test.mjs`:
