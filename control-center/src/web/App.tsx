@@ -670,7 +670,7 @@ export default function App() {
 
     // Once the one-time project preflight has been consumed, continue the
     // existing conversation and evidence thread.
-    if (preflightConsumed && workThread && execution && execution.run.threadId === workThread.thread.id) {
+    if (preflightConsumed && workThread && execution && execution.run.threadId === workThread.thread.id && !execution.run.configurationSnapshot?.focusedRevalidation) {
       setContinuationBusy(true);
       try {
         const result = await api<{
@@ -1949,7 +1949,7 @@ export default function App() {
                       : "Consulta los eventos de la consola para conocer el detalle disponible."}</span>
                   </div>
                 )}
-                {workThread && execution.run.threadId === workThread.thread.id && (
+                {workThread && execution.run.threadId === workThread.thread.id && !execution.run.configurationSnapshot?.focusedRevalidation && (
                   <section className="work-continuation-panel" aria-labelledby="continue-work-title">
                     <div className="work-continuation-heading">
                       <div>

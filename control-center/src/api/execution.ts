@@ -50,7 +50,7 @@ import {
   type ExecutionSnapshot, type ExecutionStatus
 } from "./database.js";
 import { storeClaudeAuditUsage } from "./security-audit-usage.js";
-import { recoverFocusedVerificationLedgers,beginFocusedVerificationLedger,chargeFocusedVerificationAttempt,recordFocusedEngineResult,acceptFocusedVerificationReceipt,finishFocusedVerificationLedger,publishFocusedVerification } from "./security-audit-focused-ledger.js";
+import { recoverFocusedVerificationLedgers,beginFocusedVerificationLedger,chargeFocusedVerificationAttempt,recordFocusedEngineResult,acceptFocusedVerificationReceipt,finishFocusedVerificationLedger,publishFocusedVerification,storeFocusedClaudeUsage } from "./security-audit-focused-ledger.js";
 import { prepareFocusedRevalidation,type FocusedRevalidationPlan } from "./security-audit-focused-revalidation.js";
 import { runFocusedVerification,type FocusedVerificationResult } from "./security-audit-focused-runner.js";
 import { finishSecurityAuditInvocation, listSecurityAuditRuns, listSecurityAuditFindings, recordSecurityAuditInvocation, setSecurityAuditInvocationSession } from "./security-audit-persistence.js";
@@ -2364,6 +2364,13 @@ export async function cancelExecution(runId: string): Promise<void> {
   for (const controller of state.claudeControllers.values()) controller.abort();
   for (const resolver of state.resolvers.values()) resolver({ action: "deny" });
   state.resolvers.clear();
+  // The focused runner owns its native process and terminal ledger. Do not
+  // race its finally block by clearing/killing the same runtime here, or
+  // report terminal cancellation while it is still unwinding.
+  if (state.focusedPaths) {
+    addLog(runId, "FOCUSED-REVALIDATION", "warning", "Cancelación solicitada; esperando cierre del motor y registro final.");
+    return;
+  }
   if (state.openCode) {
     for (const sessionId of state.openCode.sessions.values()) {
       await openCodeRequest(state.openCode, "POST", `/api/session/${encodeURIComponent(sessionId)}/interrupt`).catch(() => undefined);
@@ -2631,7 +2638,10 @@ async function runFocusedClaudeAgent(state:RuntimeState,agent:AgentInput,project
           if(block.type==="tool_use"&&!focusedClaudeTool(block.name))forbidden=true;
         }
       }
-      if(event.type==="result")output=extractClaudeFinalText(event);
+      if(event.type==="result"){
+        if(sessionId){try{storeFocusedClaudeUsage(getFactoryDatabase(),state.runId,agent.id,sessionId,event);}catch{/* Optional metrics. */}}
+        output=extractClaudeFinalText(event);
+      }
     }
     if(controller.signal.aborted||forbidden||!initialized||!sessionId||!output)throw Error("focused_claude_unverified_result");
     requireFocusedReadEvidence(output,new Set(read.keys()),scope);
@@ -2696,6 +2706,7 @@ async function executeFocusedRun(state:RuntimeState,plan:FocusedRevalidationPlan
           state.openCode=undefined;
           state.focusedController=cancelController;
         }
+        if(state.cancelled)status="cancelled";
         const sessionId=getExecutionSnapshot(state.runId)?.agents.find(a=>a.id===agent.id)?.sessionId??null;
         updateExecutionAgent(agent.id,{status,finishedAt:new Date().toISOString(),error:status==="succeeded"?null:"Verificación focalizada no completada."});
         const result:FocusedVerificationResult={instanceId:agent.id,agentRunId:agent.id,handoffId:randomUUID(),sessionId,verifier:request.verifier,status,output,...(status==="succeeded"?{nativeSourceChecks:state.focusedNativeSourceChecks}:{})};

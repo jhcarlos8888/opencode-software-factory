@@ -215,7 +215,7 @@ db.exec("CREATE INDEX IF NOT EXISTS idx_execution_runs_thread ON execution_runs(
 
 // Attach pre-existing standalone executions to a durable thread without changing
 // their IDs, instructions, events, summaries, agents or terminal states.
-const legacyRuns = db.prepare("SELECT id, project_path AS projectPath, instructions, status, started_at AS startedAt, updated_at AS updatedAt, summary_json AS summaryJson FROM execution_runs WHERE thread_id IS NULL ORDER BY started_at").all() as Array<{
+const legacyRuns = db.prepare("SELECT id, project_path AS projectPath, instructions, status, started_at AS startedAt, updated_at AS updatedAt, summary_json AS summaryJson FROM execution_runs WHERE thread_id IS NULL AND CASE WHEN json_valid(configuration_snapshot_json) THEN json_type(configuration_snapshot_json, '$.focusedRevalidation') IS NULL ELSE 1 END ORDER BY started_at").all() as Array<{
   id: string; projectPath: string; instructions: string; status: string;
   startedAt: string; updatedAt: string; summaryJson: string | null;
 }>;

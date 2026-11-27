@@ -42,7 +42,7 @@ export function storeClaudeAuditUsage(db: DatabaseSync, instanceId: string, sess
 /** Query only numeric usage and identity fields for the known session. Never
  * return prompts, tool calls, assistant text, credentials or provider cost.
  * Older schemas, unavailable DBs and mismatched identities stay unknown. */
-export function openCodeSessionUsage(db: DatabaseSync, invocation: SecurityAuditInvocationRow): AuditTokenUsage | null {
+export function openCodeSessionUsage(db: DatabaseSync, invocation: Pick<SecurityAuditInvocationRow,"engine"|"model"|"sessionId"|"startedAt"|"finishedAt"> & {outcome:string}): AuditTokenUsage | null {
   if (invocation.engine !== "opencode" || !invocation.sessionId || !invocation.model) return null;
   const row = db.prepare(`SELECT parent_id, model, time_created, time_updated, tokens_input, tokens_output,
     tokens_reasoning, tokens_cache_read, tokens_cache_write

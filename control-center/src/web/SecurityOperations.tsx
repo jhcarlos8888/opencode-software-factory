@@ -174,7 +174,7 @@ interface RunStatus {
     evidenceCount: number;
     focusedVerification?: {
       executionRunId:string;status:string;reason:string|null;
-      attempts:Array<{ordinal:number;agentId:string;engine:string;modelId:string;status:string;sessionId:string|null;receipt:{decision:string;officialValidator:string}|null}>;
+      attempts:Array<{ordinal:number;agentId:string;engine:string;modelId:string;status:string;sessionId:string|null;receipt:{decision:string;officialValidator:string}|null;usage?:{source:string;input:number|null;output:number|null;reasoning:number|null;cacheRead:number|null;cacheWrite:number|null;partial:boolean}|null}>;
     } | null;
     updatedAt: string;
   }>;
@@ -953,7 +953,10 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
                         <strong>Revalidación focalizada · {remediation.focusedVerification.status}</strong>
                         <p>Ejecución: {remediation.focusedVerification.executionRunId} · {remediation.focusedVerification.attempts.length}/2 intentos</p>
                         {remediation.focusedVerification.reason && <p>Motivo: {remediation.focusedVerification.reason}</p>}
-                        {remediation.focusedVerification.attempts.map(a=><p key={a.ordinal}>{a.agentId} · {a.engine} · {a.modelId} · {a.status}{a.receipt ? " · "+a.receipt.decision+" · validador "+a.receipt.officialValidator : a.status==="succeeded" ? " · evidencia no aceptada" : ""}</p>)}
+                        {remediation.focusedVerification.attempts.map(a=><div key={a.ordinal}>
+                          <p>{a.agentId} · {a.engine} · {a.modelId} · {a.status}{a.receipt ? " · "+a.receipt.decision+" · validador "+a.receipt.officialValidator : a.status==="succeeded" ? " · evidencia no aceptada" : ""}</p>
+                          <p><small>{a.usage ? <>Tokens {a.usage.partial ? "(parcial)" : ""} · Entrada: {a.usage.input?.toLocaleString("es-CO")??"—"} · Salida: {a.usage.output?.toLocaleString("es-CO")??"—"} · Razonamiento: {a.usage.reasoning?.toLocaleString("es-CO")??"—"} · Caché lectura/escritura: {a.usage.cacheRead?.toLocaleString("es-CO")??"—"} / {a.usage.cacheWrite?.toLocaleString("es-CO")??"—"}</> : "Tokens: no disponibles (no equivale a cero)"}</small></p>
+                        </div>)}
                         {remediation.focusedVerification.status==="running" && <button type="button" disabled={busy} onClick={()=>void runAction(async()=>{
                           await securityApi("/api/executions/"+encodeURIComponent(remediation.focusedVerification!.executionRunId)+"/cancel",{method:"POST",body:"{}"});
                           await loadStatus(selectedRunId);

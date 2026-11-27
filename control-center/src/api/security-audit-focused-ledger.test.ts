@@ -6,7 +6,7 @@ import {join} from "node:path";
 import {DatabaseSync} from "node:sqlite";
 import {test} from "node:test";
 import {initializeSecurityAuditSchema,createSecurityAuditRun,upsertSecurityAuditFinding,createSecurityAuditRemediation,transitionSecurityAuditRemediation,listSecurityAuditRemediations} from "./security-audit-persistence.js";
-import {beginFocusedVerificationLedger,chargeFocusedVerificationAttempt,recordFocusedEngineResult,acceptFocusedVerificationReceipt,finishFocusedVerificationLedger,getFocusedVerificationLedger,recoverFocusedVerificationLedgers,publishFocusedVerification} from "./security-audit-focused-ledger.js";
+import {beginFocusedVerificationLedger,chargeFocusedVerificationAttempt,recordFocusedEngineResult,acceptFocusedVerificationReceipt,finishFocusedVerificationLedger,getFocusedVerificationLedger,recoverFocusedVerificationLedgers,publishFocusedVerification,storeFocusedClaudeUsage} from "./security-audit-focused-ledger.js";
 import {runFocusedVerification,type FocusedVerificationRequest,type FocusedVerificationResult} from "./security-audit-focused-runner.js";
 import {FOCUSED_REVALIDATION_BUDGET,type FocusedRevalidationPlan} from "./security-audit-focused-revalidation.js";
 import {resolveSecurityAuditScopeFiles,snapshotSecurityAuditScope} from "./security-audit-scope.js";
@@ -184,5 +184,62 @@ test("only a terminal two-engine consensus on the fresh plan can certify a remed
     assert.equal(db.prepare("SELECT verdict FROM security_audit_findings WHERE run_id=? AND fingerprint=?").get(auditId,fp)?.verdict,"confirmed");
     assert.throws(()=>publishFocusedVerification(db,runId,plan),/remediation_changed/);
     assert.equal(listSecurityAuditRemediations(db,auditId)[0]?.evidence.length,1);
+  });
+});
+
+test("focused counters bind Claude SDK results to native identities, including partial cancellation",async()=>{
+  await fixture(async(db,plan)=>{
+    beginFocusedVerificationLedger(db,runId,plan);
+    const ctrl=new AbortController();
+    const outcome=await runFocusedVerification({plan,originalRecord:original,signal:ctrl.signal,onCharge:r=>chargeFocusedVerificationAttempt(db,runId,r),invoke:async r=>{
+      const res=result(db,r,1);
+      const event={type:"result",subtype:"success",usage:{input_tokens:42,output_tokens:7,cache_read_input_tokens:11,cache_creation_input_tokens:0}};
+      storeFocusedClaudeUsage(db,runId,r.instanceId,"wrong-session",event);
+      assert.equal(getFocusedVerificationLedger(db,runId).attempts[0]?.usage,null);
+      storeFocusedClaudeUsage(db,runId,r.instanceId,res.sessionId!,event);
+      assert.deepEqual(getFocusedVerificationLedger(db,runId).attempts[0]?.usage,{source:"claude-sdk-result",input:42,output:7,reasoning:null,cacheRead:11,cacheWrite:0,partial:true});
+      ctrl.abort();
+      return res;
+    }});
+    assert.equal(outcome.status,"cancelled");
+    assert.equal(outcome.attempted,1);
+    finishFocusedVerificationLedger(db,runId,outcome);
+    const saved=getFocusedVerificationLedger(db,runId);
+    assert.equal(saved.attempts[0]?.usage?.input,42);
+    assert.equal(saved.attempts[0]?.usage?.partial,true);
+    assert.equal(saved.attempts[0]?.receipt,null);
+    assert.equal(listSecurityAuditRemediations(db,auditId)[0]?.state,"in_progress");
+    db.prepare("UPDATE execution_agents SET session_id='changed' WHERE id=?").run(saved.attempts[0]!.instanceId);
+    assert.equal(getFocusedVerificationLedger(db,runId).attempts[0]?.usage,null);
+  });
+});
+test("focused OpenCode metrics use exact model and native session, never invent historical Claude counters",async()=>{
+  await fixture(async(db,plan)=>{
+    plan={...plan,verifiers:[plan.verifiers[0],{...plan.verifiers[1],modelId:"opencode-go/model-b"}]};
+    db.prepare("UPDATE execution_runs SET configuration_snapshot_json=? WHERE id=?").run(JSON.stringify({focusedRevalidation:{planSha256:hash(plan)}}),runId);
+    beginFocusedVerificationLedger(db,runId,plan);
+    const localPath=join(plan.projectPath,"opencode-metrics.sqlite");
+    const local=new DatabaseSync(localPath);
+    try{
+      local.exec("CREATE TABLE session_v2(id TEXT PRIMARY KEY,parent_id TEXT,model TEXT,time_created INTEGER,time_updated INTEGER,tokens_input INTEGER,tokens_output INTEGER,tokens_reasoning INTEGER,tokens_cache_read INTEGER,tokens_cache_write INTEGER); CREATE TABLE session_message(session_id TEXT,type TEXT,data TEXT)");
+      let n=0;
+      const outcome=await runFocusedVerification({plan,originalRecord:original,onCharge:r=>chargeFocusedVerificationAttempt(db,runId,r),invoke:async r=>{
+        const res=result(db,r,++n);
+        if(n===2){
+          const at=Date.now();
+          local.prepare("INSERT INTO session_v2 VALUES (?,?,?,?,?,?,?,?,?,?)").run(res.sessionId,null,JSON.stringify({id:"model-b",providerID:"opencode-go"}),at,at,123,45,0,60,0);
+          local.prepare("INSERT INTO session_message VALUES (?,?,?)").run(res.sessionId,"assistant",JSON.stringify({tokens:{input:123}}));
+        }
+        recordFocusedEngineResult(db,runId,res);return res;
+      },onReceipt:r=>acceptFocusedVerificationReceipt(db,runId,r)});
+      assert.equal(outcome.status,"evidence_ready",JSON.stringify(outcome));
+      finishFocusedVerificationLedger(db,runId,outcome);
+      const saved=getFocusedVerificationLedger(db,runId,localPath);
+      assert.equal(saved.attempts[0]?.usage,null);
+      assert.deepEqual(saved.attempts[1]?.usage,{source:"opencode-session",input:123,output:45,reasoning:0,cacheRead:60,cacheWrite:0,partial:false});
+      local.prepare("UPDATE session_v2 SET model=?").run(JSON.stringify({id:"other",providerID:"opencode-go"}));
+      assert.equal(getFocusedVerificationLedger(db,runId,localPath).attempts[1]?.usage,null);
+      assert.equal(getFocusedVerificationLedger(db,runId,localPath).status,"evidence_ready");
+    }finally{local.close();}
   });
 });

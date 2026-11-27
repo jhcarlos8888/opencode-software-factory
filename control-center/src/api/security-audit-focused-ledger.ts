@@ -1,7 +1,10 @@
 /** Internal durable evidence ledger. Separate from full audit and remediation
  * closure. Only the server-owned publication gate can certify a fix. */
 import {createHash} from "node:crypto";
-import type {DatabaseSync} from "node:sqlite";
+import {DatabaseSync} from "node:sqlite";
+import {homedir} from "node:os";
+import {join} from "node:path";
+import {claudeResultUsage,openCodeSessionUsage,type AuditTokenUsage} from "./security-audit-usage.js";
 import type {FocusedRevalidationPlan} from "./security-audit-focused-revalidation.js";
 import type {FocusedNativeSourceCheck} from "./security-audit-focused-native.js";
 import type {FocusedVerificationRequest,FocusedVerificationResult,FocusedVerificationReceipt,FocusedVerificationOutcome} from "./security-audit-focused-runner.js";
@@ -40,9 +43,11 @@ export function initializeFocusedVerificationSchema(db:DatabaseSync):void {
   const cols=new Set(db.prepare("PRAGMA table_info(security_audit_focused_attempts)").all().map(c=>String(c.name)));
   if(!cols.has("native_evidence_json"))db.exec("ALTER TABLE security_audit_focused_attempts ADD COLUMN native_evidence_json TEXT");
   if(!cols.has("native_evidence_sha256"))db.exec("ALTER TABLE security_audit_focused_attempts ADD COLUMN native_evidence_sha256 TEXT");
+  if(!cols.has("usage_json"))db.exec("ALTER TABLE security_audit_focused_attempts ADD COLUMN usage_json TEXT");
+  if(!cols.has("usage_session_id"))db.exec("ALTER TABLE security_audit_focused_attempts ADD COLUMN usage_session_id TEXT");
 }
 type RunRow={execution_run_id:string;audit_run_id:string;fingerprint:string;project_path:string;remediation_execution_id:string;plan_json:string;plan_sha256:string;status:string;reason:string|null;created_at:string;finished_at:string|null};
-type AttemptRow={instance_id:string;execution_run_id:string;ordinal:number;agent_id:string;engine:string;model_id:string;status:string;agent_run_id:string|null;handoff_id:string|null;session_id:string|null;output_sha256:string|null;native_evidence_json:string|null;native_evidence_sha256:string|null;receipt_json:string|null;receipt_sha256:string|null;started_at:string;finished_at:string|null};
+type AttemptRow={usage_json:string|null;usage_session_id:string|null;instance_id:string;execution_run_id:string;ordinal:number;agent_id:string;engine:string;model_id:string;status:string;agent_run_id:string|null;handoff_id:string|null;session_id:string|null;output_sha256:string|null;native_evidence_json:string|null;native_evidence_sha256:string|null;receipt_json:string|null;receipt_sha256:string|null;started_at:string;finished_at:string|null};
 function getRun(db:DatabaseSync,runId:string):RunRow{
   const row=db.prepare("SELECT * FROM security_audit_focused_runs WHERE execution_run_id=?").get(runId) as RunRow|undefined;
   require(row,"focused_run_missing");return row;
@@ -181,11 +186,45 @@ export function finishFocusedVerificationLedger(db:DatabaseSync,runId:string,out
     db.prepare("UPDATE security_audit_focused_runs SET status=?,reason=?,finished_at=? WHERE execution_run_id=? AND status='running'").run(outcome.status,outcome.reason,now(),runId);
   });
 }
-export function getFocusedVerificationLedger(db:DatabaseSync,runId:string){
-  const row=getRun(db,runId);
+/** Optional counters only. The SDK result must belong to the exact active
+ * native agent. Metrics do not participate in security certification. */
+export function storeFocusedClaudeUsage(db:DatabaseSync,runId:string,instanceId:string,sessionId:string,event:unknown):void {
+  const usage=claudeResultUsage(event);
+  if(!usage||!id(sessionId))return;
+  db.prepare("UPDATE security_audit_focused_attempts SET usage_json=?,usage_session_id=? WHERE execution_run_id=? AND instance_id=? AND engine='claude' AND status='charged' AND (usage_session_id IS NULL OR usage_session_id=?) AND EXISTS(SELECT 1 FROM execution_agents a WHERE a.id=? AND a.run_id=? AND a.agent_id=security_audit_focused_attempts.agent_id AND a.engine='claude' AND a.model_id=security_audit_focused_attempts.model_id AND a.session_id=? AND a.permission_profile='read-only')").run(JSON.stringify(usage),sessionId,runId,instanceId,sessionId,instanceId,runId,sessionId);
+}
+function focusedUsage(db:DatabaseSync,runId:string,entries:AttemptRow[],databasePath:string):Map<string,{sessionId:string;usage:AuditTokenUsage}> {
+  const result=new Map<string,{sessionId:string;usage:AuditTokenUsage}>();
+  let local:DatabaseSync|null=null;
+  const n=(v:unknown)=>typeof v==="number"&&Number.isSafeInteger(v)&&v>=0?v:null;
+  try{
+    for(const a of entries){
+      try{
+        const agent=db.prepare("SELECT run_id,agent_id,engine,model_id,session_id,permission_profile,status FROM execution_agents WHERE id=?").get(a.instance_id);
+        if(agent?.run_id!==runId||agent.agent_id!==a.agent_id||agent.engine!==a.engine||agent.model_id!==a.model_id||agent.permission_profile!=="read-only"||!id(agent.session_id))continue;
+        const sessionId=agent.session_id;
+        if(a.session_id!==null&&a.session_id!==sessionId)continue;
+        if(db.prepare("SELECT count(*) AS n FROM execution_agents WHERE engine=? AND session_id=?").get(a.engine,sessionId)?.n!==1)continue;
+        let usage:AuditTokenUsage|null=null;
+        if(a.engine==="opencode"){
+          local??=new DatabaseSync(databasePath,{readOnly:true});
+          usage=openCodeSessionUsage(local,{engine:a.engine,model:a.model_id,sessionId,startedAt:a.started_at,finishedAt:a.finished_at,outcome:a.status});
+        }else if(a.engine==="claude"&&a.usage_session_id===sessionId&&typeof a.usage_json==="string"){
+          const v=JSON.parse(a.usage_json);
+          if(v?.source==="claude-sdk-result"&&(n(v.input)!==null||n(v.output)!==null))
+            usage={source:"claude-sdk-result",input:n(v.input),output:n(v.output),reasoning:null,cacheRead:n(v.cacheRead),cacheWrite:n(v.cacheWrite),partial:v.partial!==false||a.status!=="succeeded"};
+        }
+        if(usage)result.set(a.instance_id,{sessionId,usage});
+      }catch{/* Optional counters must not change evidence or status. */}
+    }
+  }finally{try{local?.close();}catch{}}
+  return result;
+}
+export function getFocusedVerificationLedger(db:DatabaseSync,runId:string,databasePath=join(process.env.XDG_DATA_HOME||join(homedir(),".local","share"),"opencode","opencode.db")){
+  const row=getRun(db,runId),entries=attempts(db,runId),usage=focusedUsage(db,runId,entries,databasePath);
   return {executionRunId:row.execution_run_id,plan:getPlan(row),status:row.status,reason:row.reason,createdAt:row.created_at,finishedAt:row.finished_at,
-    attempts:attempts(db,runId).map(a=>({instanceId:a.instance_id,ordinal:a.ordinal,agentId:a.agent_id,engine:a.engine,modelId:a.model_id,status:a.status,
-      sessionId:a.session_id,startedAt:a.started_at,finishedAt:a.finished_at,nativeEvidenceSha256:a.native_evidence_sha256,receipt:readReceipt(a)}))};
+    attempts:entries.map(a=>({instanceId:a.instance_id,ordinal:a.ordinal,agentId:a.agent_id,engine:a.engine,modelId:a.model_id,status:a.status,
+      sessionId:a.session_id,startedAt:a.started_at,finishedAt:a.finished_at,nativeEvidenceSha256:a.native_evidence_sha256,receipt:readReceipt(a),usage:usage.get(a.instance_id)?.usage??null}))};
 }
 
 /** Recovery is called after the ordinary execution recovery has marked
