@@ -16,6 +16,7 @@ import {
   parseStructuredSecurityAuditOutput,
   runSecurityAuditOrchestrator,
   seedSecurityAuditLedger,
+  historicalClaimsForVerifier,
   type SecurityAuditAgentInvoker,
   type SecurityAuditEngine,
   type SecurityAuditInvocationRequest,
@@ -3563,4 +3564,31 @@ test("pending coverage and rejected verifier outputs get specific operational cl
   assert.equal(outcome.incompleteReason,"coverage_incomplete");
   assert.equal(getSecurityAuditRun(db,runId)?.incompleteReason,"coverage_incomplete");
   assert.match(readFileSync(resolveSecurityAuditRunDirectory(runId).paths["REPORT.md"],"utf8"),/coverage_incomplete/);
+});
+
+test("historical verification gets the exact original claim from the same target and scope, never as a current hunter claim", async () => {
+  const fingerprint="prior-revalidation-original";
+  const prior=registerPriorRun("prior-original-claim", [priorCandidateUnit(fingerprint,"ATTACK-CLASSES.md#BROKEN-ACCESS-CONTROL")]);
+  const record=officialRecord(fingerprint,"confirmed");
+  const history={...prior,findings:[record,officialRecord("different-fingerprint","confirmed")]};
+  const unrelated={...history,runId:"unrelated",target:"/other/project"};
+  const claims=historicalClaimsForVerifier([unrelated,history],fixtureRoot,fingerprint,["src/api/handler.ts"]);
+  assert.equal(claims.length,1);
+  assert.equal(claims[0]?.priorRunId,prior.runId);
+  assert.equal(claims[0]?.historicalVerdict,"confirmed");
+  assert.equal(claims[0]?.title,record.title);
+  assert.deepEqual(historicalClaimsForVerifier([history],fixtureRoot,fingerprint,["src/lib/index.ts"]),[]);
+  assert.deepEqual(historicalClaimsForVerifier([unrelated],fixtureRoot,fingerprint,["src/api/handler.ts"]),[]);
+  assert.deepEqual(historicalClaimsForVerifier([history],fixtureRoot,"unrelated-fingerprint",["src/api/handler.ts"]),[]);
+  const fake=createTestInvoker();
+  const {deps}=makeDeps(fake.invoker);
+  const runId="orch-historical-verifier-context";
+  await runSecurityAuditOrchestrator(deps,baseConfig({runId,priorRuns:[history]}));
+  const request=fake.requests.find(r=>r.phase===3&&requestedFingerprint(r)===fingerprint);
+  assert.ok(request);
+  assert.match(request.prompt,/HIPÓTESIS HISTÓRICAS/);
+  assert.ok(request.prompt.includes(String(record.title)));
+  assert.ok(request.prompt.includes(prior.runId));
+  assert.ok(!request.prompt.includes("CANDIDATO A VALIDAR:"));
+  assert.equal(loadSecurityAuditWorkState(db,runId)?.candidateById[fingerprint],undefined);
 });
