@@ -76,6 +76,7 @@ interface FakeHarness {
   setExecution: (value: unknown) => void;
   setExecutionFor: (runId: string, value: unknown) => void;
   setAssignments: (value: unknown[]) => void;
+  enableFocused: (start: NonNullable<SecurityAuditApiDeps["startFocusedVerification"]>) => void;
 }
 
 function makeHarness(): FakeHarness {
@@ -194,6 +195,7 @@ function makeHarness(): FakeHarness {
     setExecution: (value) => { execution = value; },
     setExecutionFor: (runId, value) => { executionsByRunId.set(runId, value); },
     setAssignments: (value) => { assignments = value; },
+    enableFocused: start => { deps.startFocusedVerification=start; },
   };
 }
 
@@ -1816,6 +1818,20 @@ test("focused revalidation derives a bounded plan from real original evidence wi
   assert.equal(body.plan.executionPolicy,"source-only");assert.equal(body.plan.fingerprint,fp);
   assert.deepEqual(counts(),before);assert.equal(h.calls.length,0);
   assert.equal(listSecurityAuditRemediations(h.db,auditRunId)[0]?.state,"in_progress");
+  const startUrl=url.replace("/verification-plan","/verify-focused");
+  assert.equal((await h.app.inject({method:"POST",url:startUrl,payload:{planSha256:body.planSha256}})).statusCode,503);
+  let started=0;
+  h.enableFocused(async(audit,fingerprint,digest,factory)=>{
+    assert.equal(audit,auditRunId);assert.equal(fingerprint,fp);assert.equal(factory,"/factory");
+    if(digest!==body.planSha256)throw Error("plan cambió");
+    started++;return {runId:"focused-test-exec"};
+  });
+  assert.equal((await query()).json().executable,true);
+  assert.equal((await h.app.inject({method:"POST",url:startUrl,payload:{planSha256:body.planSha256,evidence:[{}]}})).statusCode,400);
+  assert.equal((await h.app.inject({method:"POST",url:startUrl,payload:{planSha256:"b".repeat(64)}})).statusCode,409);
+  assert.equal(started,0);
+  const admitted=await h.app.inject({method:"POST",url:startUrl,payload:{planSha256:body.planSha256}});
+  assert.equal(admitted.statusCode,202);assert.equal(admitted.json().executionRunId,"focused-test-exec");assert.equal(admitted.json().fullAudit,false);assert.equal(started,1);
 
   h.setExecutionFor(remediationId,{run:{...linked,status:"running"}});
   assert.equal((await query()).statusCode,409);

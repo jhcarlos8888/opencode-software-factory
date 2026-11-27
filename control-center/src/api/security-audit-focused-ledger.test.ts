@@ -6,7 +6,7 @@ import {join} from "node:path";
 import {DatabaseSync} from "node:sqlite";
 import {test} from "node:test";
 import {initializeSecurityAuditSchema,createSecurityAuditRun,upsertSecurityAuditFinding,createSecurityAuditRemediation,transitionSecurityAuditRemediation,listSecurityAuditRemediations} from "./security-audit-persistence.js";
-import {beginFocusedVerificationLedger,chargeFocusedVerificationAttempt,recordFocusedEngineResult,acceptFocusedVerificationReceipt,finishFocusedVerificationLedger,getFocusedVerificationLedger,recoverFocusedVerificationLedgers} from "./security-audit-focused-ledger.js";
+import {beginFocusedVerificationLedger,chargeFocusedVerificationAttempt,recordFocusedEngineResult,acceptFocusedVerificationReceipt,finishFocusedVerificationLedger,getFocusedVerificationLedger,recoverFocusedVerificationLedgers,publishFocusedVerification} from "./security-audit-focused-ledger.js";
 import {runFocusedVerification,type FocusedVerificationRequest,type FocusedVerificationResult} from "./security-audit-focused-runner.js";
 import {FOCUSED_REVALIDATION_BUDGET,type FocusedRevalidationPlan} from "./security-audit-focused-revalidation.js";
 import {resolveSecurityAuditScopeFiles,snapshotSecurityAuditScope} from "./security-audit-scope.js";
@@ -43,7 +43,7 @@ async function fixture(fn:(db:DatabaseSync,plan:FocusedRevalidationPlan)=>Promis
 }
 function result(db:DatabaseSync,r:FocusedVerificationRequest,n:number,sessionId="session-"+n):FocusedVerificationResult{
   const res:FocusedVerificationResult={instanceId:r.instanceId,agentRunId:r.instanceId,handoffId:"handoff-"+n,sessionId,verifier:r.verifier,status:"succeeded",
-    output:JSON.stringify({fingerprint:fp,decision:"fixed",record:rejected,source_checks:[{file:path,line:1,quote:line}]})};
+    output:JSON.stringify({fingerprint:fp,decision:"fixed",record:rejected,source_checks:[{file:path,line:1,quote:line}]}),nativeSourceChecks:[{file:path,line:1,lineSha256:hash(line)}]};
   db.prepare("INSERT INTO execution_agents VALUES(?,?,?,?,?,?,?,?)").run(r.instanceId,runId,r.verifier.agentId,r.verifier.engine,r.verifier.modelId,"read-only","succeeded",sessionId);
   return res;
 }
@@ -151,5 +151,38 @@ test("restart reconciles interrupted focused attempts without replay or changing
     assert.equal(ledger.status,"incomplete");assert.equal(ledger.reason,"execution_interrupted");assert.equal(ledger.attempts[0]?.status,"interrupted");assert.equal(ledger.attempts[0]?.receipt,null);
     assert.equal(recoverFocusedVerificationLedgers(db),0);
     assert.equal(listSecurityAuditRemediations(db,auditId)[0]?.state,"in_progress");
+  });
+});
+
+test("only a terminal two-engine consensus on the fresh plan can certify a remediation",async()=>{
+  await fixture(async(db,plan)=>{
+    beginFocusedVerificationLedger(db,runId,plan);
+    let n=0;
+    const outcome=await runFocusedVerification({plan,originalRecord:original,onCharge:r=>chargeFocusedVerificationAttempt(db,runId,r),
+      invoke:async r=>{const res=result(db,r,++n);recordFocusedEngineResult(db,runId,res);return res;},
+      onReceipt:r=>acceptFocusedVerificationReceipt(db,runId,r)});
+    assert.equal(outcome.status,"evidence_ready",JSON.stringify(outcome));
+    finishFocusedVerificationLedger(db,runId,outcome);
+    db.exec("ALTER TABLE execution_runs ADD COLUMN started_at TEXT");
+    db.prepare("UPDATE execution_runs SET started_at=?,finished_at=? WHERE id=?").run("2026-11-27T12:01:00Z","2099-01-01T00:00:00Z",runId);
+    assert.throws(()=>publishFocusedVerification(db,runId,plan),/execution_mismatch/);
+    db.prepare("UPDATE execution_runs SET status='succeeded' WHERE id=?").run(runId);
+    assert.throws(()=>publishFocusedVerification(db,runId,{...plan,currentSnapshotSha256:"b".repeat(64)}),/closure_stale/);
+    const first=outcome.receipts[0]!;
+    db.prepare("UPDATE execution_agents SET session_id='fake' WHERE id=?").run(first.agentRunId);
+    assert.throws(()=>publishFocusedVerification(db,runId,plan),/agent_receipt_mismatch/);
+    db.prepare("UPDATE execution_agents SET session_id=? WHERE id=?").run(first.sessionId,first.agentRunId);
+    assert.equal(listSecurityAuditRemediations(db,auditId)[0]?.state,"in_progress");
+    const native=db.prepare("SELECT native_evidence_json FROM security_audit_focused_attempts WHERE instance_id=?").get(first.instanceId)?.native_evidence_json as string;
+    db.prepare("UPDATE security_audit_focused_attempts SET native_evidence_json='[]' WHERE instance_id=?").run(first.instanceId);
+    assert.throws(()=>publishFocusedVerification(db,runId,plan),/native_evidence_integrity/);
+    db.prepare("UPDATE security_audit_focused_attempts SET native_evidence_json=? WHERE instance_id=?").run(native,first.instanceId);
+    publishFocusedVerification(db,runId,plan);
+    const rem=listSecurityAuditRemediations(db,auditId)[0]!;
+    assert.equal(rem.state,"verified_fixed");assert.equal(rem.evidence.length,1);
+    assert.equal((rem.evidence[0] as {fullAudit:boolean}).fullAudit,false);
+    assert.equal(db.prepare("SELECT verdict FROM security_audit_findings WHERE run_id=? AND fingerprint=?").get(auditId,fp)?.verdict,"confirmed");
+    assert.throws(()=>publishFocusedVerification(db,runId,plan),/remediation_changed/);
+    assert.equal(listSecurityAuditRemediations(db,auditId)[0]?.evidence.length,1);
   });
 });

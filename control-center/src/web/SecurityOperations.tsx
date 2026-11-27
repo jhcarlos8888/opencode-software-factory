@@ -93,7 +93,8 @@ interface FocusedPlanPreview {
     executionPolicy: string;
     fullAudit: false;
   };
-  executable: false;
+  executable: boolean;
+  planSha256: string;
   message: string;
 }
 
@@ -171,6 +172,10 @@ interface RunStatus {
     executionRunId: string | null;
     executionStatus?: string | null;
     evidenceCount: number;
+    focusedVerification?: {
+      executionRunId:string;status:string;reason:string|null;
+      attempts:Array<{ordinal:number;agentId:string;engine:string;modelId:string;status:string;sessionId:string|null;receipt:{decision:string;officialValidator:string}|null}>;
+    } | null;
     updatedAt: string;
   }>;
   validators: { ledger: string; findings: string };
@@ -323,7 +328,7 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
 
   // Sondear también mientras la ejecución espera a que el orquestador registre
   // la auditoría y mientras la API responda 202 "preparando" (Paquete 8).
-  const polling = Boolean(awaitingExecutionId) || preparingAudit || shouldPollSecurityAudit(status?.run);
+  const polling = Boolean(awaitingExecutionId) || preparingAudit || shouldPollSecurityAudit(status?.run) || Boolean(status?.remediations.some(r=>r.focusedVerification?.status==="running"));
   useEffect(() => {
     if (!polling || !selectedRunId) return;
     const timer = setInterval(() => { void loadStatus(selectedRunId); }, 1500);
@@ -489,6 +494,22 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
       if (selectedRunRef.current !== runId) return;
       setFocusedPlans(previous => ({...previous, [fingerprint]:preview}));
       setNotice(preview.message);
+    });
+  }
+
+  async function startFocused(fingerprint:string):Promise<void>{
+    const runId=selectedRunId,preview=focusedPlans[fingerprint];
+    if(!preview?.executable||!preview.planSha256)return;
+    await runAction(async()=>{
+      const result=await securityApi<{executionRunId:string}>(
+        "/api/security-audit/runs/"+encodeURIComponent(runId)+"/remediations/"+encodeURIComponent(fingerprint)+"/verify-focused",
+        {method:"POST",body:JSON.stringify({planSha256:preview.planSha256})});
+      onExecutionStarted(result.executionRunId,false);
+      if(selectedRunRef.current!==runId)return;
+      setFocusedPlans(previous=>{const next={...previous};delete next[fingerprint];return next;});
+      trackExecution(result.executionRunId);
+      setNotice("Revalidación focalizada iniciada. Máximo dos invocaciones; no es una auditoría completa.");
+      await loadStatus(runId);
     });
   }
 
@@ -927,6 +948,19 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
                     <code>{remediation.fingerprint}</code> → {securityAuditRemediationLabel(remediation.state, remediation.executionStatus)}
                     {remediation.executionRunId ? ` · ejecución ${remediation.executionRunId.slice(0, 8)}` : ""}
                     {" · evidencias: "}{remediation.evidenceCount}
+                    {remediation.focusedVerification && (
+                      <div className="security-ops-hint">
+                        <strong>Revalidación focalizada · {remediation.focusedVerification.status}</strong>
+                        <p>Ejecución: {remediation.focusedVerification.executionRunId} · {remediation.focusedVerification.attempts.length}/2 intentos</p>
+                        {remediation.focusedVerification.reason && <p>Motivo: {remediation.focusedVerification.reason}</p>}
+                        {remediation.focusedVerification.attempts.map(a=><p key={a.ordinal}>{a.agentId} · {a.engine} · {a.modelId} · {a.status}{a.receipt ? " · "+a.receipt.decision+" · validador "+a.receipt.officialValidator : a.status==="succeeded" ? " · evidencia no aceptada" : ""}</p>)}
+                        {remediation.focusedVerification.status==="running" && <button type="button" disabled={busy} onClick={()=>void runAction(async()=>{
+                          await securityApi("/api/executions/"+encodeURIComponent(remediation.focusedVerification!.executionRunId)+"/cancel",{method:"POST",body:"{}"});
+                          await loadStatus(selectedRunId);
+                        })}>Cancelar revalidación focalizada</button>}
+                        <p>No equivale a una auditoría completa. La certificación se refleja en el estado de remediación.</p>
+                      </div>
+                    )}
                     {remediation.state !== "verified_fixed" && (
                       <div>
                         {remediation.executionStatus === "succeeded" && (
@@ -944,7 +978,11 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
                               actual {focusedPlans[remediation.fingerprint]!.plan.currentFileSha256.slice(0,12)}</p>
                             <p>Presupuesto previsto: {focusedPlans[remediation.fingerprint]!.plan.budget.maxInvocations} invocaciones · source-only ·
                               {focusedPlans[remediation.fingerprint]!.plan.verifiers.map(v => " " + v.agentId + " / " + v.engine + " / " + v.modelId).join(" · ")}</p>
-                            <p>No es una auditoría completa. No acredita verified_fixed. Ejecución focalizada pendiente de habilitación.</p>
+                            <p>No es una auditoría completa. La preparación no acredita verified_fixed.</p>
+                            {focusedPlans[remediation.fingerprint]!.executable ?
+                              <button type="button" disabled={busy||activeExecution||Boolean(awaitingExecutionId)}
+                                onClick={()=>void startFocused(remediation.fingerprint)}>Ejecutar revalidación focalizada (máximo 2 invocaciones)</button> :
+                              <p>Ejecutor focalizado no disponible.</p>}
                           </div>
                         )}
                         <span className="security-ops-revalidate">

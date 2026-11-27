@@ -187,6 +187,7 @@ interface ExecutionConfigurationSnapshot {
     reason: string;
   }>;
   securityAudit?: { profile: string; resumeRunId?: string | null; roster: Array<{ agentId: string; engine: string; modelId: string }> };
+  focusedRevalidation?: {planSha256:string;auditRunId:string;fingerprint:string};
   roleInstructionDigests: Record<string, string>;
   roleInstructions: Record<string, string>;
   instructionFiles?: Array<{ id: string; name: string; sha256: string; byteLength: number }>;
@@ -860,7 +861,7 @@ export default function App() {
   const claude = engines.find((item) => item.id === "claude");
   const configuredCount = Object.values(assignments).filter((item) => item?.enabled).length;
   const activeExecution = Boolean(execution && ["queued", "running", "waiting"].includes(execution.run.status));
-  const recoverableDeniedRoles = execution && execution.run.status === "failed" && !execution.run.configurationSnapshot?.securityAudit
+  const recoverableDeniedRoles = execution && execution.run.status === "failed" && !execution.run.configurationSnapshot?.securityAudit && !execution.run.configurationSnapshot?.focusedRevalidation
     ? execution.agents.filter(agent => agent.status === "failed" && agent.engine === "opencode" &&
       execution.decisionHistory.some(decision => decision.agentRunId === agent.id && decision.kind === "permission" &&
         decision.engineSessionId === agent.sessionId && decision.status === "rejected"))
@@ -2248,7 +2249,7 @@ function describeEngineActivity(message: string, kind: string): {
 }
 
 function EngineActivityPanel({ engine, execution, roleNames, statusLabels }: EngineActivityPanelProps) {
-  const audit = Boolean(execution.run.configurationSnapshot?.securityAudit);
+  const audit = Boolean(execution.run.configurationSnapshot?.securityAudit || execution.run.configurationSnapshot?.focusedRevalidation);
   const activeRound = ["queued", "running", "waiting"].includes(execution.run.status);
   const activity = projectEngineActivity(engine, execution.agents,
     execution.run.configurationSnapshot?.assignments ?? [], audit, activeRound);

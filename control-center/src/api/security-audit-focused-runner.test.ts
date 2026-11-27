@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { runFocusedVerification,type FocusedVerificationRequest,type FocusedVerificationResult } from "./security-audit-focused-runner.js";
 import { FOCUSED_REVALIDATION_BUDGET,type FocusedRevalidationPlan } from "./security-audit-focused-revalidation.js";
+import {focusedLineSha256} from "./security-audit-focused-native.js";
 import { resolveSecurityAuditScopeFiles,snapshotSecurityAuditScope } from "./security-audit-scope.js";
 
 const fp="focused-finding";
@@ -143,5 +144,25 @@ test("fixed evidence cannot omit a file from the historical scope or omit real s
     const outcome=await runFocusedVerification({plan:{...plan,scope,originalRecordSha256:hash(extended),currentSnapshotSha256:current.sha256},originalRecord:extended,invoke:async r=>fake(r,1)});
     assert.equal(outcome.status,"incomplete");assert.equal(outcome.reason,"focused_scope_not_checked");
     assert.equal(outcome.attempted,1);
+  });
+});
+
+test("a missing duplicate model quote is backed only by the exact line in native read evidence",async()=>{
+  await fixture(async(plan,root)=>{
+    const write="store.set(id, updated);";
+    writeFileSync(join(root,file),line+"\n"+write+"\n");
+    const snapshot=await snapshotSecurityAuditScope(await resolveSecurityAuditScopeFiles(root,plan.scope));
+    plan={...plan,currentSnapshotSha256:snapshot.sha256,currentFileSha256:snapshot.files[0]!.sha256};
+    const report={...rejected,trace:[{...loc,line:2}],evidence:[evidence,{...evidence,line:2,description:"Write follows the owner guard."}]};
+    const native=[{file,line:1,lineSha256:focusedLineSha256(line)},{file,line:2,lineSha256:focusedLineSha256(write)}];
+    let n=0;
+    const good=await runFocusedVerification({plan,originalRecord:original,invoke:async r=>({...fake(r,++n,"fixed",{record:report}),nativeSourceChecks:native})});
+    assert.equal(good.status,"evidence_ready",JSON.stringify(good));
+    assert.deepEqual(good.receipts[0]?.sourceChecks.map(c=>[c.line,c.origin]),[[1,"model_quote"],[2,"native_read"]]);
+    assert.equal(good.receipts[0]?.sourceChecks[1]?.quoteSha256,native[1]!.lineSha256);
+    for(const [checks,reason] of [[native.slice(0,1),"record_location_not_checked"],[[native[0]!,{...native[1]!,lineSha256:"b".repeat(64)}],"native_source_mismatch"],[native.slice(1),"model_quote_not_read"]] as const){
+      const bad=await runFocusedVerification({plan,originalRecord:original,invoke:async r=>({...fake(r,1,"fixed",{record:report}),nativeSourceChecks:[...checks]})});
+      assert.equal(bad.status,"incomplete");assert.equal(bad.reason,reason,JSON.stringify(bad));assert.equal(bad.attempted,1);
+    }
   });
 });

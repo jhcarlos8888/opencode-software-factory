@@ -1,8 +1,9 @@
 /** Internal durable evidence ledger. Separate from full audit and remediation
- * closure. No public write API and no verified_fixed transition here. */
+ * closure. Only the server-owned publication gate can certify a fix. */
 import {createHash} from "node:crypto";
 import type {DatabaseSync} from "node:sqlite";
 import type {FocusedRevalidationPlan} from "./security-audit-focused-revalidation.js";
+import type {FocusedNativeSourceCheck} from "./security-audit-focused-native.js";
 import type {FocusedVerificationRequest,FocusedVerificationResult,FocusedVerificationReceipt,FocusedVerificationOutcome} from "./security-audit-focused-runner.js";
 const digest=(s:string)=>createHash("sha256").update(s).digest("hex");
 const hash=(v:unknown)=>digest(JSON.stringify(v));
@@ -36,9 +37,12 @@ export function initializeFocusedVerificationSchema(db:DatabaseSync):void {
     "CHECK((receipt_json IS NULL AND receipt_sha256 IS NULL) OR (status='succeeded' AND receipt_json IS NOT NULL AND receipt_sha256 IS NOT NULL)),",
     "CHECK((status='charged' AND finished_at IS NULL) OR (status<>'charged' AND finished_at IS NOT NULL)));"
   ].join(" "));
+  const cols=new Set(db.prepare("PRAGMA table_info(security_audit_focused_attempts)").all().map(c=>String(c.name)));
+  if(!cols.has("native_evidence_json"))db.exec("ALTER TABLE security_audit_focused_attempts ADD COLUMN native_evidence_json TEXT");
+  if(!cols.has("native_evidence_sha256"))db.exec("ALTER TABLE security_audit_focused_attempts ADD COLUMN native_evidence_sha256 TEXT");
 }
 type RunRow={execution_run_id:string;audit_run_id:string;fingerprint:string;project_path:string;remediation_execution_id:string;plan_json:string;plan_sha256:string;status:string;reason:string|null;created_at:string;finished_at:string|null};
-type AttemptRow={instance_id:string;execution_run_id:string;ordinal:number;agent_id:string;engine:string;model_id:string;status:string;agent_run_id:string|null;handoff_id:string|null;session_id:string|null;output_sha256:string|null;receipt_json:string|null;receipt_sha256:string|null;started_at:string;finished_at:string|null};
+type AttemptRow={instance_id:string;execution_run_id:string;ordinal:number;agent_id:string;engine:string;model_id:string;status:string;agent_run_id:string|null;handoff_id:string|null;session_id:string|null;output_sha256:string|null;native_evidence_json:string|null;native_evidence_sha256:string|null;receipt_json:string|null;receipt_sha256:string|null;started_at:string;finished_at:string|null};
 function getRun(db:DatabaseSync,runId:string):RunRow{
   const row=db.prepare("SELECT * FROM security_audit_focused_runs WHERE execution_run_id=?").get(runId) as RunRow|undefined;
   require(row,"focused_run_missing");return row;
@@ -65,6 +69,24 @@ function readReceipt(row:AttemptRow):FocusedVerificationReceipt|null{
   if(row.receipt_json===null)return null;
   require(digest(row.receipt_json)===row.receipt_sha256,"focused_receipt_integrity");
   return JSON.parse(row.receipt_json) as FocusedVerificationReceipt;
+}
+function nativeEvidence(value:unknown,plan:FocusedRevalidationPlan):FocusedNativeSourceCheck[]{
+  require(Array.isArray(value)&&value.length>0&&value.length<=64,"focused_native_evidence_missing");
+  const seen=new Set<string>();
+  for(const n of value){
+    require(n&&typeof n==="object"&&typeof n.file==="string"&&plan.scope.scopePaths.includes(n.file)&&
+      Number.isSafeInteger(n.line)&&n.line>0&&hex(n.lineSha256),"focused_native_evidence_invalid");
+    const key=JSON.stringify([n.file,n.line]);require(!seen.has(key),"focused_native_evidence_duplicate");seen.add(key);
+  }
+  return value.map(n=>({file:n.file,line:n.line,lineSha256:n.lineSha256}));
+}
+function verifyReceiptNative(a:AttemptRow,receipt:FocusedVerificationReceipt,plan:FocusedRevalidationPlan):void{
+  require(a.native_evidence_json&&digest(a.native_evidence_json)===a.native_evidence_sha256,"focused_native_evidence_integrity");
+  const native=nativeEvidence(JSON.parse(a.native_evidence_json),plan);
+  require(receipt.sourceChecks.every(c=>native.some(n=>n.file===c.file&&n.line===c.line&&n.lineSha256===c.nativeLineSha256)&&
+    (c.origin==="model_quote"||c.origin==="native_read"&&c.quoteSha256===c.nativeLineSha256)),"focused_native_receipt_mismatch");
+  const locations=[...(Array.isArray(receipt.record.trace)?receipt.record.trace:[]),...(Array.isArray(receipt.record.evidence)?receipt.record.evidence:[])];
+  require(locations.length>0&&locations.every(loc=>loc&&typeof loc==="object"&&receipt.sourceChecks.some(c=>c.file===loc.file&&c.line===loc.line)),"focused_native_location_missing");
 }
 /** Caller must recompute admission and create the linked queued execution. */
 export function beginFocusedVerificationLedger(db:DatabaseSync,runId:string,plan:FocusedRevalidationPlan):void{
@@ -104,7 +126,7 @@ export function chargeFocusedVerificationAttempt(db:DatabaseSync,runId:string,re
  * is never saved here, only its digest. */
 export function recordFocusedEngineResult(db:DatabaseSync,runId:string,result:FocusedVerificationResult):void{
   tx(db,()=>{
-    active(db,runId);
+    const plan=active(db,runId);
     const a=attempts(db,runId).find(row=>row.instance_id===result.instanceId);
     require(a?.status==="charged"&&result.verifier.agentId===a.agent_id&&result.verifier.engine===a.engine&&
       result.verifier.modelId===a.model_id&&result.agentRunId===result.instanceId&&id(result.handoffId)&&
@@ -118,8 +140,9 @@ export function recordFocusedEngineResult(db:DatabaseSync,runId:string,result:Fo
       require(others?.n===0,"focused_session_reused");
     }
     require(result.sessionId===null||id(result.sessionId),"focused_invalid_session");
-    db.prepare("UPDATE security_audit_focused_attempts SET status=?,agent_run_id=?,handoff_id=?,session_id=?,output_sha256=?,finished_at=? WHERE instance_id=?")
-      .run(result.status,result.agentRunId,result.handoffId,result.sessionId,result.status==="succeeded"?digest(result.output):null,now(),result.instanceId);
+    const native=result.status==="succeeded"?JSON.stringify(nativeEvidence(result.nativeSourceChecks,plan)):null;
+    db.prepare("UPDATE security_audit_focused_attempts SET status=?,agent_run_id=?,handoff_id=?,session_id=?,output_sha256=?,native_evidence_json=?,native_evidence_sha256=?,finished_at=? WHERE instance_id=?")
+      .run(result.status,result.agentRunId,result.handoffId,result.sessionId,result.status==="succeeded"?digest(result.output):null,native,native===null?null:digest(native),now(),result.instanceId);
   });
 }
 /** Internal parent-validated receipt hook; not a public input contract. */
@@ -136,6 +159,7 @@ export function acceptFocusedVerificationReceipt(db:DatabaseSync,runId:string,re
         plan.scope.scopePaths.includes(c.file)&&Number.isSafeInteger(c.line)&&c.line>0&&hex(c.quoteSha256))&&
       receipt.sourceChecks.some(c=>c.file===plan.findingPath)&&
       (receipt.decision!=="fixed"||plan.scope.scopePaths.every(file=>receipt.sourceChecks.some(c=>c.file===file))),"focused_invalid_receipt");
+    verifyReceiptNative(a,receipt,plan);
     const previous=attempts(db,runId).filter(row=>row.instance_id!==a.instance_id);
     require(!previous.some(row=>row.session_id===receipt.sessionId||row.handoff_id===receipt.handoffId||row.agent_run_id===receipt.agentRunId),"focused_identity_reused");
     const serialized=JSON.stringify(receipt);require(serialized.length<64000,"focused_receipt_size");
@@ -161,7 +185,7 @@ export function getFocusedVerificationLedger(db:DatabaseSync,runId:string){
   const row=getRun(db,runId);
   return {executionRunId:row.execution_run_id,plan:getPlan(row),status:row.status,reason:row.reason,createdAt:row.created_at,finishedAt:row.finished_at,
     attempts:attempts(db,runId).map(a=>({instanceId:a.instance_id,ordinal:a.ordinal,agentId:a.agent_id,engine:a.engine,modelId:a.model_id,status:a.status,
-      sessionId:a.session_id,startedAt:a.started_at,finishedAt:a.finished_at,receipt:readReceipt(a)}))};
+      sessionId:a.session_id,startedAt:a.started_at,finishedAt:a.finished_at,nativeEvidenceSha256:a.native_evidence_sha256,receipt:readReceipt(a)}))};
 }
 
 /** Recovery is called after the ordinary execution recovery has marked
@@ -178,4 +202,56 @@ export function recoverFocusedVerificationLedgers(db:DatabaseSync):number {
     }
     return rows.length;
   });
+}
+
+/** Only the current, successfully terminated focused execution may certify
+ * its exact remediation. The caller must freshly recompute the preflight
+ * from actual source and official artifacts; do not accept HTTP evidence. */
+export function publishFocusedVerification(db:DatabaseSync,runId:string,freshPlan:FocusedRevalidationPlan):void{
+  tx(db,()=>{
+    const row=getRun(db,runId),plan=getPlan(row);
+    require(row.status==="evidence_ready"&&row.reason===null&&row.finished_at&&hash(freshPlan)===row.plan_sha256,"focused_closure_stale");
+    const e=db.prepare("SELECT project_path,status,configuration_snapshot_json,started_at,finished_at FROM execution_runs WHERE id=?").get(runId);
+    require(e?.status==="succeeded"&&e.project_path===plan.projectPath&&typeof e.configuration_snapshot_json==="string"&&
+      JSON.parse(e.configuration_snapshot_json).focusedRevalidation?.planSha256===row.plan_sha256&&typeof e.started_at==="string"&&typeof e.finished_at==="string"&&
+      Date.parse(e.started_at)>Date.parse(plan.remediationFinishedAt)&&Date.parse(e.finished_at)>=Date.parse(row.finished_at),"focused_closure_execution_mismatch");
+    const finding=db.prepare("SELECT verdict,payload_json FROM security_audit_findings WHERE run_id=? AND fingerprint=?").get(row.audit_run_id,row.fingerprint);
+    require(finding?.verdict==="confirmed"&&typeof finding.payload_json==="string"&&hash(JSON.parse(finding.payload_json))===plan.originalRecordSha256,"focused_original_changed");
+    const remediation=db.prepare("SELECT state,execution_run_id,evidence_json FROM security_audit_remediations WHERE run_id=? AND fingerprint=?").get(row.audit_run_id,row.fingerprint);
+    require(remediation?.state==="in_progress"&&remediation.execution_run_id===row.remediation_execution_id&&typeof remediation.evidence_json==="string","focused_remediation_changed");
+    const rem=db.prepare("SELECT project_path,status,finished_at FROM execution_runs WHERE id=?").get(row.remediation_execution_id);
+    require(rem?.status==="succeeded"&&rem.project_path===plan.projectPath&&rem.finished_at===plan.remediationFinishedAt,"focused_remediation_not_succeeded");
+    const entries=attempts(db,runId);
+    require(entries.length===2&&entries.every(a=>a.status==="succeeded"&&a.receipt_json!==null),"focused_closure_no_consensus");
+    const receipts=entries.map((a,i)=>{
+      const receipt=readReceipt(a),expected=plan.verifiers[i];
+      require(receipt&&expected&&receipt.decision==="fixed"&&receipt.officialValidator==="PASS"&&
+        receipt.fingerprint===plan.fingerprint&&receipt.snapshotSha256===plan.currentSnapshotSha256&&receipt.record.verdict==="rejected"&&
+        receipt.record.fingerprint===plan.fingerprint&&hash(receipt.record)===receipt.recordSha256&&receipt.outputSha256===a.output_sha256&&
+        receipt.instanceId===a.instance_id&&receipt.agentRunId===a.agent_run_id&&receipt.handoffId===a.handoff_id&&receipt.sessionId===a.session_id&&
+        hash(receipt.verifier)===hash(expected)&&receipt.sourceChecks.every(c=>plan.scope.scopePaths.includes(c.file)&&Number.isSafeInteger(c.line)&&c.line>0&&hex(c.quoteSha256))&&
+        plan.scope.scopePaths.every(p=>receipt.sourceChecks.some(c=>c.file===p)),"focused_closure_receipt_mismatch");
+      verifyReceiptNative(a,receipt,plan);
+      const agent=db.prepare("SELECT run_id,agent_id,engine,model_id,permission_profile,status,session_id FROM execution_agents WHERE id=?").get(receipt.agentRunId);
+      require(agent?.run_id===runId&&agent.agent_id===expected.agentId&&agent.engine===expected.engine&&agent.model_id===expected.modelId&&agent.permission_profile==="read-only"&&agent.status==="succeeded"&&agent.session_id===receipt.sessionId,"focused_agent_receipt_mismatch");
+      return receipt;
+    });
+    require(receipts[0]!.sessionId!==receipts[1]!.sessionId&&receipts[0]!.agentRunId!==receipts[1]!.agentRunId&&receipts[0]!.handoffId!==receipts[1]!.handoffId,"focused_identity_reused");
+    const prior=JSON.parse(remediation.evidence_json);
+    require(Array.isArray(prior),"focused_invalid_remediation_evidence");
+    const evidence={kind:"focused_revalidation",fullAudit:false,executionRunId:runId,fingerprint:plan.fingerprint,
+      originalRecordSha256:plan.originalRecordSha256,originalFileSha256:plan.originalFileSha256,currentFileSha256:plan.currentFileSha256,
+      snapshotSha256:plan.currentSnapshotSha256,scopePaths:plan.scope.scopePaths,
+      verifiers:receipts.map(r=>({instanceId:r.instanceId,agentRunId:r.agentRunId,handoffId:r.handoffId,sessionId:r.sessionId,
+        ...r.verifier,recordSha256:r.recordSha256,outputSha256:r.outputSha256,nativeEvidenceSha256:entries.find(a=>a.instance_id===r.instanceId)?.native_evidence_sha256,officialValidator:r.officialValidator})),verifiedAt:now()};
+    const changed=db.prepare("UPDATE security_audit_remediations SET state='verified_fixed',evidence_json=?,updated_at=?,completed_at=? WHERE run_id=? AND fingerprint=? AND state='in_progress' AND execution_run_id=?")
+      .run(JSON.stringify([...prior,evidence]),evidence.verifiedAt,evidence.verifiedAt,row.audit_run_id,row.fingerprint,row.remediation_execution_id);
+    require(Number(changed.changes)===1,"focused_remediation_changed");
+  });
+}
+
+/** Latest durable execution for each remediation, including partial failure. */
+export function latestFocusedVerificationLedger(db:DatabaseSync,auditRunId:string,fingerprint:string){
+  const row=db.prepare("SELECT execution_run_id FROM security_audit_focused_runs WHERE audit_run_id=? AND fingerprint=? ORDER BY created_at DESC, rowid DESC LIMIT 1").get(auditRunId,fingerprint);
+  return typeof row?.execution_run_id==="string"?getFocusedVerificationLedger(db,row.execution_run_id):null;
 }

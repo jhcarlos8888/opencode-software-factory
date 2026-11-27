@@ -641,6 +641,7 @@ export interface ExecutionConfigurationSnapshot {
   };
   /** Remediación explícita vinculada al run de auditoría de origen. */
   securityRemediation?: { auditRunId: string; fingerprints: string[] };
+  focusedRevalidation?: { planSha256:string; auditRunId:string; fingerprint:string };
 }
 export interface WorkThreadRecord {
   id: string;

@@ -19,7 +19,7 @@ import {
 } from "./database.js";
 import { getClaudeModels, getDetectedClaudeProvider, getEngineVersion, getOpenCodeModels, readClaudeLocalConfig, listModels } from "./models.js";
 import { analyzeProject } from "./projects.js";
-import { cancelExecution, getExecution, getLatestExecution, recoverExecutionState, respondExecutionDecision, startExecution } from "./execution.js";
+import { cancelExecution, getExecution, getLatestExecution, recoverExecutionState, respondExecutionDecision, startExecution, startFocusedVerification } from "./execution.js";
 import { compareRuntimeBuilds, parseRuntimeBuildInfo } from "./runtime-build.js";
 import { CONTROL_CENTER_SECURITY_HEADERS, effectiveApiPort, inspectRequestSecurity } from "./request-security.js";
 import { validateCapabilityScopeInput } from "./auditor-capabilities.js";
@@ -114,6 +114,7 @@ app.addHook("onSend", async (_request, reply, payload) => {
 registerSecurityAuditRoutes(app, {
   factoryRoot,
   startExecution,
+  startFocusedVerification,
   cancelExecution,
   analyzeProject,
   getProjectPreflight,

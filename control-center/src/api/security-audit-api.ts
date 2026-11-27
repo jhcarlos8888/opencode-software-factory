@@ -37,6 +37,7 @@ import {
 } from "./security-audit-orchestrator.js";
 import { auditInvocationUsage } from "./security-audit-usage.js";
 import { prepareFocusedRevalidation } from "./security-audit-focused-revalidation.js";
+import { latestFocusedVerificationLedger, getFocusedVerificationLedger } from "./security-audit-focused-ledger.js";
 import { computeSecurityAuditPhaseStates } from "./security-audit-phase-status.js";
 import { validateSecurityAuditStartOptions } from "./security-audit-start.js";
 import {
@@ -71,6 +72,7 @@ export interface SecurityAuditApiDeps {
     options?: StartExecutionOptions,
   ) => Promise<{ runId: string }>;
   cancelExecution: (runId: string) => Promise<void>;
+  startFocusedVerification?: (auditRunId:string,fingerprint:string,planSha256:string,factoryRoot:string)=>Promise<{runId:string}>;
   analyzeProject: (path: string, depth: ResearchDepth) => Promise<{ path: string }>;
   getProjectPreflight: (path: string, depth: string) => ProjectPreflightSnapshot | null;
   consumeProjectPreflight: (path: string, depth: string) => { consumed: boolean; reason?: string };
@@ -616,6 +618,7 @@ function buildStatusPayload(deps: SecurityAuditApiDeps, runId: string): HandlerR
       executionRunId: remediation.executionRunId,
       executionStatus: remediation.executionRunId ? deps.getExecution(remediation.executionRunId)?.run.status ?? null : null,
       evidenceCount: remediation.evidence.length,
+      focusedVerification: latestFocusedVerificationLedger(db,runId,remediation.fingerprint),
       updatedAt: remediation.updatedAt,
       completedAt: remediation.completedAt,
     })),
@@ -1074,6 +1077,7 @@ export function registerSecurityAuditRoutes(
           executionRunId: remediation.executionRunId,
           executionStatus: remediation.executionRunId ? deps.getExecution(remediation.executionRunId)?.run.status ?? null : null,
           evidenceCount: remediation.evidence.length,
+          focusedVerification: latestFocusedVerificationLedger(db,runId,remediation.fingerprint),
           createdAt: remediation.createdAt,
           updatedAt: remediation.updatedAt,
           completedAt: remediation.completedAt,
@@ -1220,14 +1224,51 @@ export function registerSecurityAuditRoutes(
       try {
         const plan = await prepareFocusedRevalidation({db, getExecution:deps.getExecution,
           roster:buildAuditRoster(deps), auditRunId:runId, fingerprint});
-        return { plan, executable:false, message:"Plan comprobado sin invocar agentes. La ejecución focalizada todavía no está habilitada." };
+        const planSha256=createHash("sha256").update(JSON.stringify(plan)).digest("hex");
+        return {plan,planSha256,executable:Boolean(deps.startFocusedVerification),
+          message:"Plan comprobado sin invocar agentes. El inicio requiere una confirmación explícita."};
       } catch (error) {
         return reply.code(409).send({error:error instanceof Error ? error.message : String(error)});
       }
     },
   );
 
-  // 11) Revalidación: única vía a verified_fixed. La evidencia se DERIVA de un
+  // Focused verification has a separate budget, ledger and publication gate.
+  // The request never accepts output, scope, agent identities or evidence.
+  app.post<{Params:{runId:string;fingerprint:string};Body:{planSha256?:unknown}}>(
+    "/api/security-audit/runs/:runId/remediations/:fingerprint/verify-focused",
+    async(request,reply)=>{
+      const runId=parseRunId(request.params.runId),fingerprint=request.params.fingerprint;
+      const body=bodyOf(request.body),digest=body.planSha256;
+      if(!runId||!FINGERPRINT_PATTERN.test(fingerprint)||typeof digest!=="string"||!/^[a-f0-9]{64}$/.test(digest)||
+         Object.keys(body).some(key=>key!=="planSha256"))
+        return reply.code(400).send({error:"Se requiere exclusivamente el hash del plan focalizado comprobado."});
+      if(!deps.startFocusedVerification)return reply.code(503).send({error:"Ejecutor focalizado no disponible."});
+      if(!getSecurityAuditRun(deps.getFactoryDatabase(),runId))return reply.code(404).send({error:"Auditoría no encontrada."});
+      try{
+        // Independently recompute in the shared admission gate, not from the
+        // body of a preview or from an operator-supplied roster.
+        const result=await deps.startFocusedVerification(runId,fingerprint,digest,deps.factoryRoot);
+        return reply.code(202).send({executionRunId:result.runId,fullAudit:false});
+      }catch(error){
+        return reply.code(409).send({error:error instanceof Error?error.message:String(error)});
+      }
+    }
+  );
+  app.get<{Params:{runId:string;fingerprint:string;executionId:string}}>(
+    "/api/security-audit/runs/:runId/remediations/:fingerprint/focused-verification/:executionId",
+    async(request,reply)=>{
+      const runId=parseRunId(request.params.runId),executionId=parseRunId(request.params.executionId),fingerprint=request.params.fingerprint;
+      if(!runId||!executionId||!FINGERPRINT_PATTERN.test(fingerprint))return reply.code(400).send({error:"Identificador inválido."});
+      try{
+        const ledger=getFocusedVerificationLedger(deps.getFactoryDatabase(),executionId);
+        if(ledger.plan.auditRunId!==runId||ledger.plan.fingerprint!==fingerprint)return reply.code(404).send({error:"Evidencia focalizada no encontrada."});
+        return {ledger};
+      }catch{return reply.code(404).send({error:"Evidencia focalizada no disponible."});}
+    }
+  );
+
+  // 11) Revalidación por auditoría completa: vía tradicional a verified_fixed. La evidencia se DERIVA de un
   // run de verificación completo del mismo proyecto; nunca se acepta evidencia
   // arbitraria del cliente. F09: la evidencia phase5 debe ser del fingerprint
   // EXACTO con sesión/handoff/agentRun reales y posterior a la ejecución de la
