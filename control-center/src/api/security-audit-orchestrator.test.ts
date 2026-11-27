@@ -3592,3 +3592,61 @@ test("historical verification gets the exact original claim from the same target
   assert.ok(!request.prompt.includes("CANDIDATO A VALIDAR:"));
   assert.equal(loadSecurityAuditWorkState(db,runId)?.candidateById[fingerprint],undefined);
 });
+
+
+test("a malformed historical-style trace cannot poison a valid sibling or the persisted report", async () => {
+  const runId = "orch-mixed-invalid-trace";
+  const fake = createTestInvoker({
+    onInvoke: request => {
+      if (request.phase !== 3) return {};
+      const fingerprint = requestedFingerprint(request);
+      if (fingerprint !== "fp-1") return {};
+      const record = officialRecord(fingerprint, "rejected");
+      const location = record.trace[0]!;
+      return { output: JSON.stringify({decision:"unverified", fingerprint, record:{
+        ...record, trace:[
+          {...location,kind:"entrypoint",line:1},
+          {...location,kind:"propagation",line:2},
+          {...location,kind:"entrypoint",line:7},
+          {...location,kind:"sink",line:12}
+        ]
+      }}) };
+    },
+  });
+  const {deps,logs} = makeDeps(fake.invoker);
+  const outcome = await runSecurityAuditOrchestrator(deps, baseConfig({runId,profile:"standard",budget:{maxInvocations:24,maxConcurrency:1,maxDurationMs:600000}}));
+  assert.equal(outcome.status,"incomplete");
+  assert.equal(outcome.incompleteReason,"validator_failed");
+  assert.deepEqual(outcome.phasesComplete,[1,2,3,4,5,6]);
+  assert.ok(outcome.unvalidatedFingerprints.includes("fp-1"));
+  assert.ok(logs.some(l=>l.message.includes("trace[2].kind") && l.message.includes("propagation")));
+  assert.equal(fake.requests.filter(r=>r.phase===5).length,1);
+  const records=readFindings(runId);
+  assert.deepEqual(records.map(r=>r.fingerprint),["fp-2"]);
+  assert.deepEqual(listSecurityAuditFindings(db,runId).map(r=>r.payload),records);
+  const units=readLedgerUnits(runId);
+  assert.ok(units.some(u=>u.status==="candidate" && (u.result_fingerprints as string[]).includes("fp-1")));
+  const layout=resolveSecurityAuditRunDirectory(runId);
+  assert.equal(validateFindingsFile(layout.paths["findings.json"],layout.runDir).status,"PASS");
+  assert.equal(validateCoverageLedgerFile(layout.paths["coverage-ledger.json"],layout.runDir).status,"PASS");
+  const report=readFileSync(layout.paths["REPORT.md"],"utf8");
+  assert.match(report,/ESTADO: INCOMPLETO/);
+  assert.ok(report.includes("fp-1"));
+  assert.doesNotMatch(report,/Reclamo descartado/);
+});
+
+test("phase 3 rejects mismatched envelope even when the official record fingerprint matches",async()=>{
+  const runId="orch-envelope-fingerprint-mismatch";
+  const fake=createTestInvoker({onInvoke:request=>{
+    if(request.phase!==3)return {};
+    const fingerprint=requestedFingerprint(request);
+    if(fingerprint!=="fp-1")return {};
+    return {output:JSON.stringify({decision:"verified",fingerprint:"other-fingerprint",record:officialRecord(fingerprint,"confirmed")})};
+  }});
+  const {deps}=makeDeps(fake.invoker);
+  const outcome=await runSecurityAuditOrchestrator(deps,baseConfig({runId}));
+  assert.equal(outcome.status,"incomplete");
+  assert.ok(outcome.unvalidatedFingerprints.includes("fp-1"));
+  assert.ok(!readFindings(runId).some(r=>r.fingerprint==="fp-1"));
+  assert.ok(readLedgerUnits(runId).some(u=>u.status==="candidate"&&(u.result_fingerprints as string[]).includes("fp-1")));
+});

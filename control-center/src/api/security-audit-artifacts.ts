@@ -406,6 +406,18 @@ export function updateSecurityAuditCoverageLedger(
   return writeValidatedJson(layout, "coverage-ledger.json", ledger, validateCoverageLedgerFile);
 }
 
+/** Validate an individual proposed record with the same official CLI and
+ * redaction as publication. Never replace the shared findings artifact. */
+export function validateProposedSecurityAuditFinding(
+  layout: SecurityAuditRunLayout, record: Record<string, unknown>,
+): SecurityAuditUpstreamResult {
+  assertNoOutputSymlinkAncestors(layout.runDir);
+  const tempPath = join(layout.runDir, ".finding-proposal." + randomUUID() + ".tmp");
+  writeFileSync(tempPath, redactSecrets(serialize([record])), { mode: 0o600, flag: "wx" });
+  try { return validateFindingsFile(tempPath, layout.runDir); }
+  finally { unlinkSync(tempPath); }
+}
+
 /** Escritura/reemplazo de `findings.json` exige PASS del validador oficial. */
 export function writeSecurityAuditFindings(
   layout: SecurityAuditRunLayout,

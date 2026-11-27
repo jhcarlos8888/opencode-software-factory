@@ -97,6 +97,7 @@ import {
   updateSecurityAuditRunMetadataStatus,
   writeSecurityAuditArchitecture,
   writeSecurityAuditFindings,
+  validateProposedSecurityAuditFinding,
   writeSecurityAuditIncompleteArtifacts,
   writeSecurityAuditPhaseSixReports,
   writeSecurityAuditRunMetadata,
@@ -995,6 +996,7 @@ function buildReconPrompt(config: SecurityAuditOrchestratorConfig, attempt: numb
       "RESOURCE-EXHAUSTION-AND-AVAILABILITY, SUPPLY-CHAIN-AND-RELEASE, WEB-PROTOCOL-AND-AUTH.",
     "Entrega EXCLUSIVAMENTE un objeto JSON con esta forma (sin prosa, sin markdown):",
     '{"surfaces":[{"path":"ruta/relativa","boundary":"frontera de confianza","subsystem":"subsistema","attack_class":"ETIQUETA"}],"prior_evidence":["huella o referencia previa observada"],"build_paths":["ruta de construcción"]}',
+    "Usa etiquetas de ATTACK-CLASSES.md, un subsistema estable y una frontera breve formada por origen→control→destino (símbolos de código). Una unidad por operación, frontera y clase de ataque distinta; no crees variantes por sinónimos ni descripciones largas. Lectura y escritura, controles distintos y fronteras distintas se mantienen separados.",
     "Máximo 39900 caracteres. No incluyas conclusiones de seguridad ni hallazgos: esto es mapeo.",
   ].join("\n");
 }
@@ -1036,7 +1038,7 @@ function buildCriticPrompt(
   const index = buildSecurityAuditUnitIdIndex(units);
   const shortByCoverage = new Map([...index.byShort].map(([short, coverageId]) => [coverageId, short]));
   const summary = units.map((unit) =>
-    `${shortByCoverage.get(unit.coverage_id) ?? shortUnitId(unit.coverage_id)} | ${unit.status} | prior=${unit.prior_status} | fingerprints=${unit.result_fingerprints.join(",") || "ninguno"} | ${unit.canonical_refs?.surface ?? unit.surface}`
+    `${shortByCoverage.get(unit.coverage_id) ?? shortUnitId(unit.coverage_id)} | ${unit.status} | prior=${unit.prior_status} | fingerprints=${unit.result_fingerprints.join(",") || "ninguno"} | ${unit.canonical_refs?.surface ?? unit.surface} | boundary=${JSON.stringify(unit.boundary)} | subsystem=${JSON.stringify(unit.subsystem)} | class=${JSON.stringify(unit.attack_class)} | owner=${unit.agent_id ?? "ninguno"}`
   ).join("\n");
   return [
     ANTI_INJECTION_HEADER,
@@ -1050,6 +1052,7 @@ function buildCriticPrompt(
     "Entrega EXCLUSIVAMENTE un objeto JSON:",
     '{"stop":true,"missing_units":[{"surface":"...","boundary":"...","subsystem":"...","attack_class":"..."}],"reassign_ids":["U… o coverage_id oficial"]}',
     "reassign_ids debe usar el identificador corto mostrado (U…) o el coverage_id oficial de la unidad; también se acepta exactamente una surface listada arriba o un fingerprint listado. Prohibido inventar, acortar o aproximar IDs.",
+    "Una unidad planned sin dueño ya está pendiente: no la reasignes ni la dupliques en missing_units. Reassign solo para un intento previo con dueño y evidencia insuficiente. Compara operación, frontera, subsistema y clase del ledger; no propongas sinónimos de unidades existentes. Mantén separadas operaciones o fronteras realmente distintas.",
     "stop=true solo si no faltan unidades ni reasignaciones. Máximo 39900 caracteres.",
   ].join("\n");
 }
@@ -1134,6 +1137,7 @@ function buildVerifierPrompt(
       ? 'Entrega EXCLUSIVAMENTE: {"decision":"verified|replace|unverified","fingerprint":"...","reason":"...","record":{...registro oficial completo del candidato...},"final_record_verification":{"fingerprint":"...","decision":"verified|unverified"}}'
       : 'Entrega EXCLUSIVAMENTE: {"decision":"verified|replace|unverified","fingerprint":"...","reason":"...","record":{...solo si replace...}}',
     "El registro debe cumplir exactamente el esquema oficial. Usa verdict, NO status; severity solo en confirmed y como objeto. Copia el fingerprint exacto en el sobre y en record. No uses campos inventados ni evidencia de ejecución no realizada.",
+    "Traza oficial: una sola ubicación puede ser entrypoint o sink. Con dos o más: primero entrypoint, último sink, TODOS los intermedios propagation. Nunca repitas entrypoint dentro de la misma traza. No combines operaciones distintas en una sola traza. Si no puedes confirmar una hipótesis, devuelve unverified con registro rejected completo del mismo fingerprint y motivo sustentado; si la evidencia es insuficiente, devuelve verified con needs_validation y bloqueadores reales.",
     "CONTRATO OFICIAL DEL OBJETO record (cada registro debe satisfacer UNA variante de items.oneOf):",
     JSON.stringify(JSON.parse(readFileSync(join(SECURITY_AUDIT_SKILL_DIR, "report-schema.json"), "utf8")).items),
     "Máximo 39900 caracteres. No inventes evidencia.",
@@ -1743,11 +1747,16 @@ function syncFindings(ctx: AuditContext): "pass" | "fail" {
   // registros EXACTOS del artefacto publicado. Los registros retirados del
   // mapa se eliminan de la proyección SOLO tras guardar historial con razón;
   // los reemplazos conservan el historial y la verificación previa (no reset).
+  const published = JSON.parse(readSecurityAuditArtifact(ctx.layout, "findings.json")) as Record<string, unknown>[];
+  // Use exactly the published (redacted and validated) records for projection
+  // and reports, not the unredacted proposals still in working memory.
+  ctx.findings.clear();
+  for (const record of published) ctx.findings.set(String(record.fingerprint), record);
   const projection = persistence.reconcileSecurityAuditFindingsProjection(
     ctx.db,
     ctx.config.runId,
     {
-      records: records.map((record) => ({
+      records: published.map((record) => ({
         fingerprint: String(record.fingerprint),
         verdict: record.verdict as persistence.SecurityAuditFindingVerdict,
         severity: findingSeverity(record),
@@ -1829,6 +1838,11 @@ async function phaseOneRecon(ctx: AuditContext): Promise<void> {
   // Paquete 4: los candidatos ya conocidos (sembrados de corridas previas)
   // reservan su verificación ANTES de planificar la primera ola de caza.
   refreshValidationReserve(ctx);
+  const planned = [...ctx.units.values()].filter(unit => unit.status === "planned").length;
+  const allowance = freeSecurityAuditUnits(ctx.budget);
+  if (Number.isFinite(allowance) && planned > allowance) {
+    logAuditWarning(ctx, `Plan de cobertura post-recon: ${planned} unidades requieren caza; ${allowance} invocaciones disponibles, ${ctx.budget.reserved.critics} críticos y ${ctx.budget.reserved.validation} verificadores reservados. El presupuesto no financia la cobertura prevista; reducir alcance o elegir otro perfil antes de ampliar el presupuesto. Esta pasada conserva los pendientes.`);
+  }
   ctx.deps.log({
     area: "SECURITY-AUDIT",
     kind: "success",
@@ -1953,6 +1967,20 @@ function retireFinding(ctx: AuditContext, fingerprint: string, reason: string): 
   }
   ctx.findings.delete(fingerprint);
   ctx.retirementReasons.set(fingerprint, reason);
+}
+
+/** An invalid proposal is a candidate gap, not a published finding.
+ * Keep other validated records and their independent provenance untouched. */
+function acceptOfficialProposal(ctx: AuditContext, fingerprint: string, record: Record<string, unknown>, result: SecurityAuditInvocationResult): boolean {
+  const validation = validateProposedSecurityAuditFinding(ctx.layout, record);
+  if (validation.status === "PASS") return true;
+  ctx.unvalidated.add(fingerprint);
+  addReason(ctx, "validator_failed");
+  settleCrossEngineEvidence(ctx, fingerprint, result, null, "official_record_invalid");
+  logAuditWarning(ctx, "Registro individual rechazado por Cloudflare; la base de la proyección no se modifica: " +
+    fingerprint + " · " + (validation.stderr || validation.stdout).slice(0, 500), result.agentRunId);
+  persistWorkState(ctx);
+  return false;
 }
 
 /** Un fingerprint vuelve a estar activo: su razón de retiro previa caduca. */
@@ -2900,6 +2928,18 @@ async function phaseThreeValidation(ctx: AuditContext): Promise<void> {
       );
       continue;
     }
+    if (ctx.config.profile !== "quick" && ctx.budget.maxInvocations !== null) {
+      const finalChecksOwed = [...ctx.findings.values()].filter(record =>
+        record.verdict === "confirmed" || record.verdict === "needs_validation" ||
+        (record.verdict === "rejected" && priorRuns.some(prior => prior.target === ctx.config.projectPath &&
+          prior.findings.some(old => isRecord(old) && old.fingerprint === record.fingerprint && old.verdict === "confirmed")))).length;
+      if (freeSecurityAuditUnits(ctx.budget) + ctx.budget.reserved.validation <= finalChecksOwed) {
+        ctx.unvalidated.add(fingerprint);
+        addReason(ctx, "validation_budget_exhausted");
+        logAuditWarning(ctx, "Se conserva la reserva de fase 5 para los registros ya aceptados; candidato pendiente: " + fingerprint);
+        continue;
+      }
+    }
     const discoverer = discovererFor(ctx, fingerprint);
     // Paquete 5: la procedencia de una corrida previa se registra como
     // información de plan; NUNCA se presenta como verificación cruzada (esa
@@ -2979,6 +3019,12 @@ async function phaseThreeValidation(ctx: AuditContext): Promise<void> {
       });
       continue;
     }
+    if (interpretation.fingerprint !== fingerprint) {
+      ctx.unvalidated.add(fingerprint);
+      settleCrossEngineEvidence(ctx, fingerprint, result, null, "fingerprint_mismatch");
+      logAuditWarning(ctx, "Respuesta de fase 3 con fingerprint de sobre distinto; candidato pendiente: " + fingerprint, result.agentRunId);
+      continue;
+    }
     // F04: la instancia de fase 3 queda registrada por fingerprint; fase 5 y
     // los reemplazos materiales exigen independencia respecto de ella.
     ctx.phase3InstanceByFingerprint.set(fingerprint, result.instanceId);
@@ -2991,6 +3037,7 @@ async function phaseThreeValidation(ctx: AuditContext): Promise<void> {
       // solicitado; mismatch o ausencia se descarta y queda unvalidated:
       // nunca se publica bajo otra clave.
       if (record && isFindingRecord(record) && recordFingerprint === fingerprint) {
+        if (!acceptOfficialProposal(ctx, fingerprint, record, result)) continue;
         restoreFinding(ctx, fingerprint, record);
         // Cubierta: sin fingerprints propios ni pendientes (invariante oficial).
         unit.status = "covered";
@@ -3039,6 +3086,7 @@ async function phaseThreeValidation(ctx: AuditContext): Promise<void> {
         rejection.verdict === "rejected" &&
         recordFingerprint === fingerprint
       ) {
+        if (!acceptOfficialProposal(ctx, fingerprint, rejection, result)) continue;
         restoreFinding(ctx, fingerprint, rejection);
         unit.status = "covered";
         unit.result_fingerprints = [];
@@ -3175,9 +3223,16 @@ async function resolveVerification(
   },
 ): Promise<void> {
   const fingerprint = String(record.fingerprint);
+  // A malformed replacement must not trigger another paid verification.
+  // Keep the last officially published record, but never certify its gap.
+  if (interpretation.decision === "replace" && interpretation.record &&
+      interpretation.fingerprint === fingerprint && interpretation.record.fingerprint === fingerprint &&
+      !acceptOfficialProposal(ctx, fingerprint, interpretation.record, result)) return;
   if (
     interpretation.decision === "replace" &&
     interpretation.record &&
+    interpretation.fingerprint === fingerprint &&
+    interpretation.record.fingerprint === fingerprint &&
     isMaterialReplacement(record, interpretation.record)
   ) {
     const independentEntry = independentVerifierEntry(ctx, options.proposerEntry);
@@ -3657,7 +3712,14 @@ function writeIncompleteClosure(
 ): void {
   const scope = validateSecurityAuditScope(ctx.config.scope);
   const scopeValue = scope.ok ? scope.value : null;
-  const units = sortUnits([...ctx.units.values()]);
+  const units = sortUnits(persistence.listSecurityAuditUnits(ctx.db, ctx.config.runId).map(row => ({
+    ...(row.payload as SecurityAuditLedgerUnit), coverage_id: row.unitId, status: row.status,
+  })));
+  const publishedFindings = persistence.listSecurityAuditFindings(ctx.db, ctx.config.runId)
+    .map(row => row.payload).filter(isFindingRecord);
+  const pending = units.filter(unit => ["planned", "candidate", "blocked", "in_progress", "deferred"].includes(unit.status));
+  const pendingFingerprints = new Set(ctx.unvalidated);
+  for (const unit of pending) for (const fingerprint of unit.result_fingerprints) pendingFingerprints.add(fingerprint);
   const budgetEvidence = securityAuditBudgetEvidence(ctx.budget);
   // Paquete 6: el cierre conserva la LISTA COMPLETA de motivos (primario en
   // primer lugar por precedencia), no solo el primario.
@@ -3682,10 +3744,10 @@ function writeIncompleteClosure(
         budgetEvidence.spent.critics + budgetEvidence.spent.verifiers,
     },
     phasesComplete: ctx.phasesComplete,
-    pendingUnits: pendingUnitIds(ctx),
-    unvalidatedFingerprints: [...ctx.unvalidated].sort(),
-    deferredUnits: [...ctx.deferred].sort(),
-    findings: findingsArray(ctx).map(toReportFinding),
+    pendingUnits: pending.map(unit => unit.coverage_id),
+    unvalidatedFingerprints: [...pendingFingerprints].sort(),
+    deferredUnits: units.filter(unit => unit.status === "deferred").map(unit => unit.coverage_id),
+    findings: publishedFindings.map(toReportFinding),
     coverage: coverageFromUnits(units),
   });
 }
@@ -4727,7 +4789,8 @@ export async function runSecurityAuditOrchestrator(
       });
       return earlyIncompleteOutcome(deps, config, layout, "orchestrator_failed", message);
     }
-    const gate = createSecurityAuditBudget({ ...config.budget, profile: config.profile });
+    const gate = createSecurityAuditBudget({ ...config.budget, profile: config.profile,
+      inDoubt: config.profile !== "quick" });
     if (!gate.ok) {
       // Sin presupuesto suficiente: NO se invoca a nadie.
       writeSecurityAuditArchitecture(

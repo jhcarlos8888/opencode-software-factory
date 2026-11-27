@@ -825,8 +825,8 @@ app.post<{
 }>("/api/work-threads/:threadId/continue", async (request, reply) => {
   const workflow = getWorkThreadSnapshot(request.params.threadId);
   if (!workflow) return reply.code(404).send({ error: "Proceso de trabajo no encontrado." });
-  if (workflow.rounds.some(round => round.run.configurationSnapshot?.focusedRevalidation)) {
-    return reply.code(409).send({ error: "La revalidación focalizada tiene su propio flujo en Security Operations; no admite continuación ordinaria." });
+  if (workflow.rounds.some(round => round.run.configurationSnapshot?.focusedRevalidation || round.run.configurationSnapshot?.securityAudit)) {
+    return reply.code(409).send({ error: "La auditoría de seguridad o revalidación focalizada tiene su propio flujo en Security Operations; no admite continuación ordinaria." });
   }
   const rawInstructions = typeof request.body?.instructions === "string"
     ? request.body.instructions : "";
