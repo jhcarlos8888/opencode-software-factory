@@ -36,6 +36,7 @@ import {
   type SecurityAuditRosterEntry,
 } from "./security-audit-orchestrator.js";
 import { auditInvocationUsage } from "./security-audit-usage.js";
+import { prepareFocusedRevalidation } from "./security-audit-focused-revalidation.js";
 import { computeSecurityAuditPhaseStates } from "./security-audit-phase-status.js";
 import { validateSecurityAuditStartOptions } from "./security-audit-start.js";
 import {
@@ -1201,6 +1202,30 @@ export function registerSecurityAuditRoutes(
       return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
     }
   });
+
+  // Preview focalizado: solo lectura y sin consumir preconsulta, cuotas o
+  // crear runs. La ejecución dedicada deberá recalcular este plan.
+  app.get<{ Params: { runId: string; fingerprint: string } }>(
+    "/api/security-audit/runs/:runId/remediations/:fingerprint/verification-plan",
+    async (request, reply) => {
+      const runId = parseRunId(request.params.runId);
+      const fingerprint = request.params.fingerprint;
+      if (!runId || !FINGERPRINT_PATTERN.test(fingerprint)) {
+        return reply.code(400).send({ error: "Identificador o fingerprint inválido." });
+      }
+      const db = deps.getFactoryDatabase();
+      if (!getSecurityAuditRun(db, runId)) return reply.code(404).send({ error: "Auditoría no encontrada." });
+      const nonFavorite = nonFavoriteAssignment(deps);
+      if (nonFavorite) return reply.code(409).send({ error: "El equipo contiene modelos habilitados no favoritos." });
+      try {
+        const plan = await prepareFocusedRevalidation({db, getExecution:deps.getExecution,
+          roster:buildAuditRoster(deps), auditRunId:runId, fingerprint});
+        return { plan, executable:false, message:"Plan comprobado sin invocar agentes. La ejecución focalizada todavía no está habilitada." };
+      } catch (error) {
+        return reply.code(409).send({error:error instanceof Error ? error.message : String(error)});
+      }
+    },
+  );
 
   // 11) Revalidación: única vía a verified_fixed. La evidencia se DERIVA de un
   // run de verificación completo del mismo proyecto; nunca se acepta evidencia

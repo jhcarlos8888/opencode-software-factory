@@ -81,6 +81,22 @@ interface PreparingStatus {
   message: string;
 }
 
+interface FocusedPlanPreview {
+  plan: {
+    fingerprint: string;
+    scope: {scopePaths: string[]};
+    findingPath: string;
+    originalFileSha256: string;
+    currentFileSha256: string;
+    budget: {maxInvocations:number; maxConcurrency:number; maxDurationMs:number};
+    verifiers: Array<{agentId:string; engine:string; modelId:string}>;
+    executionPolicy: string;
+    fullAudit: false;
+  };
+  executable: false;
+  message: string;
+}
+
 interface RunStatus {
   run: RunSummary & { phases: string[] };
   /**
@@ -201,6 +217,7 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
   const [selectedFindings, setSelectedFindings] = useState<string[]>([]);
   const [remediationNotes, setRemediationNotes] = useState("");
   const [verificationInputs, setVerificationInputs] = useState<Record<string, string>>({});
+  const [focusedPlans, setFocusedPlans] = useState<Record<string, FocusedPlanPreview>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -295,6 +312,7 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
     setSelectedFindings([]);
     setRemediationNotes("");
     setVerificationInputs({});
+    setFocusedPlans({});
   }, [trackExecution]);
 
   useEffect(() => {
@@ -456,6 +474,21 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
       setSelectedFindings([]);
       setRemediationNotes("");
       await loadStatus(selectedRunId);
+    });
+  }
+
+  async function previewFocusedRevalidation(fingerprint: string): Promise<void> {
+    const runId = selectedRunId;
+    await runAction(async () => {
+      setFocusedPlans(previous => {
+        const next = {...previous}; delete next[fingerprint]; return next;
+      });
+      const preview = await securityApi<FocusedPlanPreview>(
+        "/api/security-audit/runs/" + encodeURIComponent(runId) +
+        "/remediations/" + encodeURIComponent(fingerprint) + "/verification-plan");
+      if (selectedRunRef.current !== runId) return;
+      setFocusedPlans(previous => ({...previous, [fingerprint]:preview}));
+      setNotice(preview.message);
     });
   }
 
@@ -895,7 +928,26 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
                     {remediation.executionRunId ? ` · ejecución ${remediation.executionRunId.slice(0, 8)}` : ""}
                     {" · evidencias: "}{remediation.evidenceCount}
                     {remediation.state !== "verified_fixed" && (
-                      <span className="security-ops-revalidate">
+                      <div>
+                        {remediation.executionStatus === "succeeded" && (
+                          <button type="button" disabled={busy || activeExecution}
+                            onClick={() => void previewFocusedRevalidation(remediation.fingerprint)}>
+                            Preparar revalidación focalizada
+                          </button>
+                        )}
+                        {focusedPlans[remediation.fingerprint] && (
+                          <div className="security-ops-hint" role="status">
+                            <strong>Plan comprobado · sin ejecución</strong>
+                            <p>Alcance: {focusedPlans[remediation.fingerprint]!.plan.scope.scopePaths.join(", ")}</p>
+                            <p>Archivo modificado: {focusedPlans[remediation.fingerprint]!.plan.findingPath} ·
+                              hash anterior {focusedPlans[remediation.fingerprint]!.plan.originalFileSha256.slice(0,12)} →
+                              actual {focusedPlans[remediation.fingerprint]!.plan.currentFileSha256.slice(0,12)}</p>
+                            <p>Presupuesto previsto: {focusedPlans[remediation.fingerprint]!.plan.budget.maxInvocations} invocaciones · source-only ·
+                              {focusedPlans[remediation.fingerprint]!.plan.verifiers.map(v => " " + v.agentId + " / " + v.engine + " / " + v.modelId).join(" · ")}</p>
+                            <p>No es una auditoría completa. No acredita verified_fixed. Ejecución focalizada pendiente de habilitación.</p>
+                          </div>
+                        )}
+                        <span className="security-ops-revalidate">
                         <input
                           aria-label={`Run de verificación para ${remediation.fingerprint}`}
                           value={verificationInputs[remediation.fingerprint] ?? ""}
@@ -912,7 +964,8 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
                         >
                           Revalidar
                         </button>
-                      </span>
+                        </span>
+                      </div>
                     )}
                   </li>
                 ))}

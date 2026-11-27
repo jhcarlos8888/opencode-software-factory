@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -18,6 +18,8 @@ import {
   markSecurityAuditPreparing,
   type SecurityAuditApiDeps,
 } from "./security-audit-api.js";
+import { focusedFindingPaths } from "./security-audit-focused-revalidation.js";
+import { resolveSecurityAuditScopeFiles, snapshotSecurityAuditScope } from "./security-audit-scope.js";
 import { buildSecurityAuditRemediationPayload } from "../web/security-operations.js";
 import {
   createSecurityAuditRemediation,
@@ -35,6 +37,7 @@ import {
   saveSecurityAuditWorkState,
   setSecurityAuditPhase,
   setSecurityAuditValidators,
+  transitionSecurityAuditRemediation,
   updateSecurityAuditRunStatus,
   upsertSecurityAuditFinding,
   upsertSecurityAuditUnits,
@@ -46,6 +49,7 @@ import {
   writeSecurityAuditArchitecture,
   writeSecurityAuditRunMetadata,
   writeSecurityAuditSourceSnapshot,
+  updateSecurityAuditRunMetadataStatus,
 } from "./security-audit-artifacts.js";
 
 const isolated = mkdtempSync(join(tmpdir(), "factory-security-audit-api-"));
@@ -1761,4 +1765,84 @@ test("Paquete 8b: an expired pending cancel is never applied", async () => {
     "una entrada caducada no aplica ninguna cancelación",
   );
   assert.equal(isSecurityAuditCancelRequested(h.db, expired), false);
+});
+
+test("focused revalidation derives a bounded plan from real original evidence without creating runs", async () => {
+  const h = harness();
+  const project = realpathSync(mkdtempSync(join(isolated, "focused-target-")));
+  mkdirSync(join(project,"src"));
+  const paths = ["src/handler.c","src/model.c","src/store.c"];
+  for (const path of paths) writeFileSync(join(project,path),"original " + path);
+  const scope = {kind:"component" as const,scopePaths:paths,domains:[]};
+  const oldSnapshot = await snapshotSecurityAuditScope(await resolveSecurityAuditScopeFiles(project,scope));
+  const auditRunId = "api-focused-preview";
+  const fp = "src-handler-missing-check";
+  const remediationId = "exec-focused-remediation";
+  const original = seedRun(h.db,auditRunId,{projectPath:project,scope});
+  const layout=createSecurityAuditRunDirectory(auditRunId,project);
+  writeSecurityAuditRunMetadata(layout,{runId:auditRunId,repo:project,target:project,sourceRef:original.sourceRef,
+    sourceDirty:false,profile:"standard",scope,budget:{},executionPolicy:"source-only",selectedCompanions:[],
+    priorRunPaths:[],createdAt:original.createdAt});
+  writeSecurityAuditSourceSnapshot(layout,oldSnapshot);
+  const records=JSON.parse(readFileSync(join(FIXTURE_DIR,"findings-valid.json"),"utf8"));
+  const confirmed=records.find((r: {fingerprint:string})=>r.fingerprint===fp);
+  writeFileSync(layout.paths["findings.json"],JSON.stringify(records));
+  writeFileSync(layout.paths["coverage-ledger.json"],readFileSync(join(FIXTURE_DIR,"coverage-ledger-valid.json")));
+  upsertSecurityAuditFinding(h.db,auditRunId,{fingerprint:fp,verdict:"confirmed",severity:"medium",payload:confirmed});
+  setSecurityAuditValidators(h.db,auditRunId,{ledger:"pass",findings:"pass"});
+  updateSecurityAuditRunStatus(h.db,auditRunId,"incomplete","coverage_incomplete");
+  updateSecurityAuditRunMetadataStatus(layout,{runStatus:"incomplete",incompleteReason:"coverage_incomplete"});
+  const finished = new Date(Date.now()+1000).toISOString();
+  h.db.prepare("INSERT INTO execution_runs (id,project_path,instructions,status,started_at,updated_at,finished_at) VALUES (?,?,?,'succeeded',?,?,?)")
+    .run(remediationId,project,"Remediación",finished,finished,finished);
+  createSecurityAuditRemediation(h.db,{runId:auditRunId,fingerprint:fp,executionRunId:remediationId});
+  transitionSecurityAuditRemediation(h.db,auditRunId,fp,"in_progress");
+  const linked = {id:remediationId,projectPath:project,status:"succeeded",finishedAt:finished,
+    configurationSnapshot:{securityRemediation:{auditRunId,fingerprints:[fp]}}};
+  h.setExecutionFor(remediationId,{run:linked});
+  const url="/api/security-audit/runs/"+auditRunId+"/remediations/"+fp+"/verification-plan";
+  const counts=()=>["security_audit_runs","security_audit_invocations","security_audit_remediations","execution_runs"].map(t=>h.db.prepare("SELECT count(*) AS n FROM "+t).get()?.n);
+  const before=counts();
+  const query=()=>h.app.inject({method:"GET",url});
+  const unchanged=await query();assert.equal(unchanged.statusCode,409,unchanged.body);assert.match(unchanged.json().error,/no cambió/);
+  writeFileSync(join(project,"src/store.c"),"corrected store");
+  const response=await query();assert.equal(response.statusCode,200,response.body);
+  const body=response.json();assert.equal(body.executable,false);assert.equal(body.plan.fullAudit,false);
+  assert.deepEqual(body.plan.scope,scope);assert.equal(body.plan.findingPath,"src/store.c");
+  assert.equal(body.plan.originalFileSha256,oldSnapshot.files.find(f=>f.path==="src/store.c")?.sha256);
+  assert.notEqual(body.plan.currentFileSha256,body.plan.originalFileSha256);
+  assert.deepEqual(body.plan.budget,{maxInvocations:2,maxConcurrency:1,maxDurationMs:600000});
+  assert.deepEqual(body.plan.verifiers.map((v:{engine:string})=>v.engine),["claude","opencode"]);
+  assert.equal(body.plan.executionPolicy,"source-only");assert.equal(body.plan.fingerprint,fp);
+  assert.deepEqual(counts(),before);assert.equal(h.calls.length,0);
+  assert.equal(listSecurityAuditRemediations(h.db,auditRunId)[0]?.state,"in_progress");
+
+  h.setExecutionFor(remediationId,{run:{...linked,status:"running"}});
+  assert.equal((await query()).statusCode,409);
+  h.setExecutionFor(remediationId,{run:{...linked,projectPath:"/another-project"}});
+  assert.equal((await query()).statusCode,409);
+  h.setExecutionFor(remediationId,{run:{...linked,configurationSnapshot:{securityRemediation:{auditRunId,fingerprints:["other"]}}}});
+  assert.equal((await query()).statusCode,409);
+  h.setExecutionFor(remediationId,{run:linked});
+  writeFileSync(layout.paths["findings.json"],JSON.stringify([{...confirmed,title:"different"}]));
+  const mismatch=await query();assert.equal(mismatch.statusCode,409);assert.match(mismatch.json().error,/no coincide exactamente/);
+  writeFileSync(layout.paths["findings.json"],JSON.stringify(records));
+  rmSync(join(project,"src/model.c"));symlinkSync(join(project,"src/store.c"),join(project,"src/model.c"));
+  assert.equal((await query()).statusCode,409);
+  rmSync(join(project,"src/model.c"));writeFileSync(join(project,"src/model.c"),"original src/model.c");
+  h.setAssignments(["reviewer","build"].map(agentId=>({agentId,engine:"opencode",modelId:"opencode-go/mimo-v2.6-flash",
+    permissionMode:"automatic",permissionProfile:"read-only",enabled:true})));
+  const sameEngine=await query();assert.equal(sameEngine.statusCode,409);assert.match(sameEngine.json().error,/motores distintos/);
+  assert.deepEqual(counts(),before);assert.equal(h.calls.length,0);
+});
+
+test("focused finding scope rejects missing, unsafe or unbounded historical paths", () => {
+  const entry={kind:"sink",file:"src/handler.c",line:2};
+  for (const file of ["../outside","/etc/passwd","src/../secret","src//file","src\\file","~/.ssh/id_rsa","C:/file"]) {
+    assert.throws(()=>focusedFindingPaths({verdict:"confirmed",trace:[{...entry,file}]}),/ruta no canónica/);
+  }
+  assert.throws(()=>focusedFindingPaths({verdict:"confirmed",trace:[{...entry,line:0}]}),/ubicación concreta/);
+  assert.throws(()=>focusedFindingPaths({verdict:"confirmed",trace:[]}),/traza oficial/);
+  assert.throws(()=>focusedFindingPaths({verdict:"rejected",trace:[entry]}),/confirmed/);
+  assert.throws(()=>focusedFindingPaths({verdict:"confirmed",trace:Array.from({length:17},(_,i)=>({...entry,file:"src/"+i+".c"}))}),/máximo de 16/);
 });
