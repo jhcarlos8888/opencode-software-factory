@@ -6,6 +6,7 @@
  * Unknown operations and user questions must reach the human queue.
  */
 import { isAbsolute, relative, resolve } from "node:path";
+import { spawnSync } from "node:child_process";
 import { lstatSync, realpathSync, readFileSync } from "node:fs";
 import { assessCapabilityCommand, assessScopedTestCommand, nativeSegmentResources } from "./auditor-capabilities.js";
 import { assessDiagnosticCommand, assessIndependentDiagnostic, matchDiagnosticResources } from "./diagnostic-policy.js";
@@ -250,6 +251,47 @@ export function hasExplicitTesterExecutionRequest(instructions: string): boolean
   return /(?:^|[.!;\n])\s*(?:por favor[, ]+)?(?:ejecuta|ejecute|corre|corra|realiza|realice|lanza|lance|haz|haga)\s+(?:(?:las|los|todas|todos|nuestras|nuestros)\s+){0,3}(?:pruebas?|tests?)\b/.test(text);
 }
 
+/** Read-only Git receipts for a task-authorized automatic Tester. Only
+ * repository metadata and bounded patches; never a wildcard, arbitrary options,
+ * revision expressions, configured diff helpers, pipelines or environment overrides.
+ * Git is executed in a trusted repository (not an OS sandbox). */
+function assessAutomaticTesterGitInspection(command: string, input: Record<string, unknown>, root: string): AuditorAssessment | null {
+  if (input.workdir !== root || (input.cwd !== undefined && input.cwd !== root) ||
+      input.env !== undefined || input.environment !== undefined || requestsSandboxBypass(input)) return null;
+  if (command.length > 1200 || /[\r\n\x00-\x1f]/.test(command)) return null;
+  const status = /^git status(?: (?:-sb|-s|--short|--porcelain(?:=v[12])?|--branch|-u(?:all|normal|no)?|--untracked-files(?:=(?:all|normal|no))?))*$/.test(command);
+  const diff = /^git diff (--stat|--numstat|--name-only|--name-status|--check|-U[0-9]|--unified=[0-9])(?: -- ([A-Za-z0-9_.\/-]+(?: [A-Za-z0-9_.\/-]+){0,15}))?$/.exec(command);
+  if (!status && !diff) return null;
+  // Patch content requires an explicit list of regular project files.
+  if (diff && /^(?:-U|--unified=)/.test(diff[1]!) && !diff[2]) return null;
+  try {
+    if (realpathSync(root) !== root) return null;
+    const gitDir = resolve(root, ".git");
+    if (!lstatSync(gitDir).isDirectory() || realpathSync(gitDir) !== gitDir) return null;
+    const config = resolve(gitDir, "config");
+    if (!lstatSync(config).isFile() || realpathSync(config) !== config) return null;
+    // These Git settings can invoke helpers or redirect a seemingly read-only
+    // command. No config values or credentials enter the audit log.
+    if (Object.keys(process.env).some(key =>
+      /^GIT_(?:DIR|WORK_TREE|COMMON_DIR|INDEX_FILE|OBJECT_DIRECTORY|ALTERNATE_OBJECT_DIRECTORIES|EXTERNAL_DIFF|DIFF_OPTS|CONFIG(?:_.*)?|EXEC_PATH|ATTR_SOURCE|PAGER)$/.test(key))) return null;
+    const keys = spawnSync("git", ["--no-pager", "-C", root, "config", "--name-only", "--list"], {
+      cwd: root, encoding: "utf8", timeout: 1000, maxBuffer: 65536, stdio: ["ignore", "pipe", "ignore"]
+    });
+    if (keys.error || keys.status !== 0 || typeof keys.stdout !== "string") return null;
+    if (keys.stdout.split(/\r?\n/).some(key =>
+      /^(?:include(?:if)?\.|filter\.|pager\.|diff\.external$|diff\..+\.(?:command|textconv)$|core\.(?:fsmonitor|worktree|hookspath|pager|attributesfile)$)/i.test(key))) return null;
+    for (const file of diff?.[2]?.split(" ") ?? []) {
+      if (file.startsWith("/") || file.split("/").some(part => !part || part === "." || part === ".." ||
+          part.startsWith(".") || part.startsWith("-"))) return null;
+      const absolute = resolve(root, file);
+      const info = lstatSync(absolute);
+      if (!isWithinProject(absolute, root) || !info.isFile() || info.isSymbolicLink() ||
+          realpathSync(absolute) !== absolute) return null;
+    }
+  } catch { return null; }
+  return { verdict: "auto", category: "inspection", reason: "Inspección Git del Tester automático: comando nativo exacto, raíz y rutas verificadas; solo esta operación." };
+}
+
 function assessAutomaticTesterVerification(command: string, input: Record<string, unknown>, root: string): AuditorAssessment | null {
   if (input.workdir !== root || (input.cwd !== undefined && input.cwd !== root) ||
       input.env !== undefined || input.environment !== undefined || requestsSandboxBypass(input)) return null;
@@ -287,7 +329,7 @@ export function assessAuditorTool(request: AuditorToolRequest): AuditorAssessmen
       reason: "La solicitud intenta desactivar el sandbox. Repite la operación sin dangerouslyDisableSandbox; el Auditor no autoriza esta excepción." };
   }
   if (request.permissionProfile === "approval-required" && request.automaticTesterVerification && shell !== null) {
-    const verified = assessAutomaticTesterVerification(shell, input, request.projectPath);
+    const verified = assessAutomaticTesterGitInspection(shell, input, request.projectPath) ?? assessAutomaticTesterVerification(shell, input, request.projectPath);
     if (verified) return verified;
   }
   if (request.permissionProfile !== "workspace-write") {
@@ -341,7 +383,7 @@ export function assessOpenCodePermission(
     const resources = Array.isArray(request.resources) && request.resources.every((r): r is string => typeof r === "string") ? request.resources : [];
     const expected = nativeSegmentResources(nativeInput.command);
     if (expected && matchDiagnosticResources(resources, expected)) {
-      const verified = assessAutomaticTesterVerification(nativeInput.command, nativeInput, projectPath);
+      const verified = assessAutomaticTesterGitInspection(nativeInput.command, nativeInput, projectPath) ?? assessAutomaticTesterVerification(nativeInput.command, nativeInput, projectPath);
       if (verified) return verified;
     }
   }

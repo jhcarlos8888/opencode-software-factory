@@ -324,6 +324,7 @@ export interface SecurityAuditRemediationPayloadInput {
   projectPath: string;
   researchDepth: string;
   fingerprints: readonly string[];
+  notes?: string;
 }
 
 /** Payload exacto de `POST /api/security-audit/runs/:runId/remediations`. */
@@ -331,6 +332,7 @@ export function buildSecurityAuditRemediationPayload(
   input: SecurityAuditRemediationPayloadInput,
 ): Record<string, unknown> {
   return {
+    ...(input.notes?.trim() ? { notes: input.notes.trim().slice(0, 4000) } : {}),
     fingerprints: [...input.fingerprints],
     approved: true,
     path: input.projectPath,

@@ -197,6 +197,7 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
   // Paquete 8: la auditoría seleccionada fue aceptada pero su fila aún no existe.
   const [preparingAudit, setPreparingAudit] = useState(false);
   const [selectedFindings, setSelectedFindings] = useState<string[]>([]);
+  const [remediationNotes, setRemediationNotes] = useState("");
   const [verificationInputs, setVerificationInputs] = useState<Record<string, string>>({});
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -290,6 +291,7 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
     setStatus(null);
     setPreparingAudit(false);
     setSelectedFindings([]);
+    setRemediationNotes("");
     setVerificationInputs({});
   }, [trackExecution]);
 
@@ -443,12 +445,14 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
             projectPath,
             researchDepth,
             fingerprints: selectedFindings,
+            notes: remediationNotes,
           })),
         },
       );
       setNotice(payload.note);
       onExecutionStarted(payload.executionRunId, false);
       setSelectedFindings([]);
+      setRemediationNotes("");
       await loadStatus(selectedRunId);
     });
   }
@@ -866,6 +870,11 @@ export function SecurityOperations({ projectPath, researchDepth, teamSaved, pref
                   <code>{item.fingerprint}</code> · {securityAuditSeverityLabel(item.severity)} · {item.title}
                 </label>
               ))}
+              <label htmlFor="security-remediation-notes">Instrucciones de remediación (opcional)</label>
+              <textarea id="security-remediation-notes" rows={4} maxLength={4000}
+                value={remediationNotes} onChange={event => setRemediationNotes(event.target.value)}
+                placeholder="Corrección mínima, pruebas y restricciones del trabajo…"
+                disabled={busy || activeExecution || Boolean(awaitingExecutionId)} />
               <div className="security-ops-actions">
                 <button type="button" onClick={() => void remediate()} disabled={busy || activeExecution || Boolean(awaitingExecutionId) || selectedFindings.length === 0}>
                   Remediar seleccionados

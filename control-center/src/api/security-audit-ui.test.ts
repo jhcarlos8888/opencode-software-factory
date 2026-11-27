@@ -362,3 +362,13 @@ test("M5: the UI remediation payload carries approved, path and the real depth",
   assert.equal(payload.preflightDepth, "focused");
   assert.deepEqual(payload.fingerprints, ["fp-1", "fp-2"]);
 });
+
+
+test("remediation form includes bounded operator notes without changing approval or target", () => {
+  const input = { projectPath: "/srv/lab", researchDepth: "focused", fingerprints: ["fp-1"] };
+  assert.deepEqual(buildSecurityAuditRemediationPayload({...input, notes:"  Ejecuta las pruebas.  "}), {
+    approved:true, fingerprints:["fp-1"], path:"/srv/lab", preflightDepth:"focused", notes:"Ejecuta las pruebas."
+  });
+  assert.equal(buildSecurityAuditRemediationPayload({...input,notes:"x".repeat(4100)}).notes, "x".repeat(4000));
+  assert.equal(buildSecurityAuditRemediationPayload({...input,notes:" "}).notes, undefined);
+});

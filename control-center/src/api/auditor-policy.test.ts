@@ -1,5 +1,6 @@
-import { mkdtempSync, writeFileSync, rmSync, symlinkSync, realpathSync } from "node:fs";
+import { mkdtempSync, writeFileSync, rmSync, symlinkSync, realpathSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -370,4 +371,36 @@ test("automatic tester authority requires an explicit positive request, not a qu
   for (const text of ["¿Cómo ejecutar las pruebas?", "No ejecutes las pruebas.", "No quiero que ejecutes pruebas.", "Ejecuta las pruebas. No debes ejecutar pruebas.", "Ejemplo: ejecuta las pruebas.", "Explica cómo ejecutar pruebas.", "Simula ejecutar las pruebas."]) {
     assert.equal(hasExplicitTesterExecutionRequest(text),false,text);
   }
+});
+
+test("automatic Tester Git inspection admits only concrete native metadata requests at the canonical repository", () => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "tester-git-inspection-")));
+  try {
+    execFileSync("git",["init","-q",root]); mkdirSync(join(root,"src")); mkdirSync(join(root,"test"));
+    writeFileSync(join(root,"src/documents.js"),"export {}");
+    writeFileSync(join(root,"test/documents.test.js"),"export {}");
+    symlinkSync("/etc/passwd",join(root,"src/escape.js"));
+    const authority = {instructions:"Ejecuta las pruebas existentes.",agentId:"tester",requireNativeShellEvidence:true,automaticTesterVerification:true};
+    const check=(command:string,overrides:Record<string,unknown>={},resources=[command],auth=authority)=>
+      assessOpenCodePermission({action:"shell",resources,save:["git diff *"],metadata:{input:{command}}},root,"approval-required",auth,{command,workdir:root,...overrides});
+    const exact="git diff --stat -- src/documents.js test/documents.test.js";
+    for(const command of ["git status --porcelain","git status --short","git diff --stat",exact,"git diff --check -- src/documents.js","git diff --name-only","git diff -U2 -- src/documents.js","git diff --unified=2 -- test/documents.test.js"]) {
+      assert.equal(check(command).verdict,"auto",command);
+      assert.equal(assessAuditorTool({engine:"claude",toolName:"Bash",input:{command,workdir:root},projectPath:root,permissionProfile:"approval-required",automaticTesterVerification:true}).verdict,"auto",command);
+    }
+    for(const command of ["git diff --stat -- ../file","git diff --stat -- src/escape.js","git diff --stat -- .git/config","git diff --stat -- .env","git diff --stat -- /etc/passwd","git diff --stat -- src/missing.js","git diff --stat -- src/*","git diff --ext-diff","git diff --stat --output=/tmp/out","git diff --stat --no-index /etc/passwd src/documents.js","git status; git push","git diff --stat | bash","git diff --stat > output","git diff --stat HEAD~1","git diff -U2","git diff -U999999 -- src/documents.js","git diff -U2 -- src/escape.js","git push","git config --local --list"]) {
+      assert.notEqual(check(command).verdict,"auto",command);
+    }
+    for(const overrides of [{workdir:"/tmp"},{cwd:"/tmp"},{env:{GIT_DIR:"/tmp"}},{dangerouslyDisableSandbox:true}]) assert.notEqual(check(exact,overrides).verdict,"auto");
+    assert.notEqual(check(exact,{},["git diff *"]).verdict,"auto");
+    assert.notEqual(check(exact,{},[exact],{...authority,automaticTesterVerification:false}).verdict,"auto");
+    assert.notEqual(check(exact,{},[exact],{...authority,agentId:"reviewer"}).verdict,"auto");
+    assert.notEqual(assessOpenCodePermission({action:"shell",resources:[exact]},root,"approval-required",authority,null).verdict,"auto");
+    assert.notEqual(assessOpenCodePermission({action:"shell",resources:[exact],metadata:{input:{command:"git status"}}},root,"approval-required",authority,{command:exact,workdir:root}).verdict,"auto");
+    execFileSync("git",["-C",root,"config","diff.external","never-run-this-helper"]);
+    assert.notEqual(check("git diff -U2 -- src/documents.js").verdict,"auto");
+    execFileSync("git",["-C",root,"config","--unset","diff.external"]);
+    execFileSync("git",["-C",root,"config","core.fsmonitor","never-run-this-helper"]);
+    assert.notEqual(check("git status --porcelain").verdict,"auto");
+  } finally { rmSync(root,{recursive:true,force:true}); }
 });
