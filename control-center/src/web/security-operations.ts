@@ -78,6 +78,8 @@ const INCOMPLETE_REASON_LABELS: Record<string, string> = {
   execution_interrupted: "La ejecución fue interrumpida.",
   validator_failed: "Un validador oficial rechazó los artefactos.",
   orchestrator_failed: "El orquestador no pudo completar la auditoría.",
+  candidate_validation_incomplete: "Quedaron candidatos sin validación independiente aceptada.",
+  coverage_incomplete: "Quedaron unidades de cobertura pendientes.",
 };
 
 const SEVERITY_LABELS: Record<string, string> = {

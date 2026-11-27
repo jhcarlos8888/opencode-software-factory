@@ -42,6 +42,8 @@ test("official six phases and incomplete reasons are fixed", () => {
     "cancelled_by_user",
     "deadline_exceeded",
     "execution_interrupted",
+    "candidate_validation_incomplete",
+    "coverage_incomplete",
   ]);
   // Los cuatro motivos oficiales de presupuesto se conservan intactos.
   assert.deepEqual([...SECURITY_AUDIT_BUDGET_INCOMPLETE_REASONS], [

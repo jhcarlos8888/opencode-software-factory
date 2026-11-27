@@ -1262,7 +1262,25 @@ export function candidateFingerprintsAwaitingVerification(ctx: AuditContext): st
 function refreshValidationReserve(ctx: AuditContext): void {
   const pending = candidateFingerprintsAwaitingVerification(ctx);
   const requested = Math.max(1, pending.length * validatorsPerCandidateFor(ctx.config.profile));
-  const result = setSecurityAuditValidationReserve(ctx.budget, requested);
+  const historicalOnly = pending.length > 0 && pending.every((fingerprint) =>
+    ctx.discovererByFingerprint.get(fingerprint)?.source === "prior_run" &&
+    !ctx.candidateById.has(fingerprint));
+  const firstHuntNeeded = ctx.config.profile === "quick" &&
+    ctx.budget.wavesStarted === 0 && ctx.budget.spent.hunters === 0 &&
+    [...ctx.units.values()].some((unit) => unit.status === "planned");
+  const max = ctx.budget.maxInvocations;
+  const available = max === null ? Number.POSITIVE_INFINITY :
+    freeSecurityAuditUnits(ctx.budget) + ctx.budget.reserved.validation;
+  // Preserve one fresh hunter if at least two verification slots remain.
+  // Tiny budgets still prioritize validation; never reduce an existing reserve.
+  const cap = historicalOnly && firstHuntNeeded && available >= 3
+    ? Math.min(requested, available - 1) : requested;
+  const granted = setSecurityAuditValidationReserve(ctx.budget, cap);
+  const result = { ...granted, requested, shortfall: Math.max(0, requested - granted.granted) };
+  if (cap < requested) {
+    ctx.deps.log({ area: "SECURITY-AUDIT", kind: "info",
+      message: "Reserva histórica limitada para conservar una primera búsqueda independiente sin aumentar el presupuesto." });
+  }
   if (result.granted !== ctx.budget.reserved.validation) {
     ctx.budget = result.ledger;
     persistBudget(ctx);
@@ -2192,6 +2210,87 @@ function applyHunterOutput(
   persistWorkState(ctx);
 }
 
+async function runPostWaveCritic(ctx: AuditContext, wave: number): Promise<boolean> {
+  // Crítico post-ola con reserva previa. Un crítico ausente, fallido o
+  // malformado JAMÁS es cierre limpio: registra el gap y cierra incomplete.
+  const criticEntry = pickRosterEntry(ctx.config.roster, CRITIC_POOL, ctx.cursor);
+  ctx.cursor += 1;
+  if (!criticEntry) {
+    addReason(ctx, "orchestrator_failed");
+    logAuditWarning(ctx, "Sin crítico post-ola disponible en el roster; cierre no limpio.");
+    return false;
+  }
+  const criticResult = await invokeGuarded(
+    ctx,
+    {
+      agentId: criticEntry.agentId,
+      engine: criticEntry.engine,
+      modelId: criticEntry.modelId,
+      phase: 2,
+      role: "critic",
+      verificationKind: "critic",
+      prompt: buildCriticPrompt(ctx.config, sortUnits([...ctx.units.values()]), false),
+      discovererInstanceId: null,
+      discovererEngine: null,
+      fingerprint: null,
+      crossEnginePlanned: false,
+    },
+    () => reserveCritic(ctx),
+  );
+  if (!criticResult) return false; // sin presupuesto: invokeGuarded ya registró el motivo
+  if (criticResult.status !== "succeeded") {
+    if (!criticResult.providerError) addReason(ctx, "orchestrator_failed");
+    logAuditWarning(
+      ctx,
+      "Crítico post-ola fallido: cierre no limpio (gap registrado).",
+      criticResult.agentRunId,
+    );
+    return false;
+  }
+  const criticParsed = parseStructuredSecurityAuditOutput(criticResult.output, isCriticOutput);
+  if (!criticParsed) {
+    logAuditWarning(
+      ctx,
+      `Salida de crítico malformada descartada sin reparar: ${criticResult.instanceId}`,
+      criticResult.agentRunId,
+    );
+    addReason(ctx, "orchestrator_failed");
+    return false; // sin evidencia de cobertura no se lanzan más olas
+  }
+  if (criticParsed.stop === true) {
+    // stop=true solo es limpio si NO declara pendientes.
+    if (criticHasPendingItems(criticParsed)) {
+      logAuditWarning(ctx, "Crítico con stop=true pero con missing_units/reassign_ids declarados: cierre no limpio.");
+      addReason(ctx, "orchestrator_failed");
+    }
+    return false;
+  }
+  // stop=false: incorporar únicamente unidades/gaps autorizados con rutas
+  // reales (F02); lo desconocido/ficticio queda como gap e incomplete.
+  const nextWave = Math.max(wave + 1, ...[...ctx.units.values()].map((unit) => unit.wave + 1));
+  if (ctx.config.profile === "quick") {
+    // quick jamás crea una ola adicional: lo aceptado queda deferred.
+    const applied = applyCriticPlan(ctx, criticParsed, nextWave, {
+      defer: true,
+      deferReason: "quick_profile_final_critic",
+    });
+    if (applied.gaps > 0) addReason(ctx, "orchestrator_failed");
+    syncLedger(ctx);
+    return false;
+  }
+  const applied = applyCriticPlan(ctx, criticParsed, nextWave, { defer: false, deferReason: "" });
+  if (applied.gaps > 0) addReason(ctx, "orchestrator_failed");
+  if (applied.addedUnits === 0 && applied.reassigned === 0) {
+    // stop=false sin cambios concretos: incomplete, sin bucle infinito.
+    logAuditWarning(ctx, "Crítico con stop=false sin unidades ni reasignaciones incorporables: cierre no limpio.");
+    addReason(ctx, "orchestrator_failed");
+    syncLedger(ctx);
+    return false;
+  }
+  syncLedger(ctx);
+  return true;
+}
+
 async function phaseTwoHunting(ctx: AuditContext): Promise<void> {
   let wavesRun = 0;
   while (wavesRun < MAX_HUNTER_WAVES) {
@@ -2263,85 +2362,19 @@ async function phaseTwoHunting(ctx: AuditContext): Promise<void> {
     syncLedger(ctx);
     refreshValidationReserve(ctx);
 
-    // Crítico post-ola con reserva previa. Un crítico ausente, fallido o
-    // malformado JAMÁS es cierre limpio: registra el gap y cierra incomplete.
-    const criticEntry = pickRosterEntry(ctx.config.roster, CRITIC_POOL, ctx.cursor);
-    ctx.cursor += 1;
-    if (!criticEntry) {
-      addReason(ctx, "orchestrator_failed");
-      logAuditWarning(ctx, "Sin crítico post-ola disponible en el roster; cierre no limpio.");
-      break;
-    }
-    const criticResult = await invokeGuarded(
-      ctx,
-      {
-        agentId: criticEntry.agentId,
-        engine: criticEntry.engine,
-        modelId: criticEntry.modelId,
-        phase: 2,
-        role: "critic",
-        verificationKind: "critic",
-        prompt: buildCriticPrompt(ctx.config, sortUnits([...ctx.units.values()]), false),
-        discovererInstanceId: null,
-        discovererEngine: null,
-        fingerprint: null,
-        crossEnginePlanned: false,
-      },
-      () => reserveCritic(ctx),
-    );
-    if (!criticResult) break; // sin presupuesto: invokeGuarded ya registró el motivo
-    if (criticResult.status !== "succeeded") {
-      if (!criticResult.providerError) addReason(ctx, "orchestrator_failed");
-      logAuditWarning(
-        ctx,
-        "Crítico post-ola fallido: cierre no limpio (gap registrado).",
-        criticResult.agentRunId,
-      );
-      break;
-    }
-    const criticParsed = parseStructuredSecurityAuditOutput(criticResult.output, isCriticOutput);
-    if (!criticParsed) {
-      logAuditWarning(
-        ctx,
-        `Salida de crítico malformada descartada sin reparar: ${criticResult.instanceId}`,
-        criticResult.agentRunId,
-      );
-      addReason(ctx, "orchestrator_failed");
-      break; // sin evidencia de cobertura no se lanzan más olas
-    }
-    if (criticParsed.stop === true) {
-      // stop=true solo es limpio si NO declara pendientes.
-      if (criticHasPendingItems(criticParsed)) {
-        logAuditWarning(ctx, "Crítico con stop=true pero con missing_units/reassign_ids declarados: cierre no limpio.");
-        addReason(ctx, "orchestrator_failed");
-      }
-      break;
-    }
-    // stop=false: incorporar únicamente unidades/gaps autorizados con rutas
-    // reales (F02); lo desconocido/ficticio queda como gap e incomplete.
-    const nextWave = Math.max(plan.wave + 1, ...[...ctx.units.values()].map((unit) => unit.wave + 1));
-    if (ctx.config.profile === "quick") {
-      // quick jamás crea una ola adicional: lo aceptado queda deferred.
-      const applied = applyCriticPlan(ctx, criticParsed, nextWave, {
-        defer: true,
-        deferReason: "quick_profile_final_critic",
-      });
-      if (applied.gaps > 0) addReason(ctx, "orchestrator_failed");
-      syncLedger(ctx);
-      break;
-    }
-    const applied = applyCriticPlan(ctx, criticParsed, nextWave, { defer: false, deferReason: "" });
-    if (applied.gaps > 0) addReason(ctx, "orchestrator_failed");
-    if (applied.addedUnits === 0 && applied.reassigned === 0) {
-      // stop=false sin cambios concretos: incomplete, sin bucle infinito.
-      logAuditWarning(ctx, "Crítico con stop=false sin unidades ni reasignaciones incorporables: cierre no limpio.");
-      addReason(ctx, "orchestrator_failed");
-      syncLedger(ctx);
-      break;
-    }
-    syncLedger(ctx);
+    if (ctx.pendingReasons.has("provider_unavailable")) break;
+    if (!(await runPostWaveCritic(ctx, plan.wave))) break;
     // El bucle replanifica una ola nueva solo si el presupuesto y las reservas
     // lo permiten (planHunterWave rechaza y difiere con motivo en caso contra).
+  }
+
+  // A Quick run always owes its reserved critic, even if historical
+  // candidates consume every hunter slot. An already charged critic is
+  // never replayed on resume. No new provider call after cancellation/error.
+  if (ctx.config.profile === "quick" && ctx.budget.spent.critics === 0 &&
+      !ctx.deps.isCancelled() && !deadlineExpired(ctx) &&
+      !ctx.pendingReasons.has("provider_unavailable")) {
+    await runPostWaveCritic(ctx, Math.max(1, ctx.budget.wavesStarted));
   }
 
   // Crítico final limpio solo en standard/deep: exige stop=true y cero
@@ -3425,6 +3458,15 @@ function coverageFromUnits(
 
 function phaseSixReports(ctx: AuditContext): void {
   finalizeExactAliases(ctx);
+  if (ctx.pendingReasons.size === 0) {
+    if (ctx.unvalidated.size > 0 || [...ctx.units.values()].some((unit) => unit.status === "candidate")) {
+      addReason(ctx, "candidate_validation_incomplete");
+    }
+    const pending = new Set(pendingUnitIds(ctx));
+    if ([...ctx.units.values()].some((unit) => pending.has(unit.coverage_id) && unit.status !== "candidate")) {
+      addReason(ctx, "coverage_incomplete");
+    }
+  }
   const scope = validateSecurityAuditScope(ctx.config.scope);
   const scopeValue = scope.ok ? scope.value : null;
   const units = sortUnits([...ctx.units.values()]);
@@ -3520,6 +3562,8 @@ export const SECURITY_AUDIT_INCOMPLETE_REASON_PRECEDENCE: readonly SecurityAudit
   "budget_cannot_fund_reconnaissance_and_reserves",
   "cancelled_by_user",
   "execution_interrupted",
+  "candidate_validation_incomplete",
+  "coverage_incomplete",
   "orchestrator_failed",
 ];
 

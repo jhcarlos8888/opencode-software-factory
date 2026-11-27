@@ -143,7 +143,7 @@ function now(): string {
 
 /**
  * DDL canónico de `security_audit_runs`, incluido el CHECK de motivos
- * incompletos con los seis motivos operativos además de los cuatro
+ * incompletos con los motivos operativos además de los cuatro
  * oficiales de presupuesto. Se usa en la creación y en la reconstrucción
  * de la migración para que ambas rutas compartan exactamente el mismo CHECK.
  */
@@ -180,7 +180,9 @@ function securityAuditRunsTableSql(tableName: string, ifNotExists: boolean): str
           'provider_unavailable',
           'cancelled_by_user',
           'deadline_exceeded',
-          'execution_interrupted'
+          'execution_interrupted',
+          'candidate_validation_incomplete',
+          'coverage_incomplete'
         )
       ),
       output_dir TEXT NOT NULL,
@@ -222,8 +224,8 @@ function rebuildSecurityAuditRunsIfLegacy(db: DatabaseSync): void {
   const tableRow = db
     .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'security_audit_runs'")
     .get() as { sql: string | null } | undefined;
-  // Detección: el CHECK nuevo menciona `execution_interrupted`; el legado no.
-  if (!tableRow?.sql || tableRow.sql.includes("'execution_interrupted'")) return;
+  // Detección: el CHECK debe incluir todos los motivos vigentes.
+  if (!tableRow?.sql || INCOMPLETE_REASONS.every(reason => tableRow.sql!.includes("'" + reason + "'"))) return;
 
   const oldColumns = db.prepare("PRAGMA table_info(security_audit_runs)").all() as Array<{
     name: string;
@@ -462,8 +464,8 @@ export function initializeSecurityAuditSchema(db: DatabaseSync): void {
       "WHERE cross_engine = 1 AND cross_engine_evidence_json IS NULL",
   );
 
-  // Migración de reconstrucción para bases creadas con el CHECK antiguo de
-  // solo cuatro motivos de presupuesto (idempotente; ver comentarios).
+  // Migración de reconstrucción para bases con un CHECK anterior de motivos
+  // de cierre (idempotente; ver comentarios).
   rebuildSecurityAuditRunsIfLegacy(db);
 }
 

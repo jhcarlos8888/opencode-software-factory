@@ -3228,8 +3228,9 @@ test("with more candidates than budget, validation is prioritized and the rest s
       entry.message.includes("no debe gastarse en hunters")),
     "el déficit se anuncia: el excedente no debe ir a hunters",
   );
-  // Sin excedente: 0 hunters y 0 críticos; TODO el margen fue a verificación.
+  // Sin excedente: 0 hunters; el crítico reservado sigue siendo obligatorio.
   assert.equal(fake.requests.filter((request) => request.role === "hunter").length, 0);
+  assert.equal(fake.requests.filter((request) => request.role === "critic").length, 1);
   const phase3 = fake.requests.filter((request) => request.phase === 3);
   assert.equal(phase3.length, 2, "se valida lo que cabe, en orden determinista");
   assert.deepEqual(
@@ -3535,4 +3536,31 @@ test("new candidates inside a wave grow the validation reserve before the next h
   assert.ok(reserveLog(logs,3)?.message.includes("concedida 3"));
   assert.equal(outcome.status,"incomplete","coverage not hunted must stay pending");
   assert.equal(outcome.unvalidatedFingerprints.length,0);
+});
+
+test("seven historical candidates cannot consume the only fresh hunter or reserved critic in Quick budget 12", async () => {
+  const fingerprints=Array.from({length:7},(_,i)=>"legacy-"+i);
+  const prior=registerPriorRun("prior-seven-historical-budget", fingerprints.map(fp=>priorCandidateUnit(fp,"ATTACK-CLASSES.md#BROKEN-ACCESS-CONTROL")));
+  const fake=createTestInvoker();
+  const {deps,logs}=makeDeps(fake.invoker);
+  const runId="orch-seven-historical-budget";
+  const outcome=await runSecurityAuditOrchestrator(deps,baseConfig({runId,priorRuns:[prior]}));
+  assert.deepEqual(getSecurityAuditRun(db,runId)?.budgetSpent,{recon:4,hunters:1,critics:1,verifiers:6});
+  assert.equal(fake.requests.length,12);
+  assert.ok(logs.some(e=>e.message.includes("Reserva histórica limitada")));
+  assert.equal(requestedFingerprint(fake.requests.find(r=>r.phase===3)!),"fp-1");
+  assert.equal(outcome.status,"incomplete");
+  assert.equal(outcome.incompleteReason,"validation_budget_exhausted");
+  assert.equal(outcome.unvalidatedFingerprints.length,2);
+});
+
+test("pending coverage and rejected verifier outputs get specific operational closure reasons", async () => {
+  const fake=createTestInvoker({onInvoke:r=>r.role==="hunter"?{output:JSON.stringify({unit_id:r.prompt.match(/Unidad de cobertura: (\S+)/)?.[1],covered_paths:[],uncovered:["src/api/handler.ts"],candidates:[]})}:{}});
+  const {deps}=makeDeps(fake.invoker);
+  const runId="orch-specific-coverage";
+  const outcome=await runSecurityAuditOrchestrator(deps,baseConfig({runId}));
+  assert.equal(outcome.status,"incomplete");
+  assert.equal(outcome.incompleteReason,"coverage_incomplete");
+  assert.equal(getSecurityAuditRun(db,runId)?.incompleteReason,"coverage_incomplete");
+  assert.match(readFileSync(resolveSecurityAuditRunDirectory(runId).paths["REPORT.md"],"utf8"),/coverage_incomplete/);
 });

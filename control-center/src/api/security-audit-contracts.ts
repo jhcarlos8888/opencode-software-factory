@@ -71,6 +71,8 @@ export const SECURITY_AUDIT_OPERATIONAL_INCOMPLETE_REASONS = [
   "cancelled_by_user",
   "deadline_exceeded",
   "execution_interrupted",
+  "candidate_validation_incomplete",
+  "coverage_incomplete",
 ] as const;
 
 /** Únicos motivos admitidos en `run_status: "incomplete"`. */
